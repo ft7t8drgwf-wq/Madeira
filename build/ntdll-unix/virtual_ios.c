@@ -4970,6 +4970,57 @@ void ios_mono_bridge_capture( uint64_t teb, uint64_t frame, uint64_t host_pc, ui
 }
 /* ========================== end ml648 MONO BRIDGE ========================= */
 
+/* madeira-bcd view-alias-drop: env.MADEIRA_VIEW_ALIAS_DROP = 1 (opt-in, per game).
+ * An anon RWX alias is cleared only when its pool range is handed out again or
+ * its process exits, so a SECTION view that is unmapped leaves its executable
+ * copy registered for the guest VA. Black Ops III (2026-10-19, 611924f) maps a
+ * pagefile section at 0x7032eb0000 (0x250000, made executable: a pool copy),
+ * unmaps it and maps a second view of 0xc0000 at the same address: the new
+ * view's exec request found the old alias ([alias-own] ml640 "keeping the pool
+ * dual-map"), so the guest kept running the first copy, still int3 padding
+ * (cc cc ...) where the second view had code, and died on 0x80000003. With the
+ * switch, deleting a non-image section view retires the aliases inside it, so
+ * the next view mapped there gets a copy of its own. Their pool ranges are left
+ * allocated (reclaimed at process exit). Same order as the handout purge:
+ * user_va_end first, then user_va, for the lock-free readers.
+ * (Named apart from ios_jit_anon_alias_retire_range below, which does the same
+ * for NtFreeVirtualMemory(MEM_RELEASE) of a private allocation, always on.) */
+static int ios_view_alias_drop_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_VIEW_ALIAS_DROP" );
+        on = e && e[0] == '1' && !e[1];
+    }
+    return on;
+}
+
+static void ios_jit_view_alias_retire_range( const void *base, size_t size )
+{
+    uintptr_t lo = (uintptr_t)base, hi = lo + size;
+    static int said;
+    int i;
+
+    if (!ios_view_alias_drop_on()) return;
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_jit_anon_alias_count; i++)
+    {
+        uintptr_t va = ios_jit_anon_aliases[i].user_va;
+        if (!va || va < lo || ios_jit_anon_aliases[i].user_va_end > hi) continue;
+        if (said++ < 16)
+            dprintf(2, "[view-alias-drop] section view %p+0x%lx unmapped: alias %p..%p rw=%p retired\n",
+                    base, (unsigned long)size, (void *)va, (void *)ios_jit_anon_aliases[i].user_va_end,
+                    (void *)ios_jit_anon_aliases[i].jit_rw_alias);
+        ios_jit_anon_aliases[i].user_va_end = 0;
+        __sync_synchronize();
+        ios_mono_alias_retire( va );
+        ios_jit_anon_aliases[i].user_va = 0;
+        if (ios_jit_anon_alias_live > 0) ios_jit_anon_alias_live--;
+    }
+    pthread_mutex_unlock( &ios_pool_lock );
+}
+
 int ios_jit_anon_alias_add(void *user_va, size_t size, void *jit_rw_alias)
 {
     int idx = -1, i;
@@ -14382,6 +14433,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
     if ((view->protect & SEC_IMAGE) && ios_jit_image_retire_enabled())
         ios_jit_retire_image( view->base, view->size );
     if (view->protect & SEC_IMAGE) ios_jit_note_image_unmapped( view->base, view->size );
+    else if (!is_view_valloc( view )) ios_jit_view_alias_retire_range( view->base, view->size );   /* madeira-bcd view-alias-drop */
     ios_swap_release_range( view->base, view->size, 0 );   /* ml1077 */
     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
     if (ios_retire_trace_armed) ios_retire_mark( "D1u\n" );   /* unmap_area done */
