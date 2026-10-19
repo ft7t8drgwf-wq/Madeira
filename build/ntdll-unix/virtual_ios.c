@@ -26615,6 +26615,24 @@ void virtual_init_user_shared_data(void)
         memcpy( data->NtSystemRoot, rootW, sizeof(rootW) );
     }
 
+    /* madeira-bcd: the same game also read Cookie and BootId ~4,000 times each,
+     * and both were zero. On Windows Cookie is a random per-boot value and BootId
+     * counts boots, so neither is ever zero; give them values of that shape.
+     * MADEIRA_KUSER_NATIVE_ARCH=9 also reports an AMD64 host instead of ARM64
+     * (diagnostic, off by default: protected code may take a Windows-on-ARM path
+     * when it sees 12). Nothing in Wine's PE side reads this field. */
+    {
+        const char *arch = getenv( "MADEIRA_KUSER_NATIVE_ARCH" );
+        data->Cookie = arc4random() | 1;
+        data->BootId = 7;
+        if (arch && *arch)
+        {
+            data->NativeProcessorArchitecture = (USHORT)atoi( arch );
+            ERR( "[kuser] NativeProcessorArchitecture=%u (MADEIRA_KUSER_NATIVE_ARCH)\n",
+                 data->NativeProcessorArchitecture );
+        }
+    }
+
 #ifdef WINE_IOS
     {
         /* ml1310: with MADEIRA_FEX_AVX=1 FEX runs AVX/AVX2 and its CPUID says so, but
