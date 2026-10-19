@@ -1636,7 +1636,11 @@ static void ios_jit_verify_copy( const char *src, const char *rx, size_t size,
     for (i = 0; i + 8 <= size; i += step)
     {
         uint64_t a, b;
-        memcpy( &a, src + i, 8 );
+        mach_vm_size_t got = 0;
+        /* madeira-bcd copy-readable: the source may hold pages that were never
+         * committed (ios_copy_guest_bytes left them zero); skip, never fault */
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(src + i), 8,
+                                    (mach_vm_address_t)&a, &got ) != KERN_SUCCESS || got != 8) continue;
         memcpy( &b, rx  + i, 8 );
         checked++;
         if (a != b)
@@ -17089,6 +17093,59 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
 }
 
 
+/* madeira-bcd copy-readable: copy guest bytes into the JIT pool without faulting.
+ * Black Ops III (2026-10-19, build 2cd6f36): after its unpacker made the exe RWX, an
+ * executable protect reached a memcpy in mprotect_exec whose source ran into pages
+ * that were reserved but never committed (a growing buffer at 0x7059f70000); the
+ * READ fault at 0x705a470000 happened on the host stack, the Mach handler could
+ * only deliver it "best-effort on guest stack", and the main thread sat in
+ * _platform_memmove for good while the game drew nothing. mach_vm_read_overwrite
+ * returns an error instead of faulting: a chunk that reads whole is copied, one
+ * that does not is retried page by page and its unreadable pages are left zero,
+ * as an uncommitted page reads on Windows-side bookkeeping. Returns the number of
+ * bytes that could not be read. */
+static size_t ios_copy_guest_bytes( void *dst, const void *src, size_t size )
+{
+    const size_t chunk = 1 << 20, pg = 0x1000;   /* 4 KB: exact on 4 KB and 16 KB pages */
+    size_t off = 0, bad = 0;
+
+    while (off < size)
+    {
+        size_t n = size - off < chunk ? size - off : chunk, p;
+        mach_vm_size_t got = 0;
+
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)((const char *)src + off), n,
+                                    (mach_vm_address_t)((char *)dst + off), &got ) == KERN_SUCCESS && got == n)
+        {
+            off += n;
+            continue;
+        }
+        for (p = 0; p < n; )
+        {
+            uintptr_t a = (uintptr_t)src + off + p;
+            size_t m = pg - (a & (pg - 1));
+            if (m > n - p) m = n - p;
+            got = 0;
+            if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)a, m,
+                                        (mach_vm_address_t)((char *)dst + off + p), &got ) != KERN_SUCCESS || got != m)
+            {
+                memset( (char *)dst + off + p, 0, m );
+                bad += m;
+            }
+            p += m;
+        }
+        off += n;
+    }
+    if (bad)
+    {
+        static int said;
+        if (said++ < 16)
+            dprintf( 2, "[copy-readable] %p+0x%lx: 0x%lx bytes unreadable (reserved, not committed?) left zero "
+                        "instead of faulting in mprotect_exec\n", src, (unsigned long)size, (unsigned long)bad );
+    }
+    return bad;
+}
+
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
 #ifdef WINE_IOS
@@ -18124,14 +18181,13 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                     const unsigned char *src = (const unsigned char *)base;
                     size_t i;
 
+                    memset( rw_dst, 0, alloc_size );
+                    ios_copy_guest_bytes( rw_dst, src, size );   /* madeira-bcd copy-readable */
                     for (i = 0; i < size; i++)
                     {
-                        ml634_pre_hash = (ml634_pre_hash ^ src[i]) * 1099511628211ull;
-                        if (src[i]) ml634_nonzero++;
+                        ml634_pre_hash = (ml634_pre_hash ^ (unsigned char)rw_dst[i]) * 1099511628211ull;
+                        if (rw_dst[i]) ml634_nonzero++;
                     }
-
-                    memset( rw_dst, 0, alloc_size );
-                    memcpy( rw_dst, src, size );
                     sys_icache_invalidate( rx_dst, alloc_size );
 
                     {
@@ -18383,7 +18439,7 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
              * This preserves ADRP-based PC-relative references between sections. */
             ios_jit_scan_nonexec( "pre-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
-            memcpy((char *)jit_rw_base + offset, image_base, image_size);
+            ios_copy_guest_bytes((char *)jit_rw_base + offset, image_base, image_size);   /* madeira-bcd copy-readable */
             ios_jit_scan_nonexec( "post-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
             sys_icache_invalidate((char *)jit_rx_base + offset, image_size);
