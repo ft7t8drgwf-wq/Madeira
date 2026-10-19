@@ -26594,6 +26594,27 @@ void virtual_init_user_shared_data(void)
     }
 
     init_shared_data_cpuinfo( data );
+
+    /* madeira-bcd: what wineboot.exe's create_user_shared_data() writes. The iOS
+     * prefix is pre-seeded and wineboot.exe never runs (run_wineboot), so these
+     * stayed zero for every guest: NtMajorVersion 0, NtBuildNumber 0, no
+     * NtSystemRoot. GetVersionEx reads the PEB and never noticed, but code that
+     * reads the page directly does: a protected game (The Adventures of Elliot)
+     * read NtMajorVersion ~10,000 times in four seconds ([kuser-read]) and then
+     * faulted on a pointer it had computed. The values are the ones the PEB
+     * carries (init_peb: Windows 10, build 19045), with the product type and
+     * suite mask of Wine's WIN10 entry (dlls/ntdll/version.c). */
+    {
+        static const WCHAR rootW[] = {'C',':','\\','w','i','n','d','o','w','s',0};
+        data->NtBuildNumber      = 19045;
+        data->NtProductType      = NtProductWinNt;   /* VER_NT_WORKSTATION */
+        data->ProductTypeIsValid = TRUE;
+        data->NtMajorVersion     = 10;
+        data->NtMinorVersion     = 0;
+        data->SuiteMask          = VER_SUITE_SINGLEUSERTS;
+        memcpy( data->NtSystemRoot, rootW, sizeof(rootW) );
+    }
+
 #ifdef WINE_IOS
     {
         /* ml1310: with MADEIRA_FEX_AVX=1 FEX runs AVX/AVX2 and its CPUID says so, but
