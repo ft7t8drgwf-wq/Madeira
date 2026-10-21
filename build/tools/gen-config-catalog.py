@@ -285,6 +285,15 @@ OVERLAY = {
                         "GTA V Enhanced its G-buffer in ~12. Opt-in: the second list's draws no longer wait for the "
                         "whole first pass, an ordering Direct3D 12 does not promise but a game might rely on. Read "
                         "once per game start; [perf] gpu-traffic lines show what it saves."},
+    "table-reuse": {"category": "Direct3D 12", "title": "Experiment: reuse a stage's argument tables",
+                "kind": "bool", "default": "0", "sources": ["madeira-d3d12/src/pe/madeira_d3d12.c"],
+                "note": "Default off. 1: a draw or dispatch binds the argument and constant-buffer tables its stage "
+                        "built last in the same command list when no root argument, root constant, root signature "
+                        "or descriptor heap that stage can see was set since, instead of building them again. Red "
+                        "Dead Redemption 2 builds ~5000 a frame, 3.5 ms of the submission thread's ~14 ms. Opt-in: "
+                        "a game that rewrote a descriptor between two such draws of one list (Direct3D 12 forbids "
+                        "it) would see the first value. Read once per game start; [perf] table-reuse lines count "
+                        "the tables whose inputs had not changed, on or off."},
     "rp-discard": {"category": "Direct3D 12", "title": "Experiment: no load after, no store before DiscardResource",
                 "kind": "bool", "default": "0", "sources": ["madeira-d3d12/src/pe/madeira_d3d12.c"],
                 "note": "Default off. 1: after a game discards a whole render target or depth buffer "

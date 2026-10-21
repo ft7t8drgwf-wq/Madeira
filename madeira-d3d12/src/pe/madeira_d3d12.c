@@ -624,6 +624,8 @@ static void mad_skip_at(LONG line) {
     }
 }
 static LONG g_cb_errors, g_cb_retired, g_null_cbv_bound, g_vis_fallback;
+static LONG g_tc_same, g_tc_built;   /* madeira-bcd table-reuse: tables whose inputs had not changed / tables built */
+static int g_table_reuse = -1;   /* madeira-bcd table-reuse, see mad_table_reuse_on */
 /* ml1109: sync census -- what the game does per frame and how long it waits for us */
 static LONGLONG g_perf_ecl_ticks, g_perf_present_ticks;   /* ml1119 */
 static int g_async_submit;   /* ml1120: defined with the worker below */
@@ -2031,8 +2033,15 @@ static ULONG STDMETHODCALLTYPE queue_Release(ID3D12CommandQueue *This) {
     return (ULONG)r;
 }
 /* ---- execution: replaying a list into Metal encoders -------------------- */
+/* madeira-bcd table-reuse: one built argument/constant-buffer table pair and
+ * what it was built from (see mad_air_build_tables_ex). */
+struct mad_tabc {
+    const void *airv, *root; UINT nair, cb_bind, arg_bind, arg_qwords; unsigned vis, g; UINT64 gen; int used;
+    obj_handle_t cbb, argb; UINT64 cbo, argo;
+};
 struct mad_exec {
     int fence_needed;
+    UINT64 tc_gen[3]; int tc_nocache; struct mad_tabc tc[8];   /* madeira-bcd table-reuse: vertex side, pixel, compute */
     obj_handle_t tind_buf; UINT64 tind_off;   /* madeira-bcd: this indirect tessellation draw's mesh dispatch arguments */
     struct mad_resource *wr[64]; unsigned nwr; int wr_all;   /* ml1116: written since the last fence wait (mode 3) */   /* ml1111: fence-chain = 2: a barrier (or list start) was seen since the last wait */
     struct mad_queue *q;
@@ -6538,6 +6547,12 @@ static void mad_rs_report(double presents) {
         pos += snprintf(buf + pos, sizeof buf - pos, " %s %.2f ms (%.0f)", g_rs_names[b], 1000.0 * (double)t / tf / np, n / np);
     }
     d3d12_log("%s\n", buf);
+    {   /* madeira-bcd table-reuse */
+        LONG same = InterlockedExchange(&g_tc_same, 0), built = InterlockedExchange(&g_tc_built, 0);
+        if (same || built)
+            d3d12_log("[perf] table-reuse per frame: %.0f argument tables whose inputs had not changed, %.0f built (madeira.cfg table-reuse = %d)\n",
+                      same / np, built / np, g_table_reuse > 0);
+    }
 }
 
 /* ---- madeira-bcd skin-check (diagnostic, opt-in) ------------------------------
@@ -7321,6 +7336,29 @@ static void mad_skin_present(UINT64 presents) {
               g_skin_full ? "every dispatch logged in the first two" : "only the dispatches that feed such draws are logged");
 }
 
+/* madeira-bcd table-reuse (default 0; opt-in): a draw or dispatch whose
+ * stage tables would come out exactly as the previous build of the same
+ * stage in this command list (no root argument, root constant, root signature
+ * or descriptor heap it can see has been set since) binds that table again
+ * instead of writing a new one. Red Dead Redemption 2 builds ~5000 tables a
+ * frame (3.5 ms of its ~14 ms replay on a throttled CPU). The descriptors are
+ * read when the table is built, as before; reuse keeps the values they had at
+ * that build, which Direct3D 12 already requires to stay unchanged until the
+ * list has run. [perf] table-reuse lines count both, on or off. */
+static int mad_table_reuse_on(void) {
+    if (g_table_reuse < 0) {
+        g_table_reuse = mad_cfg_int_pe("table-reuse", 0) ? 1 : 0;
+        if (g_table_reuse) d3d12_log("[madeira-d3d12] table-reuse = 1: a stage's argument tables are built again only when a root argument, root constant, root signature or heap it can see changed\n");
+    }
+    return g_table_reuse;
+}
+/* A graphics root parameter changed: the tables of the stages it is visible to
+ * are out of date (vertex side: everything but pixel-only parameters). */
+static void exec_tc_bump(struct mad_exec *e, unsigned index) {
+    unsigned v = e->rs && index < e->rs->nparams ? e->rs->params[index].visibility : MADEIRA_IR_VIS_ALL;
+    if (v != MADEIRA_IR_VIS_PIXEL) e->tc_gen[0]++;
+    if (v == MADEIRA_IR_VIS_ALL || v == MADEIRA_IR_VIS_PIXEL || v >= 32) e->tc_gen[1]++;
+}
 static int mad_air_build_tables_ex_body(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root,
                                    const UINT32 (*consts)[64], const struct mad_pso *pso,
                                    UINT cb_bind, UINT arg_bind, UINT arg_qwords, UINT nair,
@@ -7370,6 +7408,7 @@ static int mad_air_build_tables_ex_body(struct mad_exec *e, const struct mad_roo
             const char *why2 = "?";
             if (vis_mask == ~0u || !mad_air_resolve(e, rs, root, consts, rg, ~0u, &de, &direct, &why2)) goto bad;
             InterlockedIncrement(&g_vis_fallback);
+            e->tc_nocache = 1;   /* madeira-bcd table-reuse: it read a parameter of another stage */
         }
         if (e->sk && e->sk->tab_on) mad_skin_tok(e, rg, &de, direct);   /* madeira-bcd skin-check */
 
@@ -7456,8 +7495,38 @@ static int mad_air_build_tables_ex(struct mad_exec *e, const struct mad_rootsig 
                                    obj_handle_t *arg_buf, UINT64 *arg_off) {
     /* madeira-bcd: replay split "of which argument tables" */
     UINT64 t0 = g_replay_split > 0 ? mad_tick() : 0;
-    int ok = mad_air_build_tables_ex_body(e, rs, root, consts, pso, cb_bind, arg_bind, arg_qwords, nair, airv, vis_mask,
-                                          cb_buf, cb_off, arg_buf, arg_off);
+    struct mad_tabc *tc = NULL;
+    unsigned g = 0;
+    int ok;
+    /* madeira-bcd table-reuse: a table is a pure function of the stage's ranges,
+     * the root signature, root arguments and constants and the bound heaps, all
+     * of which bump tc_gen when they change (exec_tc_bump); the ring slots it
+     * was written to live as long as this list's replay. */
+    if (!(e->sk && e->sk->tab_on) && !g_dump_tables &&
+        ((root == e->root && consts == (const UINT32 (*)[64])e->consts) ||
+         (root == e->croot && consts == (const UINT32 (*)[64])e->cconsts))) {
+        g = root == e->croot ? 2 : vis_mask == ((1u << MADEIRA_IR_VIS_ALL) | (1u << MADEIRA_IR_VIS_PIXEL)) ? 1 : 0;
+        tc = &e->tc[((ULONG_PTR)airv >> 4) & 7];
+        if (tc->used && tc->airv == airv && tc->root == root && tc->nair == nair && tc->vis == vis_mask && tc->g == g &&
+            tc->gen == e->tc_gen[g] && tc->cb_bind == cb_bind && tc->arg_bind == arg_bind && tc->arg_qwords == arg_qwords) {
+            InterlockedIncrement(&g_tc_same);
+            if (mad_table_reuse_on()) {
+                *cb_buf = tc->cbb; *cb_off = tc->cbo; *arg_buf = tc->argb; *arg_off = tc->argo;
+                if (t0) mad_rs_step(RS_TABLES, &t0);
+                return 1;
+            }
+        }
+    }
+    e->tc_nocache = 0;
+    ok = mad_air_build_tables_ex_body(e, rs, root, consts, pso, cb_bind, arg_bind, arg_qwords, nair, airv, vis_mask,
+                                      cb_buf, cb_off, arg_buf, arg_off);
+    InterlockedIncrement(&g_tc_built);
+    if (tc) {
+        tc->used = ok && !e->tc_nocache;
+        tc->airv = airv; tc->root = root; tc->nair = nair; tc->vis = vis_mask; tc->g = g; tc->gen = e->tc_gen[g];
+        tc->cb_bind = cb_bind; tc->arg_bind = arg_bind; tc->arg_qwords = arg_qwords;
+        tc->cbb = *cb_buf; tc->cbo = *cb_off; tc->argb = *arg_buf; tc->argo = *arg_off;
+    }
     if (t0) mad_rs_step(RS_TABLES, &t0);
     return ok;
 }
@@ -9876,19 +9945,22 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
         case MC_PSO: if (c->u.pso && c->u.pso->is_compute) e.cpso = c->u.pso; else e.pso = c->u.pso;
             if (g_sd_state > 0 && g_pso_first && c->u.pso && !c->u.pso->first_used) mad_pso_first(c->u.pso);   /* madeira-bcd: pso-first-use */
             break;
-        case MC_CROOTSIG: e.crs = c->u.rootsig; memset(e.lat_va[1], 0, sizeof e.lat_va[1]); break;   /* madeira-bcd static-cbv: latches are per signature */
-        case MC_CROOT: if (c->u.root.index < MAD_ROOT_PARAM_MAX) e.croot[c->u.root.index] = c->u.root.value; break;
+        case MC_CROOTSIG: e.crs = c->u.rootsig; memset(e.lat_va[1], 0, sizeof e.lat_va[1]); e.tc_gen[2]++; break;   /* madeira-bcd static-cbv: latches are per signature */
+        case MC_CROOT: if (c->u.root.index < MAD_ROOT_PARAM_MAX) e.croot[c->u.root.index] = c->u.root.value; e.tc_gen[2]++; break;
         case MC_CROOT_CONST:
+            e.tc_gen[2]++;   /* madeira-bcd table-reuse */
             if (c->u.rconst.index < MAD_ROOT_PARAM_MAX && c->u.rconst.dst + c->u.rconst.n <= 64)
                 memcpy(&e.cconsts[c->u.rconst.index][c->u.rconst.dst], &l->cdata[c->u.rconst.data], c->u.rconst.n * 4);
             break;
         case MC_ROOT:
+            exec_tc_bump(&e, c->u.root.index);   /* madeira-bcd table-reuse */
             if (c->u.root.index < MAD_ROOT_PARAM_MAX) {
                 e.root[c->u.root.index] = c->u.root.value;
                 if (c->u.root.index + 1 > e.nroot) e.nroot = c->u.root.index + 1;
             }
             break;
-        case MC_HEAPS: if (c->u.heaps.srv) e.srv = c->u.heaps.srv; if (c->u.heaps.smp) e.smp = c->u.heaps.smp; break;
+        case MC_HEAPS: if (c->u.heaps.srv) e.srv = c->u.heaps.srv; if (c->u.heaps.smp) e.smp = c->u.heaps.smp;
+            e.tc_gen[0]++; e.tc_gen[1]++; e.tc_gen[2]++; break;   /* madeira-bcd table-reuse */
         case MC_VP: e.vp = c->u.vp; e.has_vp = 1; break;
         case MC_SCISSOR: e.sc = c->u.scissor; e.has_sc = 1; break;
         case MC_TOPO: e.topo = c->u.topo; break;
@@ -9920,9 +9992,10 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
             if (c->u.clear.nrect) exec_clear_rects(&e, l, c);   /* madeira-bcd clear-rects */
             else exec_add_clear(&e, c->u.clear.res, &c->u.clear.v, NULL, c->u.clear.depth, 1, c->u.clear.stencil, c->u.clear.flags);
             break;
-        case MC_ROOTSIG: e.rs = c->u.rootsig; memset(e.lat_va[0], 0, sizeof e.lat_va[0]); break;   /* madeira-bcd static-cbv: latches are per signature */
-        case MC_CBV_LATCH: mad_scbv_replay(&e, c); break;   /* madeira-bcd static-cbv */
+        case MC_ROOTSIG: e.rs = c->u.rootsig; memset(e.lat_va[0], 0, sizeof e.lat_va[0]); e.tc_gen[0]++; e.tc_gen[1]++; break;   /* madeira-bcd static-cbv: latches are per signature */
+        case MC_CBV_LATCH: mad_scbv_replay(&e, c); e.tc_gen[0]++; e.tc_gen[1]++; e.tc_gen[2]++; break;   /* madeira-bcd static-cbv */
         case MC_ROOT_CONST:
+            exec_tc_bump(&e, c->u.rconst.index);   /* madeira-bcd table-reuse */
             if (c->u.rconst.index < MAD_ROOT_PARAM_MAX && c->u.rconst.dst + c->u.rconst.n <= 64)
                 memcpy(&e.consts[c->u.rconst.index][c->u.rconst.dst], &l->cdata[c->u.rconst.data], c->u.rconst.n * 4);
             break;
