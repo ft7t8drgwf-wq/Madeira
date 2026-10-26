@@ -206,12 +206,12 @@ jobs:
       - name: DXMT unix side + combined archive
         run: |
           set -eu
-          # airconv embeds its AIR helper shaders as headers (research/dxmt/src/airconv/meson.build)
+          # airconv embeds its AIR helper shaders as headers (dxmt/src/airconv/meson.build)
           mkdir -p build/dxmt-ios/shader-headers
           for sh in air_msad air_samplepos air_tessellation; do
             (cd build/dxmt-ios/shader-headers \
              && xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
-                  -o $sh.air -c ../../../research/dxmt/src/airconv/shaders/$sh.metal \
+                  -o $sh.air -c ../../../dxmt/src/airconv/shaders/$sh.metal \
              && xxd -n $sh -i $sh.air $sh.h)
           done
           build/dxmt-ios/build.sh
