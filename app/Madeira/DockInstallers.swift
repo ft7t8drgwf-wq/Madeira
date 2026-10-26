@@ -46,25 +46,27 @@ enum SteamInstallScripts {
 
     /// The keys a run is recorded under. A 32-bit reader sees HKLM\Software through
     /// Wow6432Node in a 64-bit prefix; the plain key covers a 64-bit reader.
-    static func keys(_ run: SteamInstallRun) -> [String] {
-        let lower = run.key.lowercased()
-        guard run.hive == .machine, lower.hasPrefix("software\\"), !lower.hasPrefix("software\\wow6432node\\") else { return [run.key] }
-        return [run.key, "Software\\Wow6432Node\\" + run.key.dropFirst("software\\".count)]
+    static func keys(_ run: SteamInstallRun) -> [String] { keys(run.hive, run.key) }
+
+    static func keys(_ hive: SteamInstallRun.Hive, _ key: String) -> [String] {
+        let lower = key.lowercased()
+        guard hive == .machine, lower.hasPrefix("software\\"), !lower.hasPrefix("software\\wow6432node\\") else { return [key] }
+        return [key, "Software\\Wow6432Node\\" + key.dropFirst("software\\".count)]
     }
 
-    /// Install scripts: .vdf files with a "Run Process" section in `folder` and up to
-    /// `depth` levels below it. Symbolic links are not followed.
-    static func scripts(folder: URL, depth: Int = 1) -> [URL] {
+    /// Install scripts: .vdf files with a "Run Process" section (or the text `containing`) in
+    /// `folder` and up to `depth` levels below it. Symbolic links are not followed.
+    static func scripts(folder: URL, depth: Int = 1, containing: String = "run process") -> [URL] {
         var found: [URL] = []
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
         guard let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { return [] }
         for item in items.sorted(by: { $0.path < $1.path }).prefix(500) {
             guard let values = try? item.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { continue }
             if values.isDirectory == true {
-                if depth > 0 { found += scripts(folder: item, depth: depth - 1) }
+                if depth > 0 { found += scripts(folder: item, depth: depth - 1, containing: containing) }
             } else if item.pathExtension.lowercased() == "vdf", (values.fileSize ?? .max) <= maxScriptBytes,
                       let contents = try? Data(contentsOf: item),
-                      String(decoding: contents, as: UTF8.self).range(of: "run process", options: .caseInsensitive) != nil {
+                      String(decoding: contents, as: UTF8.self).range(of: containing, options: .caseInsensitive) != nil {
                 found.append(item)
             }
         }
@@ -87,6 +89,38 @@ enum SteamInstallScripts {
     /// text. Scripts repeat the "Run Process" key, one section per installer, so a
     /// key-value reader that keeps the last copy of a repeated key would miss entries.
     static func entries(script: Data, appID: Int? = nil) -> [(SteamInstallRun, [String: String])] {
+        var result: [(SteamInstallRun, [String: String])] = []
+        var path: [String] = []          // keys of the open sections, lowercased
+        var pending: String?             // a key waiting for its value or section
+        var fields: [String: String] = [:]
+        for (text, quoted) in tokens(script: script) {
+            if path.count > 32 { break }
+            if !quoted && text == "{" {
+                path.append(pending?.lowercased() ?? ""); pending = nil
+                if path.count >= 2, path[path.count - 2] == "run process" { fields = [:] }
+            } else if !quoted && text == "}" {
+                // An entry section closes: path is [..., "run process", <entry>].
+                if path.count >= 2, path[path.count - 2] == "run process", let name = path.last,
+                   let key = runKey(fields, appID: appID), let (hive, sub) = hive(key), !sub.isEmpty {
+                    let minimum = fields["minimumhasrunvalue"].flatMap { UInt32($0.trimmingCharacters(in: .whitespaces)) } ?? 1
+                    let run = SteamInstallRun(name: name, hive: hive, key: sub, value: max(1, minimum))
+                    if !result.contains(where: { $0.0 == run }) { result.append((run, fields)) }
+                }
+                if !path.isEmpty { path.removeLast() }
+                pending = nil
+            } else if let key = pending {
+                if path.count >= 2, path[path.count - 2] == "run process" { fields[key.lowercased()] = text }
+                pending = nil
+            } else {
+                pending = text
+            }
+        }
+        return result
+    }
+
+    /// The script's tokens (at most 200,000): quoted or bare text, and unquoted braces.
+    /// "//" starts a comment; \" and \\ are escapes inside quotes.
+    static func tokens(script: Data) -> [(text: String, quoted: Bool)] {
         var bytes = Array(script.prefix(maxScriptBytes))
         if bytes.starts(with: [0xef, 0xbb, 0xbf]) { bytes.removeFirst(3) }
         var position = 0
@@ -117,34 +151,8 @@ enum SteamInstallScripts {
             while position < bytes.count, bytes[position] > 32, bytes[position] != 123, bytes[position] != 125 { value.append(bytes[position]); position += 1 }
             return (String(decoding: value, as: UTF8.self), true)
         }
-        var result: [(SteamInstallRun, [String: String])] = []
-        var path: [String] = []          // keys of the open sections, lowercased
-        var pending: String?             // a key waiting for its value or section
-        var fields: [String: String] = [:]
-        var tokens = 0
-        while let (text, quoted) = token() {
-            tokens += 1
-            if tokens > 200_000 || path.count > 32 { break }
-            if !quoted && text == "{" {
-                path.append(pending?.lowercased() ?? ""); pending = nil
-                if path.count >= 2, path[path.count - 2] == "run process" { fields = [:] }
-            } else if !quoted && text == "}" {
-                // An entry section closes: path is [..., "run process", <entry>].
-                if path.count >= 2, path[path.count - 2] == "run process", let name = path.last,
-                   let key = runKey(fields, appID: appID), let (hive, sub) = hive(key), !sub.isEmpty {
-                    let minimum = fields["minimumhasrunvalue"].flatMap { UInt32($0.trimmingCharacters(in: .whitespaces)) } ?? 1
-                    let run = SteamInstallRun(name: name, hive: hive, key: sub, value: max(1, minimum))
-                    if !result.contains(where: { $0.0 == run }) { result.append((run, fields)) }
-                }
-                if !path.isEmpty { path.removeLast() }
-                pending = nil
-            } else if let key = pending {
-                if path.count >= 2, path[path.count - 2] == "run process" { fields[key.lowercased()] = text }
-                pending = nil
-            } else {
-                pending = text
-            }
-        }
+        var result: [(text: String, quoted: Bool)] = []
+        while result.count < 200_000, let next = token() { result.append(next) }
         return result
     }
 
@@ -224,13 +232,18 @@ enum SteamInstallScripts {
     /// runs and writes the files it changed. Returns the total of values changed.
     private static func rewrite(_ runs: [SteamInstallRun], prefix: URL,
                                 _ change: ([SteamInstallRun], String) -> (String, Int)) throws -> Int {
+        try rewrite(hives: Set(runs.map(\.hive)), prefix: prefix) { hive, text in change(runs.filter { $0.hive == hive }, text) }
+    }
+
+    /// Applies `change` to the hive files of `hives` (system.reg, user.reg) and writes the
+    /// files it changed, keeping a .madeira-bak copy once. Returns the total changed.
+    static func rewrite(hives: Set<SteamInstallRun.Hive>, prefix: URL,
+                        _ change: (SteamInstallRun.Hive, String) -> (String, Int)) throws -> Int {
         var total = 0
-        for (hive, file) in [(SteamInstallRun.Hive.machine, "system.reg"), (.user, "user.reg")] {
-            let selected = runs.filter { $0.hive == hive }
-            guard !selected.isEmpty else { continue }
+        for (hive, file) in [(SteamInstallRun.Hive.machine, "system.reg"), (.user, "user.reg")] where hives.contains(hive) {
             let registry = prefix.appendingPathComponent(file)
             guard let contents = try? Data(contentsOf: registry), !contents.isEmpty else { continue }   // a prefix not seeded yet
-            let (updated, changed) = change(selected, String(decoding: contents, as: UTF8.self))
+            let (updated, changed) = change(hive, String(decoding: contents, as: UTF8.self))
             guard changed > 0 else { continue }
             let backup = registry.appendingPathExtension("madeira-bak")
             if !FileManager.default.fileExists(atPath: backup.path) { try? FileManager.default.copyItem(at: registry, to: backup) }
@@ -244,6 +257,174 @@ enum SteamInstallScripts {
     private static func dword(_ line: String) -> UInt32? {
         guard let range = line.range(of: "=dword:", options: .caseInsensitive) else { return nil }
         return UInt32(line[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines), radix: 16)
+    }
+}
+
+// MARK: - Install-script registry values
+
+/// One value of an install script's "Registry" section. Valve's desktop client writes
+/// these when it runs the script, and games read them to find their own folder: Fallout:
+/// New Vegas's launcher, for one, reports the game as not installed without
+/// HKLM\Software\Bethesda Softworks\FalloutNV "Installed Path".
+struct SteamInstallValue: Equatable, Sendable {
+    enum Content: Equatable, Sendable { case string(String), dword(UInt32) }
+    var hive: SteamInstallRun.Hive
+    var key: String      // under the hive
+    var name: String     // "" is the key's default value
+    var data: Content
+    var followsInstall: Bool   // a string made from %INSTALLDIR%: rewritten when it differs
+}
+
+/// Reading the "Registry" section and writing its values into the prefix's .reg files,
+/// only while no session runs. A value the prefix already has stays as it is (a game or
+/// its launcher may have changed it), except a string made from %INSTALLDIR%, which
+/// follows the game's folder.
+enum SteamInstallRegistry {
+    /// Every value of the script's "Registry" section. Sections are
+    /// "InstallScript" > "Registry" > <HKEY_... key> > "string" | "dword", and values sit
+    /// there directly or in a language block ("english", ...): the block for `language`
+    /// is used, else "english", else the first one.
+    static func values(script: Data, installDir: String, language: String? = nil) -> [SteamInstallValue] {
+        struct Found { var hive: SteamInstallRun.Hive; var key: String; var type: String; var block: String?; var name: String; var text: String }
+        var found: [Found] = []
+        var path: [String] = []          // open sections, original case
+        var pending: String?
+        for (text, quoted) in SteamInstallScripts.tokens(script: script) {
+            if path.count > 32 { break }
+            if !quoted && text == "{" {
+                path.append(pending ?? ""); pending = nil
+            } else if !quoted && text == "}" {
+                if !path.isEmpty { path.removeLast() }
+                pending = nil
+            } else if let name = pending {
+                pending = nil
+                let lower = path.map { $0.lowercased() }
+                guard lower.count == 4 || lower.count == 5, lower[0] == "installscript", lower[1] == "registry",
+                      lower[3] == "string" || lower[3] == "dword",
+                      let (hive, key) = SteamInstallScripts.hive(path[2]), !key.isEmpty else { continue }
+                found.append(Found(hive: hive, key: key, type: lower[3], block: lower.count == 5 ? lower[4] : nil, name: name, text: text))
+            } else {
+                pending = text
+            }
+        }
+        var result: [SteamInstallValue] = []
+        for item in found {
+            if let block = item.block {
+                let blocks = found.filter { $0.hive == item.hive && $0.key.lowercased() == item.key.lowercased() && $0.type == item.type && $0.block != nil }
+                let names = blocks.compactMap(\.block)
+                let chosen = [language?.lowercased(), "english"].compactMap { $0 }.first(where: { names.contains($0) }) ?? names.first
+                guard block == chosen else { continue }
+            }
+            let data: SteamInstallValue.Content
+            var follows = false
+            if item.type == "dword" {
+                let digits = item.text.trimmingCharacters(in: .whitespaces)
+                guard let number = digits.lowercased().hasPrefix("0x") ? UInt32(digits.dropFirst(2), radix: 16) : UInt32(digits) else { continue }
+                data = .dword(number)
+            } else {
+                follows = item.text.range(of: "%INSTALLDIR%", options: .caseInsensitive) != nil
+                let text = DockInstallScripts.expand(item.text, installDir: installDir, path: false)
+                // Another %NAME% the client would fill in: unknown here, so the value is left out.
+                guard text.range(of: "%[A-Za-z_]+%", options: .regularExpression) == nil else { continue }
+                data = .string(text)
+            }
+            let value = SteamInstallValue(hive: item.hive, key: item.key, name: item.name, data: data, followsInstall: follows)
+            // A later copy of the same value replaces an earlier one, as in the client's reader.
+            result.removeAll { $0.hive == value.hive && $0.key.lowercased() == value.key.lowercased() && $0.name.lowercased() == value.name.lowercased() }
+            result.append(value)
+        }
+        return result
+    }
+
+    /// Steam's interface language as the prefix records it (HKCU\Software\Valve\Steam
+    /// "Language"), nil when absent.
+    static func language(userRegistry text: String) -> String? {
+        let lines = text.components(separatedBy: "\n")
+        guard let start = lines.firstIndex(where: { $0.lowercased().hasPrefix("[software\\\\valve\\\\steam]") }) else { return nil }
+        for line in lines[(start + 1)...] {
+            if line.hasPrefix("[") { break }
+            if line.lowercased().hasPrefix("\"language\"=\""), line.hasSuffix("\"") {
+                let value = line.dropFirst("\"language\"=\"".count).dropLast()
+                return value.isEmpty || value.contains("\\") ? nil : String(value)
+            }
+        }
+        return nil
+    }
+
+    /// A Wine .reg line for the value.
+    static func line(_ value: SteamInstallValue) -> String {
+        let name = value.name.isEmpty ? "@" : "\"" + Self.text(value.name, quote: "\"") + "\""
+        switch value.data {
+        case .string(let string): return name + "=\"" + Self.text(string, quote: "\"") + "\""
+        case .dword(let number): return name + String(format: "=dword:%08x", number)
+        }
+    }
+
+    /// Text the way wineserver writes it (server/unicode.c, dump_strW): non-ASCII as \x
+    /// escapes of UTF-16 units, control characters as C or octal escapes, and a backslash
+    /// before \ and the quote characters.
+    static func text(_ string: String, quote: String) -> String {
+        let units = Array(string.utf16)
+        let escapes = Array(".......abtnvfr.............e....".utf8)
+        var out = ""
+        for (index, unit) in units.enumerated() {
+            let next = index + 1 < units.count ? units[index + 1] : nil
+            if unit > 127 {
+                let hexNext = next.map { $0 < 128 && Character(Unicode.Scalar(UInt8($0))).isHexDigit } ?? false
+                out += hexNext ? String(format: "\\x%04x", UInt32(unit)) : String(format: "\\x%x", UInt32(unit))
+            } else if unit < 32 {
+                if escapes[Int(unit)] != UInt8(ascii: ".") { out += "\\" + String(Character(Unicode.Scalar(escapes[Int(unit)]))) }
+                else if let next, next >= 48, next <= 55 { out += String(format: "\\%03o", UInt32(unit)) }
+                else { out += String(format: "\\%o", UInt32(unit)) }
+            } else {
+                let character = Character(Unicode.Scalar(UInt8(unit)))
+                if character == "\\" || quote.contains(character) { out += "\\" }
+                out.append(character)
+            }
+        }
+        return out
+    }
+
+    /// The .reg text with the values written (both registry views of HKLM\Software), and
+    /// how many lines changed. Missing values are added; a present one is replaced only
+    /// when it follows %INSTALLDIR% and differs.
+    static func write(_ values: [SteamInstallValue], in text: String, now: Int) -> (text: String, changed: Int) {
+        var lines = text.components(separatedBy: "\n")
+        var changed = 0
+        for value in values {
+            let wanted = Self.line(value)
+            let namePrefix = value.name.isEmpty ? "@=" : "\"" + Self.text(value.name, quote: "\"").lowercased() + "\"="
+            for key in SteamInstallScripts.keys(value.hive, value.key) {
+                let header = "[" + Self.text(key, quote: "[]") + "]"
+                if let start = lines.firstIndex(where: { $0.lowercased().hasPrefix(header.lowercased()) }) {
+                    var end = start + 1
+                    while end < lines.count, !lines[end].hasPrefix("[") { end += 1 }
+                    if let index = (start + 1..<end).first(where: { lines[$0].lowercased().hasPrefix(namePrefix) }) {
+                        guard value.followsInstall, lines[index] != wanted else { continue }
+                        lines[index] = wanted
+                    } else {
+                        var at = end
+                        while at > start + 1, lines[at - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { at -= 1 }
+                        lines.insert(wanted, at: at)
+                    }
+                } else {
+                    while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lines.removeLast() }
+                    lines += ["", header + " \(now)", wanted, ""]
+                }
+                changed += 1
+            }
+        }
+        return (lines.joined(separator: "\n"), changed)
+    }
+
+    /// Writes the values into the prefix's system.reg and user.reg. Returns the number of
+    /// lines changed. Only while no session runs.
+    @discardableResult
+    static func write(_ values: [SteamInstallValue], prefix: URL) throws -> Int {
+        let now = Int(Date().timeIntervalSince1970)
+        return try SteamInstallScripts.rewrite(hives: Set(values.map(\.hive)), prefix: prefix) { hive, text in
+            Self.write(values.filter { $0.hive == hive }, in: text, now: now)
+        }
     }
 }
 
@@ -654,6 +835,32 @@ enum DockInstallers {
         return (result, scripts)
     }
 
+    /// The "Registry" values of the game's own install scripts (its folder, one level down),
+    /// written into the prefix the way Valve's client writes them when it runs the script.
+    /// Only while no session runs.
+    static func writeRegistry(_ game: DockGame, drive: URL, prefix: URL) {
+        let root = drive.appendingPathComponent(game.library + "/common/" + game.installDir, isDirectory: true)
+        guard inside(root, drive: drive) else { return }
+        let user = (try? String(contentsOf: prefix.appendingPathComponent("user.reg"), encoding: .utf8)) ?? ""
+        let language = SteamInstallRegistry.language(userRegistry: user)
+        var values: [SteamInstallValue] = []
+        for file in SteamInstallScripts.scripts(folder: root, depth: 1, containing: "\"registry\"") {
+            guard let contents = try? Data(contentsOf: file) else { continue }
+            values += SteamInstallRegistry.values(script: contents, installDir: game.windowsInstallPath, language: language)
+        }
+        guard !values.isEmpty else { return }
+        let keys = values.reduce(into: [String]()) { list, value in
+            let key = (value.hive == .machine ? "HKLM\\" : "HKCU\\") + value.key
+            if !list.contains(key) { list.append(key) }
+        }
+        do {
+            let changed = try SteamInstallRegistry.write(values, prefix: prefix)
+            LogStore.shared.log("[dock-installers] app=\(game.id) registry values=\(values.count) written=\(changed) keys=" + keys.joined(separator: "; "))
+        } catch {
+            LogStore.shared.log("[dock-installers] app=\(game.id) registry not written: \(error.localizedDescription)", level: .error)
+        }
+    }
+
     /// The number of install-script programs a game has (the Dock sheet's list).
     nonisolated static func programCount(_ game: DockGame, drive: URL) -> Int {
         enabled ? found(game, drive: drive).processes.count : 0
@@ -870,6 +1077,9 @@ enum DockInstallers {
                                                 standIn: Bundle.main.resourceURL?.appendingPathComponent("arm64ec-windows/vulkan-1.dll")) {
             LogStore.shared.log("[dock-installers] C:\\" + moved.replacingOccurrences(of: "/", with: "\\") +
                                 " (an installer's Vulkan loader) moved to Documents/madeira-reset-backup; this session links Madeira's stand-in")
+        }
+        if flag("MADEIRA_DOCK_INSTALL_REGISTRY") {   // 0: the install script's registry values are not written
+            writeRegistry(game, drive: drive, prefix: prefix)
         }
         guard enabled else {
             LogStore.shared.log("[dock-installers] app=\(app) off (MADEIRA_DOCK_INSTALLERS=0)"); return
