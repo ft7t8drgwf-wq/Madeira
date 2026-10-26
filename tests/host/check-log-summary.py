@@ -91,6 +91,28 @@ assert(spaced.game == "FalloutNV.exe")
 assert(LogSummary.text(spaced, source: "test").contains("The game started Steam and closed itself"))
 assert(!text.contains("started Steam and closed itself"))
 
+// A game's crash address, Wine's fixme notes left out, and Madeira closing after iPadOS refused a program's code.
+let faulted = LogSummary.facts(lines: [
+    "[srv-own] new_thread tid=0020 pid=0010 requester=0000",
+    "0020:err:process:NtCreateUserProcess NtCreateUserProcess: image=L\"C:\\\\Games\\\\FalloutNV.exe\" cmdline=L\"\"",
+    "[srv-own] new_thread tid=0108 pid=0028 requester=0020",
+    "0100:fixme:rawinput:NtUserRegisterRawInputDevices Unhandled flags 0x230 for device 0.",
+    "wine: Unhandled page fault on write access to 00000000 at address 00B57AA9 (thread 0108), starting debugger...",
+    "0108:err:process:NtTerminateProcess NtTerminateProcess(handle=0xffffffffffffffff, exit_code=0xc000001d) syscalls=0",
+    "[exec-recover] pg=0x13daa4000 fault=0x13daa5d9c mprotect_rx=-1(errno=13) reuse-cancel=0 retry#1 pool-rx",
+    "[redeliv] terminating process rev=ml465",
+    "[12:00:00.000] [ERR] [dock-start-program] app=22380 launcher=FalloutNVLauncher.exe program=Nope.exe failed: Nope.exe is not in the game's folder",
+])
+let faultedText = LogSummary.text(faulted, source: "test")
+for needle in ["FalloutNV.exe crashed: page fault on write access to 00000000 at address 00B57AA9.",
+               "Madeira closed: iPadOS refused to run a program's code.", "Game details > Steam > Steam starts",
+               "Windows error 0xC000001D (an instruction this CPU lacks: try Game details > Compatibility > AVX and AVX2)",
+               "Steam starts: the chosen program was not put in place (Nope.exe is not in the game's folder)"] {
+    if !faultedText.contains(needle) { print(faultedText); fatalError("missing: \(needle)") }
+}
+assert(!faultedText.contains("Unhandled exception") && !faultedText.contains("fixme"))
+assert(!text.contains("Madeira closed:") && !text.contains("crashed:"))
+
 // A launch with no session leaves the last summary alone; a file is read across 1 MB chunks.
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let empty = dir.appendingPathComponent("empty.txt"), logFile = dir.appendingPathComponent("madeira-log.txt")
