@@ -13,7 +13,7 @@ Swift fixture (macOS CI with --require-swift; skipped without a compiler): the p
 of GameIniFiles.swift above "MARK: Views" on synthetic files.
 """
 from pathlib import Path
-import argparse, shutil, subprocess, sys, tempfile
+import argparse, re, shutil, subprocess, sys, tempfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--require-swift', action='store_true')
@@ -38,7 +38,9 @@ project = (app.parent / 'Madeira.xcodeproj/project.pbxproj').read_text(encoding=
 check('case .iniFiles: return "Settings files"' in library and
       'case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)' in library,
       'Game details has a Settings files page')
-check('[.library, .iniFiles, .advanced]' in library, 'for every game but the Desktop')
+more = re.search(r'let more: \[Page\] = entry\.desktop == true \? \[(.*?)\] : \[(.*?)\]', library)
+desktop_pages, game_pages = (more.group(1), more.group(2)) if more else ('', '')
+check('.iniFiles' in game_pages and '.iniFiles' not in desktop_pages, 'for every game but the Desktop')
 check('Label("Add .ini file", systemImage: "plus")' in source and '.sheet(' not in source,
       'the page offers "Add .ini file", pushed rather than a sheet that closed by itself')
 check(sum('GameIniFiles.swift' in line for line in project.splitlines()) == 4,

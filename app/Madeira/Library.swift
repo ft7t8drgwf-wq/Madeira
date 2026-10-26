@@ -3368,7 +3368,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, library, iniFiles, advanced
+        case display, controls, launch, compatibility, steam, cloud, library, iniFiles, dllOverrides, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3379,6 +3379,7 @@ struct LibraryDetail: View {
             case .cloud: return "Steam Cloud"
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
+            case .dllOverrides: return "DLL overrides"
             case .advanced: return "Advanced"
             }
         }
@@ -3392,6 +3393,7 @@ struct LibraryDetail: View {
             case .cloud: return "icloud"
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
+            case .dllOverrides: return "puzzlepiece.extension"
             case .advanced: return "wrench.and.screwdriver"
             }
         }
@@ -3403,7 +3405,7 @@ struct LibraryDetail: View {
         let launch = entry.usesLaunchOptions || (entry.desktop != true && entry.steamAppID == nil)
         let steam: [Page] = entry.steamAppID == nil ? [] : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
-        let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .advanced]
+        let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
     }
     /// The value a page's row shows, when one setting sums it up.
@@ -3417,6 +3419,9 @@ struct LibraryDetail: View {
         case .iniFiles:
             let count = GameIniFiles.files(entry.windowsPath).count
             return count == 0 ? nil : count == 1 ? "1 file" : "\(count) files"
+        case .dllOverrides:
+            let count = DllOverrides.read(config: bcd.configText).entries.count
+            return count == 0 ? nil : "\(count)"
         default: return nil
         }
     }
@@ -3432,6 +3437,7 @@ struct LibraryDetail: View {
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
+            case .dllOverrides: GameDllOverridesSection(windowsPath: entry.windowsPath, gameFolder: overridesGameFolder) { reloadBCD() }
             case .advanced: advancedPage
             }
         }
@@ -3650,6 +3656,14 @@ struct LibraryDetail: View {
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: LibraryModel.drive.appendingPathComponent(entry.relativePath).path, isDirectory: &isDirectory)
         return GameIniFiles.gameFolder(relativePath: entry.relativePath, isDirectory: exists && isDirectory.boolValue)
+    }
+
+    /// The game's folder under drive_c, where DLL overrides lists the game's DLLs.
+    private var overridesGameFolder: String {
+        guard entry.desktop != true else { return "" }
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: LibraryModel.drive.appendingPathComponent(entry.relativePath).path, isDirectory: &isDirectory)
+        return DllOverrides.gameFolder(relativePath: entry.relativePath, isDirectory: exists && isDirectory.boolValue)
     }
 
     @ViewBuilder private var advancedPage: some View {
