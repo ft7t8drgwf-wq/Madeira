@@ -8,6 +8,7 @@ set -eu
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
 DXMT_SRC="$REPO_ROOT/dxmt/src"
+"$REPO_ROOT/build/dxmt-patches/apply.sh"
 DXMT_ROOT="$REPO_ROOT/dxmt"
 LLVM_SRC="$REPO_ROOT/toolchains/llvm-project/llvm"
 LLVM_BUILD="$REPO_ROOT/toolchains/llvm-ios-build"
