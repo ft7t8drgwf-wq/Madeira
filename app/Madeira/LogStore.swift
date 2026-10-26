@@ -95,6 +95,19 @@ final class LogStore: ObservableObject {
         if FileManager.default.fileExists(atPath: prevLogURL.path) {
             LogSummary.writeLater(from: prevLogURL, source: "madeira-log.prev.txt (the previous run)")
         }
+        // Madeira swiped away from the app switcher ends without returning to the
+        // library: summarize the session so far whenever Madeira goes to the background.
+        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                               object: nil, queue: .main) { [logFileURL] _ in
+            var task = UIBackgroundTaskIdentifier.invalid
+            task = UIApplication.shared.beginBackgroundTask(withName: "madeira-summary") {
+                UIApplication.shared.endBackgroundTask(task)
+            }
+            DispatchQueue.global(qos: .utility).async {
+                LogSummary.write(from: logFileURL, source: "madeira-log.txt (this session, up to when Madeira went to the background)")
+                DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(task) }
+            }
+        }
 
         // Start batch flush timer on main thread. Interval depends on uiPaused.
         DispatchQueue.main.async {
