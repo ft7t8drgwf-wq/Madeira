@@ -55,6 +55,12 @@ enum LogSummary {
         var program: String?
     }
 
+    struct Crash: Equatable {
+        var what: String      // "page fault on write access to 00000000"
+        var address: String   // "00B57AA9"
+        var program: String?
+    }
+
     /// Everything the summary says, gathered in one pass over the log.
     struct Facts {
         var sawSession = false
@@ -66,6 +72,14 @@ enum LogSummary {
         var missing: [Missing] = []
         var harmlessMissing = 0
         var unhandled: [String] = []
+        /// Wine's "Unhandled page fault ..." lines: where a program crashed.
+        var crashes: [Crash] = []
+        /// iPadOS refused to make a program's code executable (mprotect errno 13) and
+        /// Madeira ended the process it could not recover.
+        var execRefused = false
+        /// Madeira Dock's "Steam starts" could not put the chosen program in place.
+        var startProgramFailed: String?
+        var madeiraEnded = false
         var exitReport: String?
         var quitAsked: String?
         var handedToSteam = false
@@ -181,8 +195,23 @@ enum LogSummary {
                     facts.missing.append(Missing(name: name, status: status, program: program))
                 }
             }
-            if line.contains("Unhandled "), facts.unhandled.count < 3 {
+            if let r = line.range(of: "wine: Unhandled "), let at = line.range(of: " at address ", range: r.upperBound..<line.endIndex) {
+                // "wine: Unhandled page fault on write access to 00000000 at address 00B57AA9 (thread 0108), ..."
+                let address = String(line[at.upperBound...].prefix { $0.isHexDigit })
+                let program = line.range(of: "(thread ").flatMap { t -> String? in
+                    let tid = String(line[t.upperBound...].prefix { $0.isHexDigit })
+                    return threadPid[tid].flatMap { pidProcess[$0] }.map { facts.processes[$0].image }
+                }
+                let crash = Crash(what: String(line[r.upperBound..<at.lowerBound]).lowercased(), address: address, program: program)
+                if facts.crashes.count < 3, !facts.crashes.contains(crash) { facts.crashes.append(crash) }
+            } else if line.contains("Unhandled "), !line.contains(":fixme:"), facts.unhandled.count < 3 {
+                // Wine's "fixme: ... Unhandled flags" notes are not exceptions.
                 facts.unhandled.append(String(line.prefix(200)))
+            }
+            if line.hasPrefix("[exec-recover] "), line.contains("mprotect_rx=-1(errno=13)") { facts.execRefused = true }
+            if line.hasPrefix("[redeliv] terminating process") { facts.madeiraEnded = true }
+            if let r = line.range(of: "[dock-start-program] "), let f = line.range(of: " failed: ", range: r.upperBound..<line.endIndex) {
+                facts.startProgramFailed = String(line[f.upperBound...].prefix(160))
             }
             if let r = line.range(of: "[exit-report] status=") { facts.exitReport = String(line[r.upperBound...]) }
             if line.contains("[frontend] graceful close requested"), facts.quitAsked == nil {
@@ -256,6 +285,19 @@ enum LogSummary {
         if f.handedToSteam, f.dock.isEmpty {
             problems.append("The game started Steam and closed itself: it only runs when Steam starts it. Start it with Madeira Dock (Game details > Steam > Start with).")
         }
+        for crash in f.crashes {
+            problems.append("\(crash.program ?? "A program") crashed: \(crash.what) at address \(crash.address)."
+                            + " Searching the address with the game's name often finds a known fix.")
+        }
+        if f.madeiraEnded, f.execRefused {
+            let started = f.processes.last.map { " The last program started was \($0.image)." } ?? ""
+            problems.append("Madeira closed: iPadOS refused to run a program's code. Madeira can start only one 32-bit program"
+                            + " per session, so this usually means a launcher started the game.\(started)"
+                            + " For a Steam game, pick the game's own program in Game details > Steam > Steam starts.")
+        }
+        if let why = f.startProgramFailed {
+            problems.append("Steam starts: the chosen program was not put in place (\(why)), so Steam started its own.")
+        }
         problems += f.unhandled.map { "Unhandled exception: \($0)" }
         if let words = dockWords(f.dock) { problems.append("Madeira Dock: \(words)") }
         out.append("")
@@ -269,7 +311,8 @@ enum LogSummary {
             for p in ends {
                 let code = p.exitCode!
                 let words = code == 0 ? "exit code 0 (normal)" : code >= 0xC0000000
-                    ? String(format: "Windows error 0x%08X", code) : "exit code \(code)"
+                    ? String(format: "Windows error 0x%08X", code) + (LogSummary.errorMeanings[code].map { " (\($0))" } ?? "")
+                    : "exit code \(code)"
                 out.append("  \(p.image) ended itself with \(words)" + (p.endedAt.map { " around \($0)" } ?? ""))
             }
             if let asked = f.quitAsked { out.append("  Quit game was pressed at \(asked)") }
@@ -334,6 +377,19 @@ enum LogSummary {
     }
 
     // MARK: Helpers
+
+    /// What the common Windows error codes mean, in plain words.
+    static let errorMeanings: [UInt32: String] = [
+        0xC0000005: "a crash: the program used memory it may not",
+        0xC000001D: "an instruction this CPU lacks: try Game details > Compatibility > AVX and AVX2",
+        0xC0000135: "a DLL it needs is missing: see Missing DLLs",
+        0xC0000142: "a DLL failed to start",
+        0xC0000409: "the program stopped itself after finding damaged memory",
+        0xC0000374: "damaged memory (heap corruption)",
+        0xC00000FD: "a stack overflow",
+        0xC0000017: "out of memory",
+        0xC000041D: "a crash inside a window callback",
+    ]
 
     static func mb(_ bytes: UInt64) -> UInt64 { (bytes + (1 << 19)) >> 20 }
 
