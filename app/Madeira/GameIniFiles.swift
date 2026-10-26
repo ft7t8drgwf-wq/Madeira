@@ -1,0 +1,405 @@
+//
+//  GameIniFiles.swift
+//  Madeira
+//
+//  Game details › Settings files: a game's own .ini files (Documents/My Games,
+//  the game's folder), added per game and edited in the app, section by section,
+//  without the Files app. A file keeps its line endings, encoding, comments and
+//  order: only the values that change are rewritten. A game that rewrote its
+//  file since it was saved here (New Vegas rewrites sD3DDevice after a crash) is
+//  noted when the file opens.
+//
+//  Everything above "MARK: Views" is Foundation only:
+//  tests/host/check-ini-editor.py compiles it with a test harness.
+//
+
+import Foundation
+import SwiftUI
+
+/// An .ini file's text, its settings found by line. Setting a value rewrites
+/// that line only; every other byte stays as it was.
+struct IniDocument: Equatable {
+    struct Setting: Equatable, Identifiable {
+        let line: Int
+        let section: String
+        let key: String
+        var value: String
+        var id: Int { line }
+    }
+
+    private(set) var lines: [String]
+    private(set) var settings: [Setting]
+    /// "\r\n" or "\n", as the file had it.
+    let newline: String
+    let endsWithNewline: Bool
+
+    init(text: String) {
+        // Swift reads "\r\n" as one Character, so the ends are checked by scalar.
+        newline = text.range(of: "\r\n") != nil ? "\r\n" : "\n"
+        let scalars = text.unicodeScalars
+        endsWithNewline = scalars.last == "\n"
+        var body = text
+        if endsWithNewline {
+            let crlf = scalars.count >= 2 && scalars[scalars.index(scalars.endIndex, offsetBy: -2)] == "\r"
+            body = String(String.UnicodeScalarView(scalars.dropLast(newline == "\r\n" && crlf ? 2 : 1)))
+        }
+        lines = body.isEmpty && endsWithNewline ? [] : body.components(separatedBy: newline)
+        settings = []
+        var section = ""
+        for (i, raw) in lines.enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix(";") || line.hasPrefix("#") { continue }
+            if line.hasPrefix("["), let close = line.firstIndex(of: "]") {
+                section = String(line[line.index(after: line.startIndex)..<close]).trimmingCharacters(in: .whitespaces)
+                continue
+            }
+            guard let parts = Self.split(raw) else { continue }
+            settings.append(Setting(line: i, section: section, key: parts.key, value: parts.value))
+        }
+    }
+
+    /// "  iSize W = 1280 " -> key "iSize W", value "1280", and where the value starts.
+    private static func split(_ raw: String) -> (key: String, value: String, valueStart: String.Index)? {
+        guard let eq = raw.firstIndex(of: "=") else { return nil }
+        let key = raw[..<eq].trimmingCharacters(in: .whitespaces)
+        guard !key.isEmpty else { return nil }
+        var start = raw.index(after: eq)
+        while start < raw.endIndex, raw[start] == " " || raw[start] == "\t" { start = raw.index(after: start) }
+        var value = String(raw[start...])
+        while let last = value.last, last == " " || last == "\t" { value.removeLast() }
+        return (key, value, start)
+    }
+
+    /// The sections in file order, each with its settings.
+    var sections: [(name: String, settings: [Setting])] {
+        var order: [String] = []
+        var grouped: [String: [Setting]] = [:]
+        for s in settings {
+            if grouped[s.section] == nil { order.append(s.section) }
+            grouped[s.section, default: []].append(s)
+        }
+        return order.map { ($0, grouped[$0] ?? []) }
+    }
+
+    /// Sets the setting on `line` to `value`; the text before the value is kept.
+    mutating func set(line: Int, to value: String) {
+        guard let i = settings.firstIndex(where: { $0.line == line }), let parts = Self.split(lines[line]) else { return }
+        let raw = lines[line]
+        var tail = ""
+        if let last = raw.last, last == " " || last == "\t" {
+            tail = String(raw.reversed().prefix { $0 == " " || $0 == "\t" }.reversed())
+        }
+        lines[line] = String(raw[..<parts.valueStart]) + value + (value.isEmpty ? "" : tail)
+        settings[i].value = value
+    }
+
+    /// The value of `key` in `section` (case-insensitive), the first one in the file.
+    func value(section: String, key: String) -> String? {
+        settings.first { $0.section.caseInsensitiveCompare(section) == .orderedSame && $0.key.caseInsensitiveCompare(key) == .orderedSame }?.value
+    }
+
+    var text: String { lines.joined(separator: newline) + (endsWithNewline ? newline : "") }
+}
+
+/// A file's bytes as text, and back in the same encoding (UTF-8, with or
+/// without a byte order mark, else Windows Latin 1, which every byte decodes as).
+struct IniFileText: Equatable {
+    var text: String
+    let bom: Bool
+    let utf8: Bool
+
+    init?(data: Data) {
+        let marker = Data([0xEF, 0xBB, 0xBF])
+        bom = data.starts(with: marker)
+        let body = bom ? data.dropFirst(3) : data[...]
+        if let s = String(data: Data(body), encoding: .utf8) { text = s; utf8 = true }
+        else if let s = String(data: Data(body), encoding: .windowsCP1252) ?? String(data: Data(body), encoding: .isoLatin1) { text = s; utf8 = false }
+        else { return nil }
+    }
+
+    func data(_ text: String) -> Data? {
+        guard let body = text.data(using: utf8 ? .utf8 : .windowsCP1252) ?? text.data(using: .isoLatin1) else { return nil }
+        return (bom ? Data([0xEF, 0xBB, 0xBF]) : Data()) + body
+    }
+}
+
+/// The .ini files each game has added, by the game's Windows path, as paths
+/// under drive_c ("users/steamuser/Documents/My Games/FalloutNV/Fallout.ini").
+enum GameIniFiles {
+    static let listKey = "madeira.library.iniFiles"
+    static let savedKey = "madeira.library.iniSaved"
+
+    static func files(_ windowsPath: String, defaults: UserDefaults = .standard) -> [String] {
+        (defaults.dictionary(forKey: listKey) as? [String: [String]])?[windowsPath.lowercased()] ?? []
+    }
+
+    static func setFiles(_ files: [String], for windowsPath: String, defaults: UserDefaults = .standard) {
+        var all = (defaults.dictionary(forKey: listKey) as? [String: [String]]) ?? [:]
+        all[windowsPath.lowercased()] = files.isEmpty ? nil : files
+        defaults.set(all, forKey: listKey)
+    }
+
+    static func add(_ file: String, for windowsPath: String, defaults: UserDefaults = .standard) {
+        var list = files(windowsPath, defaults: defaults)
+        guard !list.contains(where: { $0.caseInsensitiveCompare(file) == .orderedSame }) else { return }
+        list.append(file)
+        setFiles(list, for: windowsPath, defaults: defaults)
+    }
+
+    static func remove(_ file: String, for windowsPath: String, defaults: UserDefaults = .standard) {
+        setFiles(files(windowsPath, defaults: defaults).filter { $0 != file }, for: windowsPath, defaults: defaults)
+    }
+
+    /// A short name for a file: from "My Games" on, or from the game's folder on.
+    static func label(_ file: String, gameFolder: String?) -> String {
+        let parts = file.split(separator: "/").map(String.init)
+        if let i = parts.firstIndex(where: { $0.caseInsensitiveCompare("My Games") == .orderedSame }) {
+            return parts[i...].joined(separator: "\\")
+        }
+        if let folder = gameFolder?.trimmingCharacters(in: CharacterSet(charactersIn: "/")), !folder.isEmpty,
+           file.lowercased().hasPrefix(folder.lowercased() + "/") {
+            let name = folder.split(separator: "/").last.map(String.init) ?? folder
+            return name + "\\" + file.dropFirst(folder.count + 1).replacingOccurrences(of: "/", with: "\\")
+        }
+        return file.replacingOccurrences(of: "/", with: "\\")
+    }
+
+    /// The game's folder under drive_c: a Steam game's install folder, else the
+    /// program's folder. `relativePath` is LibraryEntry.relativePath.
+    static func gameFolder(relativePath: String, isDirectory: Bool) -> String {
+        if isDirectory { return relativePath }
+        return relativePath.split(separator: "/").dropLast().joined(separator: "/")
+    }
+
+    /// The .ini files a game is likely to use, under drive_c: its own folder (five
+    /// levels down) and every user's Documents/My Games. At most `limit`.
+    static func candidates(drive: URL, gameFolder: String, limit: Int = 400) -> [String] {
+        var found: [String] = []
+        var seen = Set<String>()
+        func scan(_ folder: URL, depth: Int) {
+            guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey],
+                                                              options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return }
+            for case let url as URL in walker {
+                if found.count >= limit { return }
+                if walker.level > depth { walker.skipDescendants(); continue }
+                guard url.pathExtension.lowercased() == "ini" else { continue }
+                let path = url.resolvingSymlinksInPath().path
+                guard path.hasPrefix(drive.path + "/") else { continue }
+                let relative = String(path.dropFirst(drive.path.count + 1))
+                if seen.insert(relative.lowercased()).inserted { found.append(relative) }
+            }
+        }
+        let users = drive.appendingPathComponent("users", isDirectory: true)
+        for user in ((try? FileManager.default.contentsOfDirectory(atPath: users.path)) ?? []).sorted() {
+            let games = users.appendingPathComponent(user).appendingPathComponent("Documents/My Games", isDirectory: true)
+            if FileManager.default.fileExists(atPath: games.path) { scan(games, depth: 3) }
+        }
+        if !gameFolder.isEmpty { scan(drive.appendingPathComponent(gameFolder, isDirectory: true), depth: 5) }
+        return found
+    }
+
+    /// A short fingerprint of a file's bytes (FNV-1a), to notice a game rewriting it.
+    static func fingerprint(_ data: Data) -> String {
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in data { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return String(h, radix: 16)
+    }
+
+    static func savedFingerprint(_ file: String, defaults: UserDefaults = .standard) -> String? {
+        (defaults.dictionary(forKey: savedKey) as? [String: String])?[file.lowercased()]
+    }
+
+    static func setSavedFingerprint(_ value: String, for file: String, defaults: UserDefaults = .standard) {
+        var all = (defaults.dictionary(forKey: savedKey) as? [String: String]) ?? [:]
+        all[file.lowercased()] = value
+        defaults.set(all, forKey: savedKey)
+    }
+
+    /// Is this a 0/1 switch? Bethesda's names say so: bUseWaterShader.
+    static func isSwitch(key: String, value: String) -> Bool {
+        guard value == "0" || value == "1", key.count > 1, key.first == "b" else { return false }
+        return key.dropFirst().first?.isUppercase == true
+    }
+}
+
+// MARK: Views
+
+/// Game details › Settings files: the game's added .ini files, and "Add .ini file".
+struct GameIniFilesSection: View {
+    let windowsPath: String
+    let gameFolder: String
+    @State private var files: [String] = []
+    @State private var adding = false
+
+    var body: some View {
+        Section {
+            ForEach(files, id: \.self) { file in
+                NavigationLink {
+                    IniFileEditor(file: file, title: (file as NSString).lastPathComponent)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text((file as NSString).lastPathComponent)
+                        Text(GameIniFiles.label(file, gameFolder: gameFolder)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                }
+            }
+            .onDelete { offsets in
+                for i in offsets { GameIniFiles.remove(files[i], for: windowsPath) }
+                files = GameIniFiles.files(windowsPath)
+            }
+            Button("Add .ini file", systemImage: "plus") { adding = true }
+        } footer: {
+            Text("A game's own settings files, like Fallout.ini or FalloutPrefs.ini. Changes are saved into the file; close the game first. Swipe left to take a file off this list (the file stays).")
+        }
+        .onAppear { files = GameIniFiles.files(windowsPath) }
+        .sheet(isPresented: $adding) {
+            IniFilePicker(gameFolder: gameFolder, added: Set(files.map { $0.lowercased() })) { file in
+                GameIniFiles.add(file, for: windowsPath)
+                files = GameIniFiles.files(windowsPath)
+            }
+        }
+    }
+}
+
+/// The .ini files under the game's folder and Documents/My Games, to add one.
+struct IniFilePicker: View {
+    let gameFolder: String
+    let added: Set<String>
+    let pick: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var found: [String]?
+    @State private var query = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let found {
+                    let shown = query.isEmpty ? found : found.filter { $0.localizedCaseInsensitiveContains(query) }
+                    if shown.isEmpty {
+                        Text(found.isEmpty ? "No .ini files in the game's folder or Documents › My Games yet. A game often writes its files the first time it runs." : "No file matches.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(shown, id: \.self) { file in
+                        Button {
+                            pick(file); dismiss()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text((file as NSString).lastPathComponent).foregroundStyle(.primary)
+                                    Text(GameIniFiles.label(file, gameFolder: gameFolder)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                Spacer()
+                                if added.contains(file.lowercased()) { Image(systemName: "checkmark").foregroundStyle(.secondary) }
+                            }
+                        }
+                        .disabled(added.contains(file.lowercased()))
+                    }
+                } else {
+                    HStack { ProgressView(); Text("Looking for .ini files").foregroundStyle(.secondary) }
+                }
+            }
+            .searchable(text: $query, prompt: "File name")
+            .navigationTitle("Add .ini file").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .task {
+                let folder = gameFolder, drive = LibraryModel.drive
+                let list = await Task.detached(priority: .userInitiated) { GameIniFiles.candidates(drive: drive, gameFolder: folder) }.value
+                found = list
+            }
+        }
+    }
+}
+
+/// One .ini file, section by section: each setting's value can be changed;
+/// Save writes only the changed lines.
+struct IniFileEditor: View {
+    let file: String
+    let title: String
+    @State private var original: Data?
+    @State private var encoding: IniFileText?
+    @State private var document: IniDocument?
+    @State private var changed = false
+    @State private var query = ""
+    @State private var note: String?
+    @State private var error: String?
+
+    private var url: URL { LibraryModel.drive.appendingPathComponent(file) }
+
+    var body: some View {
+        Form {
+            if let note { Section { Label(note, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } }
+            if let error { Section { Text(error).foregroundStyle(.red) } }
+            if let document {
+                if document.settings.isEmpty { Section { Text("This file has no settings (key = value lines).").foregroundStyle(.secondary) } }
+                ForEach(document.sections, id: \.name) { group in
+                    let rows = query.isEmpty ? group.settings : group.settings.filter { $0.key.localizedCaseInsensitiveContains(query) || group.name.localizedCaseInsensitiveContains(query) }
+                    if !rows.isEmpty {
+                        Section(group.name.isEmpty ? "Settings" : "[\(group.name)]") {
+                            ForEach(rows) { setting in row(setting) }
+                        }
+                    }
+                }
+            } else if error == nil {
+                ProgressView()
+            }
+        }
+        .searchable(text: $query, prompt: "Setting or section")
+        .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(!changed) }
+        }
+        .onAppear { if document == nil { load() } }
+    }
+
+    @ViewBuilder private func row(_ setting: IniDocument.Setting) -> some View {
+        if GameIniFiles.isSwitch(key: setting.key, value: setting.value) {
+            Toggle(isOn: Binding(get: { setting.value == "1" }, set: { update(setting.line, $0 ? "1" : "0") })) {
+                Text(setting.key).font(.callout.monospaced())
+            }
+        } else {
+            LabeledContent {
+                TextField("", text: Binding(get: { setting.value }, set: { update(setting.line, $0) }))
+                    .multilineTextAlignment(.trailing).font(.callout.monospaced())
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+            } label: {
+                Text(setting.key).font(.callout.monospaced())
+            }
+        }
+    }
+
+    private func update(_ line: Int, _ value: String) {
+        guard document?.settings.first(where: { $0.line == line })?.value != value else { return }
+        document?.set(line: line, to: value)
+        changed = true
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: url), let decoded = IniFileText(data: data) else {
+            error = "This file could not be read. It may have been moved or deleted."
+            return
+        }
+        original = data; encoding = decoded
+        document = IniDocument(text: decoded.text)
+        changed = false
+        if let saved = GameIniFiles.savedFingerprint(file), saved != GameIniFiles.fingerprint(data) {
+            note = "The game changed this file after it was last saved here. Check your changes are still set."
+        }
+    }
+
+    private func save() {
+        guard let document, let encoding, let out = encoding.data(document.text) else { return }
+        // A game running (or another app) may have written it since it opened here.
+        if let now = try? Data(contentsOf: url), now != original {
+            error = "The file changed while it was open here, so nothing was saved. Go back and open it again."
+            return
+        }
+        do {
+            try out.write(to: url, options: .atomic)
+            original = out; changed = false; error = nil; note = nil
+            GameIniFiles.setSavedFingerprint(GameIniFiles.fingerprint(out), for: file)
+            LogStore.shared.log("[ini-editor] saved \(file)")
+        } catch {
+            self.error = "Not saved: \(error.localizedDescription)"
+        }
+    }
+}
