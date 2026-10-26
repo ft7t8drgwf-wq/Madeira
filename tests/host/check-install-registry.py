@@ -223,10 +223,12 @@ let notScript = """
         setenv("MADEIRA_DOCK_INSTALL_REGISTRY", "0", 1)
         setenv("MADEIRA_DOCK_INSTALLERS", "0", 1)
         DockInstallers.prepare(game, drive: drive, prefix: prefix, has32Bit: true, hasMsiexec: true, fusionSource: nil)
-        require(try String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8) == base, "MADEIRA_DOCK_INSTALL_REGISTRY=0 writes nothing")
+        let untouched = try String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8)
+        require(untouched == base, "MADEIRA_DOCK_INSTALL_REGISTRY=0 writes nothing")
         unsetenv("MADEIRA_DOCK_INSTALL_REGISTRY")
         DockInstallers.prepare(game, drive: drive, prefix: prefix, has32Bit: true, hasMsiexec: true, fusionSource: nil)
-        require(try String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8).contains("FalloutNV"),
+        let written = try String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8)
+        require(written.contains("FalloutNV"),
                 "prepare() writes them by default, even with the installers off")
 
         if failures > 0 { print("FAILURES: \(failures)"); exit(1) }
