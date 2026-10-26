@@ -37,11 +37,15 @@ env:
 jobs:
   # The 32-bit (i386) Windows farm WoW64 sessions load (docs/WOW64.md, "Building").
   # It is not tracked and takes hours, so it is cached by the pins it is built from.
-  i386:
-    runs-on: macos-26
-    timeout-minutes: 360
+  # Whether the cache has it is looked up on Linux: a Mac is asked for only to build
+  # it, so a cached farm costs no wait for a second macOS runner (macOS 26 runners
+  # were out of capacity for hours on 2026-10-26).
+  i386-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       key: ${{ steps.key.outputs.key }}
+      hit: ${{ steps.lookup.outputs.cache-hit }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,10 +53,26 @@ jobs:
       - id: key
         run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh', 'build/dxmt-patches/**') }}" >> "$GITHUB_OUTPUT"
 
+      - id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: app/Madeira/i386-windows
+          lookup-only: true
+
+  i386:
+    needs: i386-key
+    if: needs.i386-key.outputs.hit != 'true'
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - id: cache
         uses: actions/cache@v4
         with:
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ needs.i386-key.outputs.key }}
           path: app/Madeira/i386-windows
 
       - name: Build the 32-bit (i386) Windows DLLs
@@ -78,7 +98,9 @@ jobs:
         run: tail -150 wine/build-i386/madeira-i386-build.log || true
 
   build:
-    needs: i386
+    needs: [ i386-key, i386 ]
+    # i386 is skipped when the cache already has the farm.
+    if: ${{ !cancelled() && needs.i386-key.result == 'success' && (needs.i386.result == 'success' || needs.i386.result == 'skipped') }}
     runs-on: macos-26
     timeout-minutes: 360
 
@@ -110,7 +132,7 @@ jobs:
       - name: Restore the 32-bit (i386) Windows DLLs
         uses: actions/cache/restore@v4
         with:
-          key: ${{ needs.i386.outputs.key }}
+          key: ${{ needs.i386-key.outputs.key }}
           fail-on-cache-miss: true
           path: app/Madeira/i386-windows
 
