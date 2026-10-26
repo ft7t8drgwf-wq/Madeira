@@ -348,7 +348,7 @@ jobs:
             SYMROOT="$PWD/app/build" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
-            DEVELOPMENT_TEAM="" | tail -n 300
+            DEVELOPMENT_TEAM="" | tee "$RUNNER_TEMP/xcodebuild.log" | tail -n 300
 
       - name: Package IPA
         run: |
@@ -371,6 +371,10 @@ jobs:
       - name: Print compiler errors
         if: failure()
         run: |
+          # Swift errors scroll out of the step's last 300 lines; print them here.
+          if [ -f "$RUNNER_TEMP/xcodebuild.log" ]; then
+            echo "::group::Swift errors"; grep -E -A3 '(\.swift:[0-9]+:[0-9]+: error:)' "$RUNNER_TEMP/xcodebuild.log" | head -n 120; echo "::endgroup::"
+          fi
           for f in build/*/obj/*.err build/*/obj/err-*.txt; do
             [ -s "$f" ] || continue
             echo "::group::$f"; head -n 40 "$f"; echo "::endgroup::"
