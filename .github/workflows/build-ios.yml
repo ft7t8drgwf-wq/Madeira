@@ -298,6 +298,7 @@ jobs:
           python3 tests/host/check-jit-pool-meter.py
           python3 tests/host/check-harmless-warnings.py
           python3 tests/host/check-install-registry.py
+          python3 tests/host/check-dock-start-program.py
 
       - name: Host check for the starting screen (does not block the IPA)
         continue-on-error: true
