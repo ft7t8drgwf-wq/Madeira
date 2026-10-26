@@ -300,7 +300,6 @@ struct GameIniFilesSection: View {
     let windowsPath: String
     let gameFolder: String
     @State private var files: [String] = []
-    @State private var adding = false
 
     var body: some View {
         Section {
@@ -318,17 +317,20 @@ struct GameIniFilesSection: View {
                 for i in offsets { GameIniFiles.remove(files[i], for: windowsPath) }
                 files = GameIniFiles.files(windowsPath)
             }
-            Button("Add .ini file", systemImage: "plus") { adding = true }
+            // Pushed, not a sheet: a sheet hung on a row of this Form closed by itself
+            // when the page redrew (Cameron, iPhone, 2026-10-26).
+            NavigationLink {
+                IniFilePicker(gameFolder: gameFolder, added: Set(files.map { $0.lowercased() })) { file in
+                    GameIniFiles.add(file, for: windowsPath)
+                    files = GameIniFiles.files(windowsPath)
+                }
+            } label: {
+                Label("Add .ini file", systemImage: "plus")
+            }
         } footer: {
             Text("A game's own settings files, like Fallout.ini or FalloutPrefs.ini. Changes are saved into the file; close the game first. Swipe left to take a file off this list (the file stays).")
         }
         .onAppear { files = GameIniFiles.files(windowsPath) }
-        .sheet(isPresented: $adding) {
-            IniFilePicker(gameFolder: gameFolder, added: Set(files.map { $0.lowercased() })) { file in
-                GameIniFiles.add(file, for: windowsPath)
-                files = GameIniFiles.files(windowsPath)
-            }
-        }
     }
 }
 
@@ -342,41 +344,39 @@ struct IniFilePicker: View {
     @State private var query = ""
 
     var body: some View {
-        NavigationStack {
-            List {
-                if let found {
-                    let shown = query.isEmpty ? found : found.filter { $0.localizedCaseInsensitiveContains(query) }
-                    if shown.isEmpty {
-                        Text(found.isEmpty ? "No .ini files in the game's folder or Documents › My Games yet. A game often writes its files the first time it runs." : "No file matches.")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(shown, id: \.self) { file in
-                        Button {
-                            pick(file); dismiss()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text((file as NSString).lastPathComponent).foregroundStyle(.primary)
-                                    Text(GameIniFiles.label(file, gameFolder: gameFolder)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                }
-                                Spacer()
-                                if added.contains(file.lowercased()) { Image(systemName: "checkmark").foregroundStyle(.secondary) }
-                            }
-                        }
-                        .disabled(added.contains(file.lowercased()))
-                    }
-                } else {
-                    HStack { ProgressView(); Text("Looking for .ini files").foregroundStyle(.secondary) }
+        List {
+            if let found {
+                let shown = query.isEmpty ? found : found.filter { $0.localizedCaseInsensitiveContains(query) }
+                if shown.isEmpty {
+                    Text(found.isEmpty ? "No .ini files in the game's folder or Documents › My Games yet. A game often writes its files the first time it runs." : "No file matches.")
+                        .foregroundStyle(.secondary)
                 }
+                ForEach(shown, id: \.self) { file in
+                    Button {
+                        pick(file); dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text((file as NSString).lastPathComponent).foregroundStyle(.primary)
+                                Text(GameIniFiles.label(file, gameFolder: gameFolder)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            Spacer()
+                            if added.contains(file.lowercased()) { Image(systemName: "checkmark").foregroundStyle(.secondary) }
+                        }
+                    }
+                    .disabled(added.contains(file.lowercased()))
+                }
+            } else {
+                HStack { ProgressView(); Text("Looking for .ini files").foregroundStyle(.secondary) }
             }
-            .searchable(text: $query, prompt: "File name")
-            .navigationTitle("Add .ini file").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-            .task {
-                let folder = gameFolder, drive = LibraryModel.drive
-                let list = await Task.detached(priority: .userInitiated) { GameIniFiles.candidates(drive: drive, gameFolder: folder) }.value
-                found = list
-            }
+        }
+        .searchable(text: $query, prompt: "File name")
+        .navigationTitle("Add .ini file").navigationBarTitleDisplayMode(.inline)
+        .task {
+            guard found == nil else { return }
+            let folder = gameFolder, drive = LibraryModel.drive
+            let list = await Task.detached(priority: .userInitiated) { GameIniFiles.candidates(drive: drive, gameFolder: folder) }.value
+            found = list
         }
     }
 }
