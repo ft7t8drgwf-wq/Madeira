@@ -323,7 +323,11 @@ enum SteamInstallRegistry {
                 data = .dword(number)
             } else {
                 follows = item.text.range(of: "%INSTALLDIR%", options: .caseInsensitive) != nil
-                let text = DockInstallScripts.expand(item.text, installDir: installDir, path: false)
+                // The client's %INSTALLDIR% ends in a backslash ("...\Fallout New Vegas\" on
+                // Windows), and games append file names to it: New Vegas's launcher needs it.
+                let folder = installDir.hasSuffix("\\") ? installDir : installDir + "\\"
+                let text = item.text.replacingOccurrences(of: "%INSTALLDIR%\\", with: folder, options: .caseInsensitive)
+                    .replacingOccurrences(of: "%INSTALLDIR%", with: folder, options: .caseInsensitive)
                 // Another %NAME% the client would fill in: unknown here, so the value is left out.
                 guard text.range(of: "%[A-Za-z_]+%", options: .regularExpression) == nil else { continue }
                 data = .string(text)

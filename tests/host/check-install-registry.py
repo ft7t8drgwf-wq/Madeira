@@ -144,8 +144,8 @@ let notScript = """
         let values = SteamInstallRegistry.values(script: Data(script.utf8), installDir: installDir)
         func find(_ name: String) -> SteamInstallValue? { values.first { $0.name == name } }
         require(find("Installed Path") == SteamInstallValue(hive: .machine, key: "Software\\Bethesda Softworks\\FalloutNV", name: "Installed Path",
-                                                           data: .string(installDir), followsInstall: true),
-                "Installed Path: HKLM key, %INSTALLDIR% expanded, follows the install")
+                                                           data: .string(installDir + "\\"), followsInstall: true),
+                "Installed Path: HKLM key, %INSTALLDIR% expanded with Steam's trailing backslash, follows the install")
         require(find("Language")?.data == .string("english"), "no language recorded: the english block")
         require(values.filter { $0.name == "Installed Path" }.count == 1, "one copy per value, not one per language block")
         let german = SteamInstallRegistry.values(script: Data(script.utf8), installDir: installDir, language: "German")
@@ -157,6 +157,8 @@ let notScript = """
         require(find("")?.hive == .user && find("")?.data == .string("default") && find("")?.followsInstall == false,
                 "HKCU default value read, does not follow the install")
         require(find("Other") == nil, "an unknown %NAME% value is left out")
+        let sub = SteamInstallRegistry.values(script: Data("\"InstallScript\" { \"Registry\" { \"HKEY_LOCAL_MACHINE\\\\Software\\\\X\" { \"string\" { \"Bin\" \"%INSTALLDIR%\\\\bin\" } } } }".utf8), installDir: installDir)
+        require(sub.first?.data == .string(installDir + "\\bin"), "%INSTALLDIR%\\sub keeps one backslash")
         require(find("Quoted")?.data == .string("a \"b\" é1 \\c"), "VDF escapes read")
         require(SteamInstallRegistry.values(script: Data(notScript.utf8), installDir: installDir).isEmpty,
                 "a Registry section outside InstallScript is ignored")
@@ -165,7 +167,7 @@ let notScript = """
 
         // ---- Wine text
         require(SteamInstallRegistry.line(find("Installed Path")!) ==
-                "\"Installed Path\"=\"C:\\\\Program Files (x86)\\\\Steam\\\\steamapps\\\\common\\\\Fallout New Vegas\"",
+                "\"Installed Path\"=\"C:\\\\Program Files (x86)\\\\Steam\\\\steamapps\\\\common\\\\Fallout New Vegas\\\\\"",
                 "string line with doubled backslashes")
         require(SteamInstallRegistry.line(find("Flags")!) == "\"Flags\"=dword:00000010", "dword line")
         require(SteamInstallRegistry.line(find("")!) == "@=\"default\"", "default value written as @")
@@ -184,10 +186,10 @@ let notScript = """
                 "new key sections in both registry views")
         require(first.text.hasPrefix(base.trimmingCharacters(in: .newlines)), "the rest of the file is kept")
         require(SteamInstallRegistry.write(machine, in: first.text, now: 1900000000).changed == 0, "a second write changes nothing")
-        let moved = first.text.replacingOccurrences(of: "Fallout New Vegas\"", with: "Old Folder\"")
+        let moved = first.text.replacingOccurrences(of: "Fallout New Vegas\\\\\"", with: "Old Folder\\\\\"")
                               .replacingOccurrences(of: "dword:00000011", with: "dword:00000005")
         let again = SteamInstallRegistry.write(machine, in: moved, now: 1900000000)
-        require(again.changed == 2 && again.text.contains("Fallout New Vegas\"") && !again.text.contains("Old Folder") &&
+        require(again.changed == 2 && again.text.contains("Fallout New Vegas\\\\\"") && !again.text.contains("Old Folder") &&
                 again.text.components(separatedBy: "dword:00000005").count == 3,
                 "an install path that differs is rewritten; a changed dword is kept")
         let user = SteamInstallRegistry.write(values.filter { $0.hive == .user }, in: "", now: 1)
@@ -207,7 +209,7 @@ let notScript = """
         try write(prefix.appendingPathComponent("user.reg"), reg)
         DockInstallers.writeRegistry(game, drive: drive, prefix: prefix)
         let system = try String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8)
-        require(system.contains("\"Installed Path\"=\"C:\\\\Program Files (x86)\\\\Steam\\\\steamapps\\\\common\\\\Fallout New Vegas\"") &&
+        require(system.contains("\"Installed Path\"=\"C:\\\\Program Files (x86)\\\\Steam\\\\steamapps\\\\common\\\\Fallout New Vegas\\\\\"") &&
                 system.contains("\"Language\"=\"german\""), "system.reg gets the values, in Steam's language")
         require(FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg.madeira-bak").path), "a backup is kept")
         require(LogStore.shared.lines.contains { $0.hasPrefix("[dock-installers] app=22380 registry values=6 written=10 keys=HKLM\\Software\\Bethesda Softworks\\FalloutNV; HKCU\\Software\\Fixture") },
