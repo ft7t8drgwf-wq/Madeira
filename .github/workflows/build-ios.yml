@@ -224,6 +224,11 @@ jobs:
       - name: Madeira Dock (x86-64 PE)
         run: build/madeira-dock/build.sh || echo "::warning::Madeira Dock build failed; the Dock stays hidden"
 
+      - name: In-app pairing library (Rust, aarch64-apple-ios)
+        run: |
+          rustup target add aarch64-apple-ios
+          build/rppairing-ios/build.sh
+
       - name: Bundle inputs (licences, VC++ runtime)
         run: |
           set -eu
