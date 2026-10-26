@@ -50,6 +50,9 @@ check('GameIniFiles.setSavedFingerprint(' in save and 'GameIniFiles.savedFingerp
 foundation = source[:source.index('// MARK: Views')]
 check('LibraryModel' not in foundation and 'LogStore' not in foundation, 'the model part is Foundation only')
 
+check('Image(systemName: "info.circle")' in source and 'IniSettingHelp.describe(key: setting.key)' in source,
+      'each setting has a blue info button with its description')
+
 main_swift = r'''
 import Foundation
 func show(_ s: String) -> String { s.replacingOccurrences(of: "\r", with: "<CR>").replacingOccurrences(of: "\n", with: "<LF>") }
@@ -84,6 +87,9 @@ GameIniFiles.add("x/a.ini", for: "c:\\game", defaults: defaults)
 GameIniFiles.add("x/B.ini", for: "C:\\Game", defaults: defaults)
 GameIniFiles.remove("x/A.ini", for: "C:\\Game", defaults: defaults)
 print("list=" + GameIniFiles.files("C:\\GAME", defaults: defaults).joined(separator: ","))
+print("help=" + [IniSettingHelp.describe(key: "uGridsToLoad") != nil, IniSettingHelp.describe(key: "iSize W")?.hasPrefix("The game's width") == true,
+                  IniSettingHelp.describe(key: "bSomethingNew") == "A switch: 1 is on, 0 is off.", IniSettingHelp.describe(key: "whatever") == nil]
+                  .map { "\($0)" }.joined(separator: ","))
 let drive = URL(fileURLWithPath: CommandLine.arguments[1])
 print("found=" + GameIniFiles.candidates(drive: drive, gameFolder: "Games/NV").sorted().joined(separator: ","))
 '''
@@ -125,6 +131,7 @@ else:
         check(out['label'] == 'My Games\\FalloutNV\\Fallout.ini|Fallout New Vegas\\Fallout_default.ini', 'short names')
         check(out['folder'] == 'Games/NV|Games/NV', "the game's folder: the program's, or a Steam install folder")
         check(out['list'] == 'x/B.ini', 'each game keeps its own list, once per file')
+        check(out['help'] == 'true,true,true,true', 'the info button: known settings, then the kind from the name')
         check(out['found'] == 'Games/NV/Fallout_default.ini,users/steamuser/Documents/My Games/FalloutNV/Fallout.ini',
               "candidates: the game's folder and My Games, not other games")
 
