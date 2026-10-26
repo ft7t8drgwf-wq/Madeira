@@ -136,6 +136,7 @@
 		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1000991 /* GameDllOverrides.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000991 /* GameDllOverrides.swift */; };
+		A1000992 /* WineRegistryEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000992 /* WineRegistryEditor.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
@@ -348,6 +349,7 @@
 		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2000991 /* GameDllOverrides.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameDllOverrides.swift; sourceTree = "<group>"; };
+		A2000992 /* WineRegistryEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WineRegistryEditor.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
 		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
@@ -519,6 +521,7 @@
 				A2000914 /* LibraryPrefs.swift */,
 				A2000990 /* GameIniFiles.swift */,
 				A2000991 /* GameDllOverrides.swift */,
+				A2000992 /* WineRegistryEditor.swift */,
 				A2000208 /* GameProfiles.swift */,
 				A2000911 /* GameRecommendations.swift */,
 				A2000912 /* GameRecommendationsApply.swift */,
@@ -872,6 +875,7 @@
 				A1000914 /* LibraryPrefs.swift in Sources */,
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1000991 /* GameDllOverrides.swift in Sources */,
+				A1000992 /* WineRegistryEditor.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
 				A1000911 /* GameRecommendations.swift in Sources */,
 				A1000912 /* GameRecommendationsApply.swift in Sources */,
