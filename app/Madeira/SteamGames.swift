@@ -1337,6 +1337,10 @@ struct SteamEntrySection: View {
                 Button { steam.repair(appID) } label: { Label("Repair installed files", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(!steam.signedIn)
             }
+            // Steam's "files missing/corrupted" mark that blocks every start (SteamFilesFlag.swift).
+            if let installed, download == nil {
+                SteamFilesFlagRows(appID: appID, library: installed.library)
+            }
             LabeledContent("App ID", value: String(appID))
             if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
             if let status = dock.status {
