@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v4
 
       - id: key
-        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh') }}" >> "$GITHUB_OUTPUT"
+        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh', 'build/dxmt-patches/**') }}" >> "$GITHUB_OUTPUT"
 
       - id: cache
         uses: actions/cache@v4
@@ -300,6 +300,7 @@ jobs:
           python3 tests/host/check-install-registry.py
           python3 tests/host/check-dock-start-program.py
           python3 tests/host/check-d3d9-report-nvidia.py
+          python3 tests/host/check-d3d9-older-nvidia.py
 
       - name: Host check for the starting screen (does not block the IPA)
         continue-on-error: true
