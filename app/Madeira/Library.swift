@@ -4847,10 +4847,6 @@ struct LibraryHUD: View {
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
                     }
-                    if model.overlayFields.contains("JIT memory") {
-                        Text("JIT memory is where games' translated code lives. Its size is set when Madeira opens. A game stops if it fills up; FULL means that happened.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
                 }
                 // The developer overlay's CAP and F pills (FPSOverlay), for library
                 // sessions: only with MADEIRA_SESSION_DIAGNOSTICS=1 (and not with
