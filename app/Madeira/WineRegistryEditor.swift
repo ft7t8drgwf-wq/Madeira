@@ -392,7 +392,7 @@ final class RegistryStore: ObservableObject {
 struct RegistryEditorView: View {
     @StateObject private var store = RegistryStore()
     @Environment(\.dismiss) private var dismiss
-    @State private var running = RegistryStore.sessionRunning
+    @State private var running = false
 
     var body: some View {
         NavigationStack {
