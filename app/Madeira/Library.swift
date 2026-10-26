@@ -2888,6 +2888,18 @@ struct LibraryView: View {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
+            if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
+                Section {
+                    Button { settingsSheet = .registry } label: {
+                        LabeledContent { Image(systemName: "chevron.right").foregroundStyle(.tertiary) } label: {
+                            Label("Registry", systemImage: "list.bullet.indent")
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                } header: { Text("Wine") } footer: {
+                    Text("Look at and change Wine's registry, like regedit. Changes are saved while no game or Windows desktop is running.")
+                }
+            }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
@@ -2949,6 +2961,7 @@ struct LibraryView: View {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
             case .dock: MadeiraDockView(start: startDock)
+            case .registry: RegistryEditorView()
             }
         }
     }
@@ -4148,7 +4161,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, dock
+    case allSettings, steamSignIn, dock, registry
     var id: String { rawValue }
 }
 
