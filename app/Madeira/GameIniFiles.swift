@@ -222,6 +222,77 @@ enum GameIniFiles {
     }
 }
 
+/// What a setting in a Bethesda game's .ini file does, for the ⓘ next to it. Known
+/// settings have a sentence; any other gets what its name's first letter says about
+/// its value (bName a switch, iName a whole number, and so on), or nothing.
+enum IniSettingHelp {
+    static func describe(key: String) -> String? {
+        let name = key.trimmingCharacters(in: .whitespaces)
+        if let known = known[name.lowercased()] { return known }
+        return kind(name)
+    }
+
+    /// The Bethesda naming habit: one lower- or upper-case letter for the type, then the name.
+    static func kind(_ key: String) -> String? {
+        let chars = Array(key)
+        guard chars.count > 1, chars[1].isUppercase else { return nil }
+        switch chars[0] {
+        case "b": return "A switch: 1 is on, 0 is off."
+        case "i": return "A whole number."
+        case "u": return "A whole number, 0 or more."
+        case "f": return "A number that can have a decimal point."
+        case "s", "S": return "Text."
+        default: return nil
+        }
+    }
+
+    /// Keys in lower case. Shared by Fallout 3, New Vegas, Oblivion and Skyrim unless a sentence says otherwise.
+    static let known: [String: String] = [
+        // [Display]
+        "isize w": "The game's width in pixels. Madeira's display size is set per game in Display; keep them the same.",
+        "isize h": "The game's height in pixels. Madeira's display size is set per game in Display; keep them the same.",
+        "bfull screen": "Full screen (1) or a window (0).",
+        "imultisample": "Anti-aliasing: smooths jagged edges. 0 is off and fastest; 2, 4 or 8 look smoother but cost a lot of speed.",
+        "imaxanisotropy": "Texture sharpness at an angle (anisotropic filtering), from 0 to 16. Higher looks sharper and costs a little speed.",
+        "ipresentinterval": "V-sync: 1 waits for the screen and stops tearing, 0 does not.",
+        "itexmipmapskip": "Texture quality: 0 is full, 1 is half size, 2 is a quarter. Higher saves memory and speed.",
+        "ishadowmapresolution": "The size of shadow textures. Lower (512 or 1024) is faster and blurrier.",
+        "iactorshadowcountext": "How many characters cast shadows outdoors. Lower is faster.",
+        "iactorshadowcountint": "How many characters cast shadows indoors. Lower is faster.",
+        "bshadowsongrass": "Grass gets shadows. Off is faster.",
+        "bdodepthoffield": "Blurs the background (depth of field). Off is faster and sharper.",
+        "busewaterreflections": "Water reflects the world. Off is faster.",
+        "flodfadeoutmultobjects": "How far away objects stay visible. Lower is faster.",
+        "flodfadeoutmultitems": "How far away small items stay visible. Lower is faster.",
+        "flodfadeoutmultactors": "How far away characters stay visible. Lower is faster.",
+        "fdefaultfov": "Field of view in degrees: how wide the camera sees.",
+        "sd3ddevice": "The graphics card the game last saw. Madeira keeps it in step with the Older NVIDIA card setting; changing it by hand makes the game reopen its launcher.",
+        // [Grass]
+        "fgrassstartfadedistance": "How far away grass is drawn. Lower is faster.",
+        "imingrasssize": "Grass spacing: higher means less grass and more speed.",
+        // [General]
+        "ugridstoload": "How many cells (blocks of world) around you load in full detail. 5 is normal; higher is much slower and can crash.",
+        "ugriddistanttreerange": "How many cells away distant trees are drawn.",
+        "ugriddistantcount": "How many cells away the distant landscape and buildings are drawn.",
+        "uinterior cell buffer": "How many indoor areas stay in memory after you leave them.",
+        "uexterior cell buffer": "How many outdoor cells stay in memory after you leave them.",
+        "ipreloadsizelimit": "Memory, in bytes, set aside for loading things ahead of time.",
+        "bpreemptivelyunloadcells": "Frees areas from memory as soon as you leave them. Can lower memory use.",
+        "inumhwthreads": "How many processor threads the game plans for.",
+        "busethreadedai": "Runs characters' AI on its own thread.",
+        "isavegamebackupcount": "How many backup copies of a save are kept when you save over it.",
+        "ballowscriptedautosave": "Lets quests save the game automatically.",
+        "bdisplaymissingcontentdialogue": "Warns when a save needs a mod or add-on that is missing.",
+        "ssavegamesafecellid": "Where the game puts you if a save cannot load your spot. Leave it as it is.",
+        "slanguage": "The language the game's text is in.",
+        "sintrosequence": "The videos played at start. Empty skips them.",
+        "bloadfacegenheadegtfiles": "New Vegas: loads the files that colour characters' faces. On fixes faces that do not match their necks; it uses more memory.",
+        // [Controls]
+        "busejoystick": "Controller support: 1 on, 0 off.",
+        "binvertyvalues": "Inverts looking up and down.",
+    ]
+}
+
 // MARK: Views
 
 /// Game details › Settings files: the game's added .ini files, and "Add .ini file".
@@ -322,6 +393,7 @@ struct IniFileEditor: View {
     @State private var query = ""
     @State private var note: String?
     @State private var error: String?
+    @State private var info: IniDocument.Setting?
 
     private var url: URL { LibraryModel.drive.appendingPathComponent(file) }
 
@@ -349,12 +421,18 @@ struct IniFileEditor: View {
             ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(!changed) }
         }
         .onAppear { if document == nil { load() } }
+        .alert(info?.key ?? "", isPresented: Binding(get: { info != nil }, set: { if !$0 { info = nil } }), presenting: info) { _ in
+            Button("OK") {}
+        } message: { setting in
+            let section = setting.section.isEmpty ? "" : "In [\(setting.section)]. "
+            Text(section + (IniSettingHelp.describe(key: setting.key) ?? "No description for this setting yet."))
+        }
     }
 
     @ViewBuilder private func row(_ setting: IniDocument.Setting) -> some View {
         if GameIniFiles.isSwitch(key: setting.key, value: setting.value) {
             Toggle(isOn: Binding(get: { setting.value == "1" }, set: { update(setting.line, $0 ? "1" : "0") })) {
-                Text(setting.key).font(.callout.monospaced())
+                label(setting)
             }
         } else {
             LabeledContent {
@@ -362,8 +440,18 @@ struct IniFileEditor: View {
                     .multilineTextAlignment(.trailing).font(.callout.monospaced())
                     .autocorrectionDisabled().textInputAutocapitalization(.never)
             } label: {
-                Text(setting.key).font(.callout.monospaced())
+                label(setting)
             }
+        }
+    }
+
+    /// The key, and a blue ⓘ that shows its full name and what it does.
+    private func label(_ setting: IniDocument.Setting) -> some View {
+        HStack(spacing: 6) {
+            Text(setting.key).font(.callout.monospaced())
+            Button { info = setting } label: { Image(systemName: "info.circle") }
+                .buttonStyle(.borderless).foregroundStyle(.blue)
+                .accessibilityLabel("About \(setting.key)")
         }
     }
 
