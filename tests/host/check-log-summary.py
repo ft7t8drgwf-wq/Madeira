@@ -79,6 +79,18 @@ assert(crashedText.contains("game.exe ended itself with Windows error 0xC0000005
 assert(crashedText.contains("Madeira was force-closed") && crashedText.contains("Steam launch: refused, error 22"))
 assert(crashedText.contains("Madeira Dock: "))
 
+// A game folder with spaces that hands over to Steam: the program is the game, not "C:\Program".
+let spaced = LogSummary.facts(lines: [
+    "[WineProc] Target exe: C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout New Vegas\\FalloutNV.exe (bundle=aarch64-windows)",
+    "[srv-own] new_thread tid=0020 pid=0010 requester=0000",
+    "[srv-own] new_thread tid=0030 pid=0028 requester=0020",
+    "0020:err:process:NtCreateUserProcess NtCreateUserProcess: image=L\"C:\\\\Program Files (x86)\\\\Steam\\\\steam.exe\" cmdline=L\"\"",
+    "[WineProc] the main process exited while 1 child process(es) it started still run (steam.exe); the session ends with it (MADEIRA_WAIT_CHILDREN=1 keeps it while they run)",
+])
+assert(spaced.game == "FalloutNV.exe")
+assert(LogSummary.text(spaced, source: "test").contains("The game started Steam and closed itself"))
+assert(!text.contains("started Steam and closed itself"))
+
 // A launch with no session leaves the last summary alone; a file is read across 1 MB chunks.
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let empty = dir.appendingPathComponent("empty.txt"), logFile = dir.appendingPathComponent("madeira-log.txt")
