@@ -36,6 +36,11 @@ project = (app.parent / 'Madeira.xcodeproj/project.pbxproj').read_text(encoding=
 
 check('case .registry: RegistryEditorView()' in library and 'settingsSheet = .registry' in library,
       'Settings opens the registry editor as a sheet hung off the Form')
+# Every sheet switch over SettingsSheet (Settings and the developer screen) has to name the new case.
+switches = [path.name for path in sorted(app.glob('*.swift'))
+            if 'case .steamSignIn: SteamSignInView()' in path.read_text(encoding='utf-8')]
+check(switches and all('case .registry: RegistryEditorView()' in (app / name).read_text(encoding='utf-8') for name in switches),
+      'every SettingsSheet switch opens the registry editor: ' + ', '.join(switches))
 check(project.count('A1000992 /* WineRegistryEditor.swift in Sources */') == 2 and
       project.count('A2000992 /* WineRegistryEditor.swift */') == 3, 'WineRegistryEditor.swift is in the app target')
 change = source[source.index('func change('):source.index('/// Settings › Registry: the two files')]
