@@ -89,6 +89,12 @@ final class LogStore: ObservableObject {
             try? FileManager.default.moveItem(at: logFileURL, to: prevLogURL)
         }
         try? "".write(to: logFileURL, atomically: true, encoding: .utf8)
+        // A session that never returned to the library (a crash, Force close) wrote
+        // no madeira-summary.txt; summarize it now. A launch without a session
+        // leaves the last summary in place (LogSummary.write).
+        if FileManager.default.fileExists(atPath: prevLogURL.path) {
+            LogSummary.writeLater(from: prevLogURL, source: "madeira-log.prev.txt (the previous run)")
+        }
 
         // Start batch flush timer on main thread. Interval depends on uiPaused.
         DispatchQueue.main.async {
@@ -132,6 +138,9 @@ final class LogStore: ObservableObject {
                                 + "(low-power=\(process.isLowPowerModeEnabled ? 1 : 0))")
         }
     }
+
+    /// Documents/madeira-log.txt, this run's log.
+    var logURL: URL { logFileURL }
 
     /// Keeps this session's log under the program's name as well:
     /// Documents/logs/<exe>-<yyyy-MM-dd_HH-mm-ss>.txt, e.g.
