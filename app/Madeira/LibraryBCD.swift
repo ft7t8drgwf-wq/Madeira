@@ -25,6 +25,14 @@ enum BCDLaunch {
             // display adapter (sysparams_ios.c, ios_virtual_gpu_ids); merged
             // into DXMT_CONFIG by ContentView.
             dxmtExtra.append("dxgi.customDeviceId=2544")
+            // Direct3D 9 reports its adapter on its own (d3d9_interface.cpp
+            // GetAdapterIdentifier): the same ids there. Fallout: New Vegas
+            // crashes loading a save (00B57AA9, BSTaskManagerThread) when the
+            // vendor is not NVIDIA or AMD. The description stays the Metal
+            // device's name, which games compare with their saved settings
+            // (New Vegas's sD3DDevice reopens its launcher on a change).
+            dxmtExtra.append("d3d9.customVendorId=10de")
+            dxmtExtra.append("d3d9.customDeviceId=2544")
             // DXGI's output carries user32's monitor handle and user32's mode
             // list, so a game can find its monitor on the adapter. Default-on
             // in this fork until the build 222 switch to upstream, where both

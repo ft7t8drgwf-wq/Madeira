@@ -3524,7 +3524,7 @@ struct LibraryDetail: View {
                 ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
             }
             Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
-                compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
+                compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors and GPU-check crashes")
             }
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel("Wine's C++ runtime", "Instead of the game's msvcp/vcruntime")
