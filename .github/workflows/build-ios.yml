@@ -292,7 +292,13 @@ jobs:
 
       # ---------------------------------------------------------------- app
       - name: Host checks for this branch's app changes
-        run: python3 tests/host/check-log-summary.py
+        run: |
+          python3 tests/host/check-log-summary.py
+          python3 tests/host/check-steam-activity.py
+
+      - name: Host check for the starting screen (does not block the IPA)
+        continue-on-error: true
+        run: python3 tests/host/check-dock-start-screen.py
 
       - name: Build app (iphoneos, unsigned)
         run: |
