@@ -35,7 +35,50 @@ env:
   LLVM_VERSION: 15.0.7
 
 jobs:
+  # The 32-bit (i386) Windows farm WoW64 sessions load (docs/WOW64.md, "Building").
+  # It is not tracked and takes hours, so it is cached by the pins it is built from.
+  i386:
+    runs-on: macos-26
+    timeout-minutes: 360
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - id: key
+        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: app/Madeira/i386-windows
+
+      - name: Build the 32-bit (i386) Windows DLLs
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git submodule update --init --depth 1 wine
+          git submodule update --init --recursive --depth 1 dxmt
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+          brew install meson ninja bison flex
+          export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+          xcodebuild -downloadComponent MetalToolchain || echo "::warning::MetalToolchain download failed (may already be installed)"
+          mkdir -p toolchains
+          curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/${MINGW_NAME}.tar.xz"
+          echo "${MINGW_SHA256}  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c -
+          tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
+          build/wine-i386/build.sh
+
+      - name: Show the end of the i386 build log
+        if: failure()
+        run: tail -150 wine/build-i386/madeira-i386-build.log || true
+
   build:
+    needs: i386
     runs-on: macos-26
     timeout-minutes: 360
 
@@ -63,6 +106,13 @@ jobs:
 
       - name: Download Metal toolchain
         run: xcodebuild -downloadComponent MetalToolchain || echo "::warning::MetalToolchain download failed (may already be installed)"
+
+      - name: Restore the 32-bit (i386) Windows DLLs
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ needs.i386.outputs.key }}
+          fail-on-cache-miss: true
+          path: app/Madeira/i386-windows
 
       # ------------------------------------------------------------ toolchains
       - name: Cache llvm-mingw
