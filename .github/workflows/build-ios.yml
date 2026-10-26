@@ -291,6 +291,9 @@ jobs:
           fi
 
       # ---------------------------------------------------------------- app
+      - name: Host checks for this branch's app changes
+        run: python3 tests/host/check-log-summary.py
+
       - name: Build app (iphoneos, unsigned)
         run: |
           set -o pipefail
@@ -301,6 +304,7 @@ jobs:
             -sdk iphoneos \
             SYMROOT="$PWD/app/build" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             DEVELOPMENT_TEAM="" | tail -n 300
 
       - name: Package IPA
