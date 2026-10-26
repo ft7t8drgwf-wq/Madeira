@@ -50,6 +50,15 @@ JITPoolMeter.note("[jit-pool] EXHAUSTED (anon RWX): want=0x1000 bump=0x37000000/
 assert(JITPoolMeter.text(JITPoolMeter.current) == "JIT FULL 800 MB (split)")
 print("PASS: JIT memory overlay: size from setup, use from loads, small pool, FULL once exhausted, reset per session, split pool holes left out, region C ignored")
 '''
+# With Live logs off the tail still reads the file (once a second), so the pool's lines
+# reach the meter; LogStore notes them before it drops a hidden line.
+tail = (root / 'app/Madeira/LogTail.swift').read_text()
+store = (root / 'app/Madeira/LogStore.swift').read_text()
+assert 'if self.displayPaused { self.readWhilePaused() } else { self.readAvailable() }' in tail
+assert 'guard fd >= 0, !displayPaused else { return }' not in tail and 'guard pausedTicks >= 4 else { return }' in tail
+handle = store[store.index('private func handleRawLine('):]
+assert handle.index('JITPoolMeter.note(raw)') < handle.index('if suppressed { return }')
+print("PASS: the meter counts with Live logs off")
 with tempfile.TemporaryDirectory(prefix='madeira-jit-meter-') as directory:
     source = Path(directory) / 'main.swift'; binary = Path(directory) / 'check'
     source.write_text((root / 'app/Madeira/JITPoolMeter.swift').read_text() + '\n' + checks)
