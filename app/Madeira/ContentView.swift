@@ -3294,7 +3294,6 @@ struct ContentView: View {
             var presentingSince: CFAbsoluteTime? = nil
             let pollStart = CFAbsoluteTimeGetCurrent()
             var lastHeartbeat = CFAbsoluteTimeGetCurrent()
-            var capLogged = false
             while wine_process_is_running() != 0 {
                 Thread.sleep(forTimeInterval: 0.25)
                 let now = CFAbsoluteTimeGetCurrent()
@@ -3321,14 +3320,9 @@ struct ContentView: View {
                         break
                     }
                 }
-                // The cap used to `break` into the teardown below while the game still
-                // ran: a Dock session (a desktop session, so no present-based break)
-                // then got a second detach BRK at exactly 20 minutes and died about a
-                // minute later ([pool-rot] TEXT LOST EXEC). Log it once and keep
-                // waiting; the teardown runs when Wine exits.
-                if now - pollStart > maxWait && !capLogged {
-                    capLogged = true
-                    logStore.log("Wine still running after \(Int(maxWait))s; staying in the session (no detach while Wine runs)", level: .error)
+                if now - pollStart > maxWait {
+                    logStore.log("Wine still running after \(Int(maxWait))s, proceeding with detach", level: .error)
+                    break
                 }
             }
             let wineElapsed = CFAbsoluteTimeGetCurrent() - pollStart
@@ -3341,15 +3335,9 @@ struct ContentView: View {
             }
             Thread.sleep(forTimeInterval: 2.0)
 
-            // Step 6: Detach debugger — main thread should have zero accumulated hang time.
-            // Not twice: after [early-detach] nothing is attached, and the BRK lands in
-            // our own exception port while the game may still run.
-            if getenv("MADEIRA_DETACHED") != nil {
-                logStore.log("Debugger already detached (early detach); no second detach")
-            } else {
-                logStore.log("Detaching debugger...")
-                StikJITHelper.detachDebugger()
-            }
+            // Step 6: Detach debugger — main thread should have zero accumulated hang time
+            logStore.log("Detaching debugger...")
+            StikJITHelper.detachDebugger()
 
             DispatchQueue.main.async {
                 heartbeat.invalidate()
