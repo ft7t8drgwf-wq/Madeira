@@ -1206,6 +1206,7 @@ final class LibraryModel: ObservableObject {
     /// `dock`: the game a Madeira Dock start launches (DockStartScreen).
     func begin(_ entry: LibraryEntry, remember: Bool = true, dock: DockGame? = nil) {
         wine_exit_status_reset()
+        JITPoolMeter.reset()
         quitRequested = false
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
         Self.sessionsThisRun += 1
@@ -4793,10 +4794,14 @@ struct LibraryHUD: View {
                 Divider()
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
-                    ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "Battery", "Thermal"], id: \.self) { field in
+                    ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "JIT memory", "Battery", "Thermal"], id: \.self) { field in
                         Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
+                    }
+                    if model.overlayFields.contains("JIT memory") {
+                        Text("JIT memory is where games' translated code lives. Its size is set when Madeira opens. A game stops if it fills up; FULL means that happened.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 // The developer overlay's CAP and F pills (FPSOverlay), for library
@@ -4929,6 +4934,8 @@ struct LibraryMetrics: View {
             else { result.append(String(format: "GPU %.0f%%", gpu)) }
         }
         if model.overlayFields.contains("RAM") { result.append("\(memory) MB") }
+        // The memory games' code runs from; "FULL" once a DLL did not fit (JITPoolMeter).
+        if model.overlayFields.contains("JIT memory") { result.append(JITPoolMeter.text(JITPoolMeter.current) ?? "JIT —") }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
         if model.overlayFields.contains("Thermal") {
             switch thermal {
