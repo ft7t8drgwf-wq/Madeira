@@ -297,10 +297,15 @@ jobs:
           python3 tests/host/check-steam-activity.py
           python3 tests/host/check-jit-pool-meter.py
           python3 tests/host/check-harmless-warnings.py
+          python3 tests/host/check-install-registry.py
 
       - name: Host check for the starting screen (does not block the IPA)
         continue-on-error: true
         run: python3 tests/host/check-dock-start-screen.py
+
+      - name: Host check for the one-time installs (does not block the IPA)
+        continue-on-error: true
+        run: python3 tests/host/check-dock-installers.py
 
       - name: Build app (iphoneos, unsigned)
         run: |
