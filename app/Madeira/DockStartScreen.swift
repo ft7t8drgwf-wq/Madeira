@@ -254,6 +254,12 @@ enum DockStartStatus {
         return (installerProgress ?? "One-time installs finished.") + "\n" + starting
     }
 
+    /// The starting screen's elapsed time: "45 s", "5 min 9 s".
+    static func elapsed(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        return total < 60 ? "\(total) s" : "\(total / 60) min \(total % 60) s"
+    }
+
     /// The host has started (its first report field): the one-time installs are over.
     static func hostStarted(_ fields: [String: String]) -> Bool { fields["probe-start-bits"] != nil }
 
@@ -297,6 +303,8 @@ final class DockStartScreen: ObservableObject {
     private var exitObserved = false
     private var started = Date()
     private let places = SteamLaunchScene.Places.standard
+    /// What Valve's client downloads or installs during this start (SteamActivity).
+    private var activity: SteamActivityReader?
 
     /// A library session begins; `game` is set for a Dock start.
     func begin(_ game: DockGame?, at start: Date) {
@@ -304,6 +312,10 @@ final class DockStartScreen: ObservableObject {
         winios_window_census_enable(0)
         active = game != nil; appID = game?.id; failure = nil
         exitObserved = false; hostStarted = false; early = []; started = start
+        activity = game.map {
+            SteamActivityReader(clientRoot: MadeiraDock.clientRoot,
+                                libraries: [MadeiraDock.drive.appendingPathComponent($0.library, isDirectory: true)])
+        }
         guard let game, MadeiraConfig.flag("MADEIRA_DOCK_HIDE_DESKTOP") else { return }   // 0: a Dock start's starting screen ends on the desktop's first frame, as before
         let hold = SteamLaunchHold(autoReveal: MadeiraConfig.flag("MADEIRA_DOCK_AUTO_REVEAL"))   // 0: a window that may need the user never reveals the desktop by itself (Show desktop still does)
         self.hold = hold; sceneLines = 0; holding = true
@@ -315,8 +327,11 @@ final class DockStartScreen: ObservableObject {
     func finish() {
         endHold(reason: "session-ended")
         winios_window_census_enable(0)
-        active = false; appID = nil; failure = nil
+        active = false; appID = nil; failure = nil; activity = nil
     }
+
+    /// Under the status line, once a second: what Steam downloads or installs right now, in words.
+    var steamActivity: String? { activity?.line() }
 
     /// Every 0.5 s from LibraryModel.poll while a session runs. `rendered`: D3D
     /// frames reached the screen since the start began.

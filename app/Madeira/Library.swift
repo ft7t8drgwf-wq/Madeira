@@ -4536,10 +4536,13 @@ struct LibraryHUD: View {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(spacing: 8) {
                             Text(dockStatus).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
+                            if let activity = dockStart.steamActivity {
+                                Text(activity).font(.caption).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center).frame(maxWidth: 360)
+                            }
                             if let note = DockInstallers.note {
                                 Text(note).font(.caption).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center).frame(maxWidth: 360)
                             }
-                            Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                            Text(DockStartStatus.elapsed(context.date.timeIntervalSince(model.startingSince)))
                                 .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                         }
                     }
@@ -4549,7 +4552,7 @@ struct LibraryHUD: View {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(spacing: 8) {
                             Text(launchIdleStatus).foregroundStyle(.white.opacity(0.7))
-                            Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                            Text(DockStartStatus.elapsed(context.date.timeIntervalSince(model.startingSince)))
                                 .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                         }
                     }.modifier(LaunchEntrance(visible: launchVisible, step: 2, still: curtained))
@@ -4659,10 +4662,13 @@ struct LibraryHUD: View {
                         Text(status).font(.subheadline).foregroundStyle(.white.opacity(0.78))
                             .contentTransition(.opacity).animation(.easeInOut(duration: 0.3), value: status)
                     }
+                    if dockStart.active, let activity = dockStart.steamActivity {
+                        Text(activity).font(.caption).foregroundStyle(.white.opacity(0.7)).frame(maxWidth: 440, alignment: .leading)
+                    }
                     if dockStart.active, let note = DockInstallers.note {
                         Text(note).font(.caption).foregroundStyle(.white.opacity(0.6)).frame(maxWidth: 440, alignment: .leading)
                     }
-                    Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                    Text(DockStartStatus.elapsed(context.date.timeIntervalSince(model.startingSince)))
                         .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                 }
             }
