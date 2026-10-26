@@ -729,6 +729,7 @@ final class LibraryModel: ObservableObject {
     }
     @Published var error: String? { didSet { if error != nil { preparing = nil } } }
     @Published var sessionMessage = ""
+    private var smallPoolNoted = false
     @Published var launching = false
     @Published var overlayFields = ["FPS", "Frame time", "RAM", "Battery"]
     private var launchPresent: UInt64 = 0
@@ -1206,7 +1207,7 @@ final class LibraryModel: ObservableObject {
     /// `dock`: the game a Madeira Dock start launches (DockStartScreen).
     func begin(_ entry: LibraryEntry, remember: Bool = true, dock: DockGame? = nil) {
         wine_exit_status_reset()
-        JITPoolMeter.reset()
+        JITPoolMeter.reset(); smallPoolNoted = false
         quitRequested = false
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
         Self.sessionsThisRun += 1
@@ -1270,6 +1271,16 @@ final class LibraryModel: ObservableObject {
             } else if winios_surface_present_count() > launchSurface {
                 showGameView(reason: "surface")
             } else if Date().timeIntervalSince(launchStarted) > 30 { launchSlow = true }
+        }
+        // iPadOS gave the JIT pool less room than asked at launch: say so once the game is up.
+        if !smallPoolNoted, !launching, current != nil, JITPoolMeter.current.shrunk {
+            smallPoolNoted = true
+            let words = "JIT memory is small this time (\(JITPoolMeter.current.sizeMB.map { "\($0) MB" } ?? "smaller than usual")). " +
+                "Big games may stop loading; closing and reopening Madeira can give more."
+            sessionMessage = words
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+                if self?.sessionMessage == words { self?.sessionMessage = "" }
+            }
         }
         if wine_process_is_running() != 0 {
             sawProcess = true
