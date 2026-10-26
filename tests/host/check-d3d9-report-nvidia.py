@@ -27,7 +27,7 @@ block = m.group(1) if m else ''
 check('dxmtExtra.append("d3d9.customVendorId=10de")' in block, 'the switch gives Direct3D 9 the NVIDIA vendor id')
 check('dxmtExtra.append("d3d9.customDeviceId=2544")' in block and 'dxmtExtra.append("dxgi.customDeviceId=2544")' in block,
       'Direct3D 9 and DXGI report the same device')
-check('customDeviceDesc' not in bcd, "the description stays the Metal device's name")
+check('customDeviceDesc' not in block, "the description stays the Metal device's name")
 check('setenv("MADEIRA_DXMT_EXTRA", dxmtExtra.joined(separator: ";"), 1)' in bcd, 'the ids reach DXMT_CONFIG')
 
 d3d9 = root / 'dxmt/src/d3d9/d3d9_interface.cpp'
