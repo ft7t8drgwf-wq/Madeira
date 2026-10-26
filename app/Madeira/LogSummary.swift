@@ -68,6 +68,7 @@ enum LogSummary {
         var unhandled: [String] = []
         var exitReport: String?
         var quitAsked: String?
+        var handedToSteam = false
         var forceClosed = false
         var poolWantedMB: Int?
         var poolMB: Int?
@@ -134,7 +135,11 @@ enum LogSummary {
             if line.contains("Running full Wine sequence") { facts.sawSession = true }
             if let r = line.range(of: "[WineProc] Target exe: ") {
                 facts.sawSession = true
-                facts.target = String(line[r.upperBound...].prefix { $0 != " " })
+                // "C:\Program Files\...\Game.exe (bundle=...)": the path has spaces, so the
+                // name is the last path part before the bundle note.
+                var path = line[r.upperBound...]
+                if let note = path.range(of: " (bundle=") { path = path[..<note.lowerBound] }
+                facts.target = String(path.split(separator: "\\").last ?? path)
             }
             if let r = line.range(of: "[session-log] Steam game ") {
                 facts.steamGame = String(line[r.upperBound...].prefix { $0 != ":" })
@@ -184,6 +189,7 @@ enum LogSummary {
                 facts.quitAsked = facts.lastTime ?? "?"
             }
             if line.contains("[frontend] force close") { facts.forceClosed = true }
+            if line.contains("[WineProc] the main process exited while"), line.contains("(steam.exe)") { facts.handedToSteam = true }
             if let r = line.range(of: "no hole fits a ") {
                 facts.poolWantedMB = Int(line[r.upperBound...].prefix { $0.isNumber })
                 facts.smallPool = true
@@ -247,6 +253,9 @@ enum LogSummary {
             problems.append("\(m.name) could not be loaded: out of memory" + (m.program.map { " (in \($0))" } ?? "") + ".")
         }
         if let report = f.exitReport { problems.append("The program stopped with Windows error \(report).") }
+        if f.handedToSteam, f.dock.isEmpty {
+            problems.append("The game started Steam and closed itself: it only runs when Steam starts it. Start it with Madeira Dock (Game details > Steam > Start with).")
+        }
         problems += f.unhandled.map { "Unhandled exception: \($0)" }
         if let words = dockWords(f.dock) { problems.append("Madeira Dock: \(words)") }
         out.append("")
