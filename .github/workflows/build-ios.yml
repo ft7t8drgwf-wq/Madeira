@@ -1,7 +1,7 @@
 # Unsigned iOS IPA for sideloading (SideStore / AltStore / Sideloadly / etc.).
 #
 # Builds every native input the app links from the pinned submodules (docs/BUILDING.md),
-# then the app itself, and uploads Madeira-sideload.ipa as a workflow artifact.
+# then the app itself, and uploads Madeira-build-<run number>.ipa as a workflow artifact.
 # The Windows-side DLL farms (aarch64-windows, arm64ec-windows) are tracked and used as is;
 # the optional 32-bit WoW64 farm (build/wine-i386) is not built.
 #
@@ -362,14 +362,14 @@ jobs:
           cp -R "$APP" Payload/
           # Ad-hoc sign with the entitlements so sideloaders carry them over (JIT, memory limit)
           codesign --force --sign - --entitlements app/Madeira/Madeira.entitlements Payload/Madeira.app
-          zip -qry Madeira-sideload.ipa Payload
-          ls -lh Madeira-sideload.ipa
+          zip -qry "Madeira-build-${{ github.run_number }}.ipa" Payload
+          ls -lh "Madeira-build-${{ github.run_number }}.ipa"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Madeira-sideload-ipa
-          path: Madeira-sideload.ipa
+          name: Madeira-build-${{ github.run_number }}
+          path: Madeira-build-${{ github.run_number }}.ipa
           retention-days: 14
 
       - name: Print compiler errors
