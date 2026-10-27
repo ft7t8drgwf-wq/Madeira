@@ -1,0 +1,62 @@
+diff --git a/server/thread.c b/server/thread.c
+index ea1c2ad..9acb77d 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1771,7 +1771,17 @@ static inline int is_in_apc_wait( struct thread *thread )
+  * virtual desktop start, and the taskbar never painted. Only this failure path changes, and only
+  * for APC_ASYNC_IO; other system APCs are unchanged. [apc-requeue] logs the first 16 handovers
+  * (then every 1024th) with the APC's status and thread ids only.
+- * MADEIRA_APC_REQUEUE=0 restores the drop. */
++ * MADEIRA_APC_REQUEUE=0 restores the drop.
++ *
++ * A process with one thread has nobody to hand it to, so it was always dropped there. The 32-bit
++ * SteamService.exe is such a process: its first RPC bind on \pipe\svcctl returned 0 bytes
++ * ("Short read of header", error 1726) although services.exe had written the bind-ack, and the
++ * Dock's CEG step for Black Ops (42700) failed with 55. When no other thread is waiting, the APC
++ * now stays on the busy thread, but only when the process has no madsync device: the waits that
++ * a system APC does not end are madsync's in-process waits (the Explorer hang above). Without
++ * it, every wait that can last reaches the server with SELECT_INTERRUPTIBLE (fastsync parks for
++ * at most its cap first), where check_wait returns STATUS_KERNEL_APC and the thread runs the
++ * client half itself. MADEIRA_APC_KEEP=0 drops it again. */
+ static int ios_apc_requeue_enabled( void )
+ {
+     static int enabled = -1;
+@@ -1788,7 +1798,24 @@ static int ios_apc_requeue_enabled( void )
+     return enabled;
+ }
+ 
+-/* the thread to queue an undeliverable async I/O APC on, or NULL to drop it as before */
++static int ios_apc_keep_enabled( void )
++{
++    static int enabled = -1;
++
++    if (enabled < 0)
++    {
++        /* On by default: with no waiting thread to hand it to, the APC stays queued on the busy
++         * thread for its next server wait. 0 drops it, as before. */
++        const char *e = getenv( "MADEIRA_APC_KEEP" );
++        enabled = !(e && e[0] == '0');
++        fprintf( stderr, "[apc-requeue] keep %s (MADEIRA_APC_KEEP=0 drops an async I/O APC no other "
++                 "thread can take)\n", enabled ? "on" : "off" );
++    }
++    return enabled;
++}
++
++/* the thread to queue an undeliverable async I/O APC on (the busy thread itself when it is kept),
++ * or NULL to drop it as before */
+ static struct thread *ios_apc_requeue_target( struct thread *thread, const struct thread_apc *apc )
+ {
+     static unsigned int count;
+@@ -1804,10 +1831,12 @@ static struct thread *ios_apc_requeue_target( struct thread *thread, const struc
+             break;
+         }
+     }
++    if (!target && !thread->alert_sync && ios_apc_keep_enabled()) target = thread;
+     count++;
+     if (count <= 16 || !(count & 1023))
+         fprintf( stderr, "[apc-requeue] #%u async I/O APC status=%08x for busy thread %04x -> %s %04x\n",
+                  count, apc->call.async_io.status, thread->id,
++                 target == thread ? "kept for its next server wait, no waiting thread" :
+                  target ? "waiting thread" : "dropped, no waiting thread", target ? target->id : 0 );
+     return target;
+ }
