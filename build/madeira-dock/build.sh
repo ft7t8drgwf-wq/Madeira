@@ -26,6 +26,9 @@ OUT="$REPO_ROOT/app/Madeira/arm64ec-windows"
 [ -f "$SRC/src/main.c" ] || { echo "madeira-dock is missing: git submodule update --init madeira-dock" >&2; exit 1; }
 [ -x "$CC" ] || { echo "missing cross compiler: $CC (set LLVM_MINGW)" >&2; exit 1; }
 
+# this repository's Dock patches (build/dock-patches) go in before the compile
+"$REPO_ROOT/build/dock-patches/apply.sh"
+
 if [ "${1:-}" = "--check" ]; then
     (cd "$SRC" && bash tools/check.sh)
 fi
