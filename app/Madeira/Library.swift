@@ -2844,42 +2844,9 @@ struct LibraryView: View {
     }
     @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                if zoomableGrid {
-                    // The new grid is sized by pinching, so the layout menu has no card sizes: one "Cards" entry
-                    // stands for the grid (either stored size), and the pinched size is kept.
-                    Picker("Library layout", selection: Binding(
-                        get: { layout == "compact" ? "cards" : layout },
-                        set: { picked in
-                            if picked == "cards", layout == "cards" || layout == "compact" { return }
-                            layout = picked
-                        })) {
-                        Label("Cards", systemImage: "square.grid.2x2").tag("cards")
-                        Label("List", systemImage: "list.bullet").tag("list")
-                        Label("Compact list", systemImage: "list.dash").tag("compactList")
-                    }
-                } else {
-                    // Cards and Compact cards also reset the zoomable grid's pinched size.
-                    Picker("Library layout", selection: Binding(get: { layout }, set: { layout = $0; gridPosition = -1 })) {
-                        Label("Cards", systemImage: "square.grid.2x2").tag("cards")
-                        Label("Compact cards", systemImage: "square.grid.3x3").tag("compact")
-                        Label("List", systemImage: "list.bullet").tag("list")
-                        Label("Compact list", systemImage: "list.dash").tag("compactList")
-                    }
-                }
-                Picker("Group by", selection: $group) {
-                    Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
-                    Label("Installed", systemImage: "arrow.down.circle").tag("installed")
-                    Label("Platform", systemImage: "square.stack").tag("platform")
-                    Label("None", systemImage: "square.grid.2x2").tag("none")
-                }.pickerStyle(.menu)
-                Picker("Sort by", selection: $sort) {
-                    Label("Last played", systemImage: "clock").tag("played")
-                    Label("Name", systemImage: "textformat.abc").tag("name")
-                    Label("Recently added", systemImage: "plus").tag("added")
-                    Label("Folder size", systemImage: "internaldrive").tag("size")
-                }
-            } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
+            // Its own view: rebuilt with the library, an open menu redrew itself on
+            // every Steam download progress report (4 times a second) and flickered.
+            LibraryOptionsMenu()
         }
         ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
     }
@@ -5518,5 +5485,55 @@ private struct LaunchFloodShape: Shape {
             if !model.startingScreen && model.current == nil && model.startingJIT == nil && t > 2.5 { retract(); return }
             if t > 4 { handOff(to: .zero, style: CoverStyle(corner: 14, shadowOpacity: 0, shadowRadius: 0, shadowOffset: .zero), landed: {}); return }
         }
+    }
+}
+
+/// The library's layout, group and sort menu. It reads the same stored settings as the
+/// library but observes nothing else, so SwiftUI does not rebuild it (and UIKit does not
+/// redraw it while open) each time a library model publishes.
+private struct LibraryOptionsMenu: View {
+    @AppStorage("madeiraLibraryLayout") private var layout = "cards"
+    @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
+    @AppStorage(LibraryGridSize.key) private var gridPosition: Double = -1
+    @AppStorage("madeiraLibrarySort") private var sort = "played"
+    @AppStorage("madeiraLibraryGroup") private var group = "platform"
+
+    var body: some View {
+        Menu {
+            if zoomableGrid {
+                // The new grid is sized by pinching, so the layout menu has no card sizes: one "Cards" entry
+                // stands for the grid (either stored size), and the pinched size is kept.
+                Picker("Library layout", selection: Binding(
+                    get: { layout == "compact" ? "cards" : layout },
+                    set: { picked in
+                        if picked == "cards", layout == "cards" || layout == "compact" { return }
+                        layout = picked
+                    })) {
+                    Label("Cards", systemImage: "square.grid.2x2").tag("cards")
+                    Label("List", systemImage: "list.bullet").tag("list")
+                    Label("Compact list", systemImage: "list.dash").tag("compactList")
+                }
+            } else {
+                // Cards and Compact cards also reset the zoomable grid's pinched size.
+                Picker("Library layout", selection: Binding(get: { layout }, set: { layout = $0; gridPosition = -1 })) {
+                    Label("Cards", systemImage: "square.grid.2x2").tag("cards")
+                    Label("Compact cards", systemImage: "square.grid.3x3").tag("compact")
+                    Label("List", systemImage: "list.bullet").tag("list")
+                    Label("Compact list", systemImage: "list.dash").tag("compactList")
+                }
+            }
+            Picker("Group by", selection: $group) {
+                Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
+                Label("Installed", systemImage: "arrow.down.circle").tag("installed")
+                Label("Platform", systemImage: "square.stack").tag("platform")
+                Label("None", systemImage: "square.grid.2x2").tag("none")
+            }.pickerStyle(.menu)
+            Picker("Sort by", selection: $sort) {
+                Label("Last played", systemImage: "clock").tag("played")
+                Label("Name", systemImage: "textformat.abc").tag("name")
+                Label("Recently added", systemImage: "plus").tag("added")
+                Label("Folder size", systemImage: "internaldrive").tag("size")
+            }
+        } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
     }
 }
