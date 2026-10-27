@@ -293,6 +293,73 @@ enum IniSettingHelp {
     ]
 }
 
+/// Ready-made settings for a Bethesda game's Prefs file (FalloutPrefs.ini,
+/// SkyrimPrefs.ini, Oblivion.ini …), for an iPhone or an iPad. Only settings the
+/// file already has change; nothing is added. The size follows the screen's shape.
+struct IniPreset: Identifiable {
+    let id: String
+    let name: String
+    let summary: String
+    /// Share of the screen's native size the game draws at.
+    let scale: Double
+    /// (section, key, value), sections without brackets.
+    let values: [(String, String, String)]
+
+    static let all: [IniPreset] = [
+        IniPreset(id: "light", name: "iPhone: light", summary: "Half the screen's resolution, low shadows, short grass and fewer reflections. Fastest.",
+                  scale: 0.5, values: [
+                    ("Display", "iMultiSample", "0"), ("Display", "iMaxAnisotropy", "0"),
+                    ("Display", "iTexMipMapSkip", "1"), ("Display", "iShadowMapResolution", "512"),
+                    ("Display", "iActorShadowCountExt", "0"), ("Display", "iActorShadowCountInt", "1"),
+                    ("Display", "bShadowsOnGrass", "0"), ("Display", "bDoDepthOfField", "0"),
+                    ("Display", "bUseWaterReflections", "0"), ("Display", "bFXAAEnabled", "1"),
+                    ("Display", "sAntiAliasing", "FXAA"),
+                    ("Grass", "fGrassStartFadeDistance", "1000.0000"), ("Grass", "iMinGrassSize", "120"),
+                  ]),
+        IniPreset(id: "balanced", name: "iPad: balanced", summary: "Three quarters of the screen's resolution, medium shadows and grass, FXAA smoothing.",
+                  scale: 0.75, values: [
+                    ("Display", "iMultiSample", "0"), ("Display", "iMaxAnisotropy", "4"),
+                    ("Display", "iTexMipMapSkip", "0"), ("Display", "iShadowMapResolution", "1024"),
+                    ("Display", "iActorShadowCountExt", "2"), ("Display", "iActorShadowCountInt", "4"),
+                    ("Display", "bShadowsOnGrass", "0"), ("Display", "bDoDepthOfField", "0"),
+                    ("Display", "bUseWaterReflections", "1"), ("Display", "bFXAAEnabled", "1"),
+                    ("Display", "sAntiAliasing", "FXAA"),
+                    ("Grass", "fGrassStartFadeDistance", "3000.0000"), ("Grass", "iMinGrassSize", "80"),
+                  ]),
+    ]
+
+    /// A Bethesda Prefs file: it has [Display] iSize W.
+    static func fits(_ document: IniDocument) -> Bool {
+        document.value(section: "Display", key: "iSize W") != nil
+    }
+
+    /// The game's size for a screen of `width` x `height` native pixels: landscape,
+    /// scaled, even numbers.
+    static func size(width: Int, height: Int, scale: Double) -> (width: Int, height: Int) {
+        let long = max(width, height), short = min(width, height)
+        func even(_ v: Double) -> Int { max(2, Int(v / 2) * 2) }
+        return (even(Double(long) * scale), even(Double(short) * scale))
+    }
+
+    /// Sets the preset's values (and the size) on the settings the file has. Returns how many changed.
+    @discardableResult
+    func apply(to document: inout IniDocument, screenWidth: Int, screenHeight: Int) -> Int {
+        let size = Self.size(width: screenWidth, height: screenHeight, scale: scale)
+        var changed = 0
+        let all = values + [("Display", "iSize W", String(size.width)), ("Display", "iSize H", String(size.height))]
+        for (section, key, value) in all {
+            let matches = document.settings.filter {
+                $0.section.caseInsensitiveCompare(section) == .orderedSame && $0.key.caseInsensitiveCompare(key) == .orderedSame
+            }
+            for setting in matches where setting.value != value {
+                document.set(line: setting.line, to: value)
+                changed += 1
+            }
+        }
+        return changed
+    }
+}
+
 // MARK: Views
 
 /// Game details › Settings files: the game's added .ini files, and "Add .ini file".
@@ -394,6 +461,7 @@ struct IniFileEditor: View {
     @State private var note: String?
     @State private var error: String?
     @State private var info: IniDocument.Setting?
+    @State private var applying: IniPreset?
 
     private var url: URL { LibraryModel.drive.appendingPathComponent(file) }
 
@@ -419,6 +487,21 @@ struct IniFileEditor: View {
         .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(!changed) }
+            if let document, IniPreset.fits(document) {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        ForEach(IniPreset.all) { preset in
+                            Button { applying = preset } label: { Text(preset.name) }
+                        }
+                    } label: { Label("Presets", systemImage: "wand.and.stars") }
+                }
+            }
+        }
+        .confirmationDialog(applying?.name ?? "", isPresented: Binding(get: { applying != nil }, set: { if !$0 { applying = nil } }),
+                            titleVisibility: .visible, presenting: applying) { preset in
+            Button("Use these settings") { use(preset) }
+        } message: { preset in
+            Text(preset.summary + " Only settings already in this file change. Nothing is saved until you tap Save.")
         }
         .onAppear { if document == nil { load() } }
         .alert(info?.key ?? "", isPresented: Binding(get: { info != nil }, set: { if !$0 { info = nil } }), presenting: info) { _ in
@@ -459,6 +542,17 @@ struct IniFileEditor: View {
         guard document?.settings.first(where: { $0.line == line })?.value != value else { return }
         document?.set(line: line, to: value)
         changed = true
+    }
+
+    private func use(_ preset: IniPreset) {
+        guard var edited = document else { return }
+        let screen = UIScreen.main.nativeBounds.size
+        let count = preset.apply(to: &edited, screenWidth: Int(screen.width), screenHeight: Int(screen.height))
+        document = edited
+        if count > 0 { changed = true }
+        note = count == 0 ? "\(preset.name): this file already has these settings."
+            : "\(preset.name): \(count) setting\(count == 1 ? "" : "s") changed. Tap Save to keep them, and set the same size in this game's Display page."
+        LogStore.shared.log("[ini-editor] preset \(preset.id) changed=\(count) \(file)")
     }
 
     private func load() {

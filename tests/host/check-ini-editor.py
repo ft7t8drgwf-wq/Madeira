@@ -54,6 +54,9 @@ check('LibraryModel' not in foundation and 'LogStore' not in foundation, 'the mo
 check('Image(systemName: "info.circle")' in source and 'IniSettingHelp.describe(key: setting.key)' in source,
       'each setting has a blue info button with its description')
 
+check('Label("Presets", systemImage: "wand.and.stars")' in source and 'IniPreset.fits(document)' in source,
+      'Bethesda Prefs files get a Presets menu')
+
 main_swift = r'''
 import Foundation
 func show(_ s: String) -> String { s.replacingOccurrences(of: "\r", with: "<CR>").replacingOccurrences(of: "\n", with: "<LF>") }
@@ -92,6 +95,13 @@ print("help=" + [IniSettingHelp.describe(key: "uGridsToLoad") != nil, IniSetting
                   IniSettingHelp.describe(key: "bSomethingNew") == "A switch: 1 is on, 0 is off.", IniSettingHelp.describe(key: "whatever") == nil]
                   .map { "\($0)" }.joined(separator: ","))
 let drive = URL(fileURLWithPath: CommandLine.arguments[1])
+let prefs = "[Display]\r\niSize W=1280\r\niSize H=720\r\niShadowMapResolution=2048\r\nbShadowsOnGrass=1\r\n[Grass]\r\niMinGrassSize=40\r\n"
+var p = IniDocument(text: prefs)
+let light = IniPreset.all.first { $0.id == "light" }!
+let changed = light.apply(to: &p, screenWidth: 1179, screenHeight: 2556)
+print("preset=\(IniPreset.fits(p)),\(IniPreset.fits(IniDocument(text: "a=1\n"))),\(changed)")
+print("presetText=" + show(p.text))
+print("presetAgain=\(light.apply(to: &p, screenWidth: 1179, screenHeight: 2556))")
 print("found=" + GameIniFiles.candidates(drive: drive, gameFolder: "Games/NV").sorted().joined(separator: ","))
 '''
 
@@ -133,6 +143,10 @@ else:
         check(out['folder'] == 'Games/NV|Games/NV', "the game's folder: the program's, or a Steam install folder")
         check(out['list'] == 'x/B.ini', 'each game keeps its own list, once per file')
         check(out['help'] == 'true,true,true,true', 'the info button: known settings, then the kind from the name')
+        check(out['preset'] == 'true,false,5', 'presets are for Bethesda Prefs files and change only settings the file has')
+        check(out['presetText'] == '[Display]<CR><LF>iSize W=1278<CR><LF>iSize H=588<CR><LF>iShadowMapResolution=512<CR><LF>'
+              'bShadowsOnGrass=0<CR><LF>[Grass]<CR><LF>iMinGrassSize=120<CR><LF>', 'a preset: landscape size from the screen, nothing added')
+        check(out['presetAgain'] == '0', 'a preset applied twice changes nothing the second time')
         check(out['found'] == 'Games/NV/Fallout_default.ini,users/steamuser/Documents/My Games/FalloutNV/Fallout.ini',
               "candidates: the game's folder and My Games, not other games")
 
