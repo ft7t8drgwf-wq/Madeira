@@ -306,6 +306,22 @@ enum SteamDirectStart {
         return nil
     }
 
+    /// The program Steam's launch settings start when none of the Windows entries'
+    /// programs is in the install folder (Valve's client then stops with
+    /// launch-client-error 28, "could not find the game's executable"); nil when one
+    /// is there or Steam's settings are not known.
+    static func missingProgram(_ options: [SteamLaunchOption], installFolder root: URL) -> String? {
+        // The entries choose() considers: the game itself, for Windows, outside beta branches.
+        let windows = options.filter { option in
+            option.betaKey.isEmpty && !option.executable.isEmpty && !otherKinds.contains(option.type.lowercased()) &&
+                (option.requiredDLC == nil || option.requiredDLC == "" || option.requiredDLC == "0") &&
+                (option.oslist.isEmpty || option.oslist.lowercased().contains("windows"))
+        }
+        guard let first = windows.first(where: { $0.type.lowercased() == "default" }) ?? windows.first,
+              choose(options, installFolder: root) == nil else { return nil }
+        return String(first.executable.replacingOccurrences(of: "/", with: "\\").prefix(200))
+    }
+
     /// The install folder's Windows programs for the Program picker: every .exe up to
     /// six folders deep (linked folders are not followed), at most 400, sorted.
     static func programs(in root: URL) -> [String] {
@@ -1249,6 +1265,8 @@ struct SteamEntrySection: View {
     @State private var resolving = false
     /// Madeira Dock's "Steam starts" choice (DockStartProgram); nil: Steam's own program.
     @State private var dockProgram: String?
+    /// The program Steam's launch settings name when it is missing from the install folder.
+    @State private var missingProgram: String?
 
     var body: some View {
         let appID = entry.steamAppID ?? 0
@@ -1332,6 +1350,11 @@ struct SteamEntrySection: View {
                     Text("Adds the game's \(SteamLanguage.name(wanted)) content and tells Steam to start it in that language. Files of the current language are kept.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+            if let missingProgram, download == nil, dockProgram == nil {
+                Text("Steam's launch settings start \(missingProgram), which is not in the game's folder, so Steam will stop with \"could not find the game's executable\"." +
+                     (downloads ? " Repair installed files downloads it again." : ""))
+                    .font(.caption).foregroundStyle(.orange)
             }
             if downloads, download == nil {
                 Button { steam.repair(appID) } label: { Label("Repair installed files", systemImage: "arrow.triangle.2.circlepath") }
@@ -1425,6 +1448,17 @@ struct SteamEntrySection: View {
         let folder = LibraryModel.drive.appendingPathComponent(entry.relativePath, isDirectory: true)
         let found = await Task.detached(priority: .userInitiated) { SteamDirectStart.programs(in: folder) }.value
         programs = found
+        // Steam's cached launch settings only: no Steam request just for this note.
+        let launches = steam.game(appID)?.launches ?? []
+        let installed = games.games.first { $0.id == appID }?.installed == true
+        if installed {
+            missingProgram = await Task.detached(priority: .utility) {
+                SteamDirectStart.missingProgram(launches, installFolder: folder)
+            }.value
+        } else {
+            missingProgram = nil
+        }
+        if missingProgram != nil { LogStore.shared.log("[steam-start] app=\(appID) launch program missing from the install folder") }
         // Madeira Dock's "Steam starts" needs only the list.
         guard entry.startsSteamGameDirectly else { return }
         if entry.steamProgramSource == "choice", let program = entry.steamProgram, found.contains(program) { return }

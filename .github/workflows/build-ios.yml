@@ -329,6 +329,7 @@ jobs:
           python3 tests/host/check-registry-editor.py --require-swift
           python3 tests/host/check-steam-files-flag.py --require-swift
           python3 tests/host/check-steam-owned-dlc.py
+          python3 tests/host/check-steam-missing-program.py
 
       - name: Host check for the starting screen (does not block the IPA)
         continue-on-error: true
