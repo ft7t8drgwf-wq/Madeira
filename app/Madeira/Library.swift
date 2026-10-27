@@ -729,6 +729,17 @@ final class LibraryModel: ObservableObject {
     }
     @Published var error: String? { didSet { if error != nil { preparing = nil } } }
     @Published var sessionMessage = ""
+    /// Quit game was asked for and the program is still running after `forceCloseAfter`
+    /// seconds: a frozen program never handles Alt+F4, so the menu offers to close Madeira.
+    @Published var forceCloseOffered = false
+    static let forceCloseAfter: TimeInterval = 10
+    /// A Dock session whose game ended: Madeira Dock shut Valve's client down, and
+    /// explorer's desktop is asked to close so the session returns to the library.
+    /// Close Madeira is offered if the session is still up `forceCloseAfter` seconds later.
+    @Published var dockGameEnded = false
+    private var dockGameEndedAt: Date?
+    private var quitRequestedAt: Date?
+    private var smallPoolNoted = false
     @Published var launching = false
     @Published var overlayFields = ["FPS", "Frame time", "RAM", "Battery"]
     private var launchPresent: UInt64 = 0
@@ -1206,7 +1217,8 @@ final class LibraryModel: ObservableObject {
     /// `dock`: the game a Madeira Dock start launches (DockStartScreen).
     func begin(_ entry: LibraryEntry, remember: Bool = true, dock: DockGame? = nil) {
         wine_exit_status_reset()
-        quitRequested = false
+        JITPoolMeter.reset(); smallPoolNoted = false
+        quitRequested = false; quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
         Self.sessionsThisRun += 1
         launchPresent = madeira_get_present_count(); launchStarted = Date(); launchSlow = false; launchLogs = entry.liveLogs
@@ -1270,10 +1282,38 @@ final class LibraryModel: ObservableObject {
                 showGameView(reason: "surface")
             } else if Date().timeIntervalSince(launchStarted) > 30 { launchSlow = true }
         }
+        // iPadOS gave the JIT pool less room than asked at launch: say so once the game is up.
+        if !smallPoolNoted, !launching, current != nil, JITPoolMeter.current.shrunk {
+            smallPoolNoted = true
+            let words = "JIT memory is small this time (\(JITPoolMeter.current.sizeMB.map { "\($0) MB" } ?? "smaller than usual")). " +
+                "Big games may stop loading; closing and reopening Madeira can give more."
+            sessionMessage = words
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+                if self?.sessionMessage == words { self?.sessionMessage = "" }
+            }
+        }
         if wine_process_is_running() != 0 {
             sawProcess = true
             if sessionMessage == "Starting…" { sessionMessage = "" }
         } else if sawProcess && wineserver_is_running() == 0 { finish() }
+        if current != nil, !forceCloseOffered, let asked = quitRequestedAt,
+           Date().timeIntervalSince(asked) > Self.forceCloseAfter {
+            forceCloseOffered = true
+            sessionMessage = "The game did not close. Open the menu to force-close Madeira."
+            fputs("[frontend] still running \(Int(Self.forceCloseAfter)) s after the close request; force close offered\n", stderr)
+        }
+        if current != nil, dockGameEndedAt == nil, !launching, DockStartScreen.shared.active,
+           MainActor.assumeIsolated({ MadeiraDock.pollReport().result }) == 0 {
+            dockGameEndedAt = Date()
+            sessionMessage = "The game has closed. Returning to the library…"
+            winios_close_desktop()
+            fputs("[frontend] the Dock game ended and Steam shut down; closing the desktop\n", stderr)
+        }
+        if current != nil, !dockGameEnded, let ended = dockGameEndedAt, Date().timeIntervalSince(ended) > Self.forceCloseAfter {
+            dockGameEnded = true; forceCloseOffered = true; menu = true
+            sessionMessage = "The game has closed."
+            fputs("[frontend] the desktop is still up \(Int(Self.forceCloseAfter)) s after the Dock game ended; Close Madeira offered\n", stderr)
+        }
         // The first frame gives Aspect and Fill height the drawable's shape.
         if current != nil, !laidOutAfterFirstPresent, madeira_get_present_count() != MetalBackedView.presentCountAtLaunch {
             laidOutAfterFirstPresent = true
@@ -1343,6 +1383,7 @@ final class LibraryModel: ObservableObject {
     func requestQuit() {
         LibraryKeyboard.hide()
         quitRequested = true
+        if quitRequestedAt == nil { quitRequestedAt = Date() }
         // Ask the application to close (Alt+F4) through the normal input queue,
         // so it can save; the surface stays up until the native session ends.
         winios_post_key(0x12, 1); winios_post_key(0x73, 1)
@@ -1385,6 +1426,7 @@ final class LibraryModel: ObservableObject {
         GestureZonesModel.shared.selected = nil; GestureZonesModel.shared.zones = savedZones
         if ControlPresetsModel.enabled { controls.layoutID = savedLayout }
         current = nil; activeEntry = nil; menu = false; sessionMessage = ""
+        quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
         displayMode = .fit
         LogStore.shared.setDisplayActive(true)
         launching = false; launchLogs = false; LibraryKeyboard.hide()
@@ -1394,6 +1436,7 @@ final class LibraryModel: ObservableObject {
         ProMotionIntent.shared.setActive(false)
         ThermalPacing.shared.end()
         fputs("[frontend] returned to library\n", stderr)
+        LogSummary.writeLater(from: LogStore.shared.logURL, source: "madeira-log.txt (this session)")
     }
 }
 
@@ -2801,42 +2844,9 @@ struct LibraryView: View {
     }
     @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                if zoomableGrid {
-                    // The new grid is sized by pinching, so the layout menu has no card sizes: one "Cards" entry
-                    // stands for the grid (either stored size), and the pinched size is kept.
-                    Picker("Library layout", selection: Binding(
-                        get: { layout == "compact" ? "cards" : layout },
-                        set: { picked in
-                            if picked == "cards", layout == "cards" || layout == "compact" { return }
-                            layout = picked
-                        })) {
-                        Label("Cards", systemImage: "square.grid.2x2").tag("cards")
-                        Label("List", systemImage: "list.bullet").tag("list")
-                        Label("Compact list", systemImage: "list.dash").tag("compactList")
-                    }
-                } else {
-                    // Cards and Compact cards also reset the zoomable grid's pinched size.
-                    Picker("Library layout", selection: Binding(get: { layout }, set: { layout = $0; gridPosition = -1 })) {
-                        Label("Cards", systemImage: "square.grid.2x2").tag("cards")
-                        Label("Compact cards", systemImage: "square.grid.3x3").tag("compact")
-                        Label("List", systemImage: "list.bullet").tag("list")
-                        Label("Compact list", systemImage: "list.dash").tag("compactList")
-                    }
-                }
-                Picker("Group by", selection: $group) {
-                    Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
-                    Label("Installed", systemImage: "arrow.down.circle").tag("installed")
-                    Label("Platform", systemImage: "square.stack").tag("platform")
-                    Label("None", systemImage: "square.grid.2x2").tag("none")
-                }.pickerStyle(.menu)
-                Picker("Sort by", selection: $sort) {
-                    Label("Last played", systemImage: "clock").tag("played")
-                    Label("Name", systemImage: "textformat.abc").tag("name")
-                    Label("Recently added", systemImage: "plus").tag("added")
-                    Label("Folder size", systemImage: "internaldrive").tag("size")
-                }
-            } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
+            // Its own view: rebuilt with the library, an open menu redrew itself on
+            // every Steam download progress report (4 times a second) and flickered.
+            LibraryOptionsMenu()
         }
         ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
     }
@@ -2888,6 +2898,18 @@ struct LibraryView: View {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
+            if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
+                Section {
+                    Button { settingsSheet = .registry } label: {
+                        LabeledContent { Image(systemName: "chevron.right").foregroundStyle(.tertiary) } label: {
+                            Label("Registry", systemImage: "list.bullet.indent")
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                } header: { Text("Wine") } footer: {
+                    Text("Look at and change Wine's registry, like regedit. Changes are saved while no game or Windows desktop is running.")
+                }
+            }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
@@ -2949,6 +2971,7 @@ struct LibraryView: View {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
             case .dock: MadeiraDockView(start: startDock)
+            case .registry: RegistryEditorView()
             }
         }
     }
@@ -3325,7 +3348,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, library, advanced
+        case display, controls, launch, compatibility, steam, cloud, library, iniFiles, dllOverrides, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3335,6 +3358,8 @@ struct LibraryDetail: View {
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
             case .library: return "Library details"
+            case .iniFiles: return "Settings files"
+            case .dllOverrides: return "DLL overrides"
             case .advanced: return "Advanced"
             }
         }
@@ -3347,6 +3372,8 @@ struct LibraryDetail: View {
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
             case .library: return "info.circle"
+            case .iniFiles: return "doc.text"
+            case .dllOverrides: return "puzzlepiece.extension"
             case .advanced: return "wrench.and.screwdriver"
             }
         }
@@ -3358,7 +3385,7 @@ struct LibraryDetail: View {
         let launch = entry.usesLaunchOptions || (entry.desktop != true && entry.steamAppID == nil)
         let steam: [Page] = entry.steamAppID == nil ? [] : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
-        let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .advanced]
+        let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
     }
     /// The value a page's row shows, when one setting sums it up.
@@ -3369,6 +3396,12 @@ struct LibraryDetail: View {
         case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? "Wine desktop" : "Directly") : nil
         case .steam: return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
         case .advanced: return Self.configSummary(bcd.configText)   // madeira-bcd: the game's own config file
+        case .iniFiles:
+            let count = GameIniFiles.files(entry.windowsPath).count
+            return count == 0 ? nil : count == 1 ? "1 file" : "\(count) files"
+        case .dllOverrides:
+            let count = DllOverrides.read(config: bcd.configText).entries.count
+            return count == 0 ? nil : "\(count)"
         default: return nil
         }
     }
@@ -3383,6 +3416,8 @@ struct LibraryDetail: View {
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
             case .library: libraryPage
+            case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
+            case .dllOverrides: GameDllOverridesSection(windowsPath: entry.windowsPath, gameFolder: overridesGameFolder) { reloadBCD() }
             case .advanced: advancedPage
             }
         }
@@ -3524,7 +3559,10 @@ struct LibraryDetail: View {
                 ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
             }
             Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
-                compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
+                compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors and GPU-check crashes")
+            }
+            Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
+                compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
             }
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel("Wine's C++ runtime", "Instead of the game's msvcp/vcruntime")
@@ -3591,6 +3629,21 @@ struct LibraryDetail: View {
             Section { Button("Remove from library", role: .destructive) { remove = true } }
         }
         if let error { Section { Text(error).foregroundStyle(.red) } }
+    }
+
+    /// The game's folder under drive_c, where Settings files looks for .ini files.
+    private var iniGameFolder: String {
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: LibraryModel.drive.appendingPathComponent(entry.relativePath).path, isDirectory: &isDirectory)
+        return GameIniFiles.gameFolder(relativePath: entry.relativePath, isDirectory: exists && isDirectory.boolValue)
+    }
+
+    /// The game's folder under drive_c, where DLL overrides lists the game's DLLs.
+    private var overridesGameFolder: String {
+        guard entry.desktop != true else { return "" }
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: LibraryModel.drive.appendingPathComponent(entry.relativePath).path, isDirectory: &isDirectory)
+        return DllOverrides.gameFolder(relativePath: entry.relativePath, isDirectory: exists && isDirectory.boolValue)
     }
 
     @ViewBuilder private var advancedPage: some View {
@@ -3741,12 +3794,13 @@ struct LibraryDetail: View {
 /// madeira-bcd: a game's own options as the fork stores them (LibraryDetail):
 /// LibraryPrefs' switches and the GameProfiles.swift file's lines.
 struct BCDGameValues {
-    var avx = false, nvidia = false, wineVCRT = false
+    var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false
     var configText = ""
     init() {}
     init(windowsPath: String) {
         avx = LibraryPrefs.avx(windowsPath)
         nvidia = LibraryPrefs.nvidia(windowsPath)
+        olderNvidia = LibraryPrefs.olderNvidia(windowsPath)
         wineVCRT = LibraryPrefs.wineVCRT(windowsPath)
         configText = GameProfile(windowsPath: windowsPath).text
     }
@@ -4148,7 +4202,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, dock
+    case allSettings, steamSignIn, dock, registry
     var id: String { rawValue }
 }
 
@@ -4536,10 +4590,13 @@ struct LibraryHUD: View {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(spacing: 8) {
                             Text(dockStatus).foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
+                            if let activity = dockStart.steamActivity {
+                                Text(activity).font(.caption).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center).frame(maxWidth: 360)
+                            }
                             if let note = DockInstallers.note {
                                 Text(note).font(.caption).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center).frame(maxWidth: 360)
                             }
-                            Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                            Text(DockStartStatus.elapsed(context.date.timeIntervalSince(model.startingSince)))
                                 .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                         }
                     }
@@ -4549,7 +4606,7 @@ struct LibraryHUD: View {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(spacing: 8) {
                             Text(launchIdleStatus).foregroundStyle(.white.opacity(0.7))
-                            Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                            Text(DockStartStatus.elapsed(context.date.timeIntervalSince(model.startingSince)))
                                 .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                         }
                     }.modifier(LaunchEntrance(visible: launchVisible, step: 2, still: curtained))
@@ -4659,10 +4716,13 @@ struct LibraryHUD: View {
                         Text(status).font(.subheadline).foregroundStyle(.white.opacity(0.78))
                             .contentTransition(.opacity).animation(.easeInOut(duration: 0.3), value: status)
                     }
+                    if dockStart.active, let activity = dockStart.steamActivity {
+                        Text(activity).font(.caption).foregroundStyle(.white.opacity(0.7)).frame(maxWidth: 440, alignment: .leading)
+                    }
                     if dockStart.active, let note = DockInstallers.note {
                         Text(note).font(.caption).foregroundStyle(.white.opacity(0.6)).frame(maxWidth: 440, alignment: .leading)
                     }
-                    Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                    Text(DockStartStatus.elapsed(context.date.timeIntervalSince(model.startingSince)))
                         .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                 }
             }
@@ -4793,7 +4853,7 @@ struct LibraryHUD: View {
                 Divider()
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
-                    ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "Battery", "Thermal"], id: \.self) { field in
+                    ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "JIT memory", "Battery", "Thermal"], id: \.self) { field in
                         Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
@@ -4834,6 +4894,25 @@ struct LibraryHUD: View {
                     Label("Quit game", systemImage: "stop.circle").foregroundStyle(.red)
                 }.tint(.red)
                 Text("Closes the running session. Unsaved progress will be lost.").font(.caption).foregroundStyle(.secondary)
+                if model.dockGameEnded {
+                    Button {
+                        LogStore.shared.log("[frontend] closing Madeira after the Dock game ended")
+                        exit(0)
+                    } label: {
+                        Label("Close Madeira", systemImage: "checkmark.circle")
+                    }
+                    Text("The game and Steam have closed, and Steam has saved. Madeira runs one game each time it is opened: open it again to play.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if model.forceCloseOffered {
+                    Button(role: .destructive) {
+                        LogStore.shared.log("[frontend] force close: the program ignored the close request; closing Madeira", level: .error)
+                        exit(0)
+                    } label: {
+                        Label("Force close Madeira", systemImage: "xmark.octagon").foregroundStyle(.red)
+                    }.tint(.red)
+                    Text("The game did not respond to Quit game. This closes Madeira at once: unsaved progress, and settings the game changed in this session, are lost.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(22)
                 .foregroundStyle(.primary)
         }
@@ -4929,6 +5008,8 @@ struct LibraryMetrics: View {
             else { result.append(String(format: "GPU %.0f%%", gpu)) }
         }
         if model.overlayFields.contains("RAM") { result.append("\(memory) MB") }
+        // The memory games' code runs from; "FULL" once a DLL did not fit (JITPoolMeter).
+        if model.overlayFields.contains("JIT memory") { result.append(JITPoolMeter.text(JITPoolMeter.current) ?? "JIT —") }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
         if model.overlayFields.contains("Thermal") {
             switch thermal {
@@ -5404,5 +5485,55 @@ private struct LaunchFloodShape: Shape {
             if !model.startingScreen && model.current == nil && model.startingJIT == nil && t > 2.5 { retract(); return }
             if t > 4 { handOff(to: .zero, style: CoverStyle(corner: 14, shadowOpacity: 0, shadowRadius: 0, shadowOffset: .zero), landed: {}); return }
         }
+    }
+}
+
+/// The library's layout, group and sort menu. It reads the same stored settings as the
+/// library but observes nothing else, so SwiftUI does not rebuild it (and UIKit does not
+/// redraw it while open) each time a library model publishes.
+private struct LibraryOptionsMenu: View {
+    @AppStorage("madeiraLibraryLayout") private var layout = "cards"
+    @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
+    @AppStorage(LibraryGridSize.key) private var gridPosition: Double = -1
+    @AppStorage("madeiraLibrarySort") private var sort = "played"
+    @AppStorage("madeiraLibraryGroup") private var group = "platform"
+
+    var body: some View {
+        Menu {
+            if zoomableGrid {
+                // The new grid is sized by pinching, so the layout menu has no card sizes: one "Cards" entry
+                // stands for the grid (either stored size), and the pinched size is kept.
+                Picker("Library layout", selection: Binding(
+                    get: { layout == "compact" ? "cards" : layout },
+                    set: { picked in
+                        if picked == "cards", layout == "cards" || layout == "compact" { return }
+                        layout = picked
+                    })) {
+                    Label("Cards", systemImage: "square.grid.2x2").tag("cards")
+                    Label("List", systemImage: "list.bullet").tag("list")
+                    Label("Compact list", systemImage: "list.dash").tag("compactList")
+                }
+            } else {
+                // Cards and Compact cards also reset the zoomable grid's pinched size.
+                Picker("Library layout", selection: Binding(get: { layout }, set: { layout = $0; gridPosition = -1 })) {
+                    Label("Cards", systemImage: "square.grid.2x2").tag("cards")
+                    Label("Compact cards", systemImage: "square.grid.3x3").tag("compact")
+                    Label("List", systemImage: "list.bullet").tag("list")
+                    Label("Compact list", systemImage: "list.dash").tag("compactList")
+                }
+            }
+            Picker("Group by", selection: $group) {
+                Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
+                Label("Installed", systemImage: "arrow.down.circle").tag("installed")
+                Label("Platform", systemImage: "square.stack").tag("platform")
+                Label("None", systemImage: "square.grid.2x2").tag("none")
+            }.pickerStyle(.menu)
+            Picker("Sort by", selection: $sort) {
+                Label("Last played", systemImage: "clock").tag("played")
+                Label("Name", systemImage: "textformat.abc").tag("name")
+                Label("Recently added", systemImage: "plus").tag("added")
+                Label("Folder size", systemImage: "internaldrive").tag("size")
+            }
+        } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
     }
 }

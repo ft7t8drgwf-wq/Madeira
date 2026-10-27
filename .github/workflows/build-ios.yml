@@ -1,0 +1,395 @@
+# Unsigned iOS IPA for sideloading (SideStore / AltStore / Sideloadly / etc.).
+#
+# Builds every native input the app links from the pinned submodules (docs/BUILDING.md),
+# then the app itself, and uploads Madeira-sideload.ipa as a workflow artifact.
+# The Windows-side DLL farms (aarch64-windows, arm64ec-windows) are tracked and used as is;
+# the optional 32-bit WoW64 farm (build/wine-i386) is not built.
+#
+# Microsoft's VC++ runtime DLLs are not part of this repository (tools/fetch-vcruntime.md).
+# Manual runs download them from Microsoft into the bundle unless the "vcruntime" input is off;
+# push runs never include them.
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main, claude/project-thread-xnlyvo ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      vcruntime:
+        description: 'Bundle Microsoft VC++ runtime DLLs (downloaded from Microsoft)'
+        type: boolean
+        default: true
+      configuration:
+        description: 'Xcode configuration (Debug is the one that runs games, see docs/BUILDING.md)'
+        type: choice
+        options: [ Debug, Release ]
+        default: Debug
+
+env:
+  MINGW_NAME: llvm-mingw-20260421-ucrt-macos-universal
+  MINGW_SHA256: bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7
+  # LLVM for DXMT's airconv (build/dxmt-ios/README.md)
+  LLVM_VERSION: 15.0.7
+
+jobs:
+  # The 32-bit (i386) Windows farm WoW64 sessions load (docs/WOW64.md, "Building").
+  # It is not tracked and takes hours, so it is cached by the pins it is built from.
+  # Whether the cache has it is looked up on Linux: a Mac is asked for only to build
+  # it, so a cached farm costs no wait for a second macOS runner (macOS 26 runners
+  # were out of capacity for hours on 2026-10-26).
+  i386-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+      hit: ${{ steps.lookup.outputs.cache-hit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - id: key
+        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh', 'build/dxmt-patches/**') }}" >> "$GITHUB_OUTPUT"
+
+      - id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: app/Madeira/i386-windows
+          lookup-only: true
+
+  i386:
+    needs: i386-key
+    if: needs.i386-key.outputs.hit != 'true'
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ needs.i386-key.outputs.key }}
+          path: app/Madeira/i386-windows
+
+      - name: Build the 32-bit (i386) Windows DLLs
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          git submodule update --init --depth 1 wine
+          git submodule update --init --recursive --depth 1 dxmt
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+          brew install meson ninja bison flex
+          export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
+          xcodebuild -downloadComponent MetalToolchain || echo "::warning::MetalToolchain download failed (may already be installed)"
+          mkdir -p toolchains
+          curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/${MINGW_NAME}.tar.xz"
+          echo "${MINGW_SHA256}  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c -
+          tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
+          build/wine-i386/build.sh
+
+      - name: Show the end of the i386 build log
+        if: failure()
+        run: tail -150 wine/build-i386/madeira-i386-build.log || true
+
+  build:
+    needs: [ i386-key, i386 ]
+    # i386 is skipped when the cache already has the farm.
+    if: ${{ !cancelled() && needs.i386-key.result == 'success' && (needs.i386.result == 'success' || needs.i386.result == 'skipped') }}
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select the newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+          xcodebuild -version
+          sysctl -n hw.ncpu
+
+      - name: Install host tools
+        run: |
+          brew install cmake ninja ccache meson bison flex llvm sevenzip cabextract msitools gnutls pkgconf
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+          # FEX's configure scripts (Scripts/aarch64_fit_native.py) import packaging
+          python3 -m pip install --user --break-system-packages packaging || pip3 install --break-system-packages packaging
+
+      - name: Download Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || echo "::warning::MetalToolchain download failed (may already be installed)"
+
+      - name: Restore the 32-bit (i386) Windows DLLs
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ needs.i386-key.outputs.key }}
+          fail-on-cache-miss: true
+          path: app/Madeira/i386-windows
+
+      # ------------------------------------------------------------ toolchains
+      - name: Cache llvm-mingw
+        id: mingw-cache
+        uses: actions/cache@v4
+        with:
+          path: toolchains/${{ env.MINGW_NAME }}
+          key: ${{ env.MINGW_NAME }}
+
+      - name: Fetch llvm-mingw
+        if: steps.mingw-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains
+          curl -fsSL -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/${MINGW_NAME}.tar.xz"
+          echo "${MINGW_SHA256}  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c -
+          tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
+
+      # ------------------------------------------------------- native libs
+      - name: GnuTLS / Nettle / GMP (headers for ntdll-unix)
+        run: build/gnutls-ios/build.sh
+
+      - name: FFmpeg (LGPL, winegstreamer unix side)
+        run: build/ffmpeg/build.sh
+
+      - name: FEXCore for iOS
+        run: |
+          build/fex-ios/build.sh || { cmake --build FEX/build-ios --target FEXCore FEXCore_Base JemallocLibs -- -k 2>&1 | grep -E "error:|Error " | head -80; exit 1; }
+
+      - name: Configure Wine host tree (wine/build-macos) and generate headers
+        run: |
+          set -eux
+          export PATH="$PWD/toolchains/${MINGW_NAME}/bin:$PATH"
+          mkdir -p wine/build-macos
+          cd wine/build-macos
+          # GnuTLS must be detected: bcrypt/secur32's unix tables are compiled only when config.h
+          # has SONAME_LIBGNUTLS / HAVE_GNUTLS_CIPHER_INIT (the iOS shim routes it to the static build)
+          ../configure --without-x --without-vulkan --without-freetype \
+            --without-gstreamer --without-sdl --without-cups --without-krb5 --without-sane \
+            --without-usb --without-pcap --without-v4l2 --without-opencl --disable-tests \
+            --enable-winegstreamer
+          grep -E "SONAME_LIBGNUTLS|HAVE_GNUTLS_CIPHER_INIT" include/config.h || echo "::warning::GnuTLS not detected by Wine configure; bcrypt/secur32 will be missing"
+          make -j"$(sysctl -n hw.ncpu)" include/all tools/all
+
+      - name: FreeType for iOS (dwrite + win32u fonts)
+        run: |
+          [ -d research/freetype ] || git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git research/freetype
+          bash build/freetype-ios/build.sh
+
+      - name: Wine ntdll unix side
+        run: |
+          # server_ios.c prints rusage_info_v6.ri_page_wait_time_mach, which older SDKs lack
+          if ! grep -q ri_page_wait_time_mach "$(xcrun --sdk iphoneos --show-sdk-path)/usr/include/sys/resource.h"; then
+            echo "::warning::SDK has no ri_page_wait_time_mach; reporting 0 for it"
+            sed -i '' 's/ru\.ri_page_wait_time_mach - pru\.ri_page_wait_time_mach/0/' build/ntdll-unix/server_ios.c
+          fi
+          build/ntdll-unix/build.sh
+
+      - name: Wine win32u unix side
+        run: build/win32u-unix/build.sh
+
+      - name: Wine server (base archive from wine/server, then iOS replacements)
+        run: |
+          set -eu
+          # build/wineserver/build.sh swaps its patched objects into a prebuilt base
+          # archive that is not tracked. Rebuild that base from the submodule: every
+          # server/*.c the script does not compile itself, with the script's own flags.
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          B=build/wineserver; W=wine; OBJ=$B/obj/base
+          mkdir -p "$OBJ"
+          REPLACED="async class event fd handle inproc_sync mach main mapping object process queue region request semaphore sock thread unicode user window winstation"
+          for src in $W/server/*.c; do
+            n=$(basename "$src" .c)
+            case " $REPLACED " in *" $n "*) continue ;; esac
+            echo "  base: $n"
+            xcrun -sdk iphoneos clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2 \
+              -I$W/include -I$W/include/wine -I$W/build-macos/include -I$B -I$W/server \
+              -Ibuild/ntdll-unix/shims -Ibuild/madsync -DHAVE_LINUX_NTSYNC_H=1 \
+              -include $B/config_ios.h -include stdarg.h -include $B/unicode_fix.h \
+              -include $B/wineserver_ios_kill.h \
+              -DBINDIR=\"/usr/local/bin\" -DDATADIR=\"/usr/local/share\" \
+              -D__WINESRC__ -DWINE_IOS=1 -Dmain=wineserver_main \
+              -Wno-implicit-function-declaration -Wno-int-conversion \
+              -c "$src" -o "$OBJ/$n.o" 2>"$B/obj/err-base-$n.txt" || { cat "$B/obj/err-base-$n.txt"; FAILED="${FAILED:-} $n"; }
+          done
+          [ -z "${FAILED:-}" ] || { echo "::error::base server objects failed:$FAILED"; exit 1; }
+          xcrun -sdk iphoneos ar rcs app/Madeira/libwineserver.a "$OBJ"/*.o
+          rm -rf "$OBJ"
+          build/wineserver/build.sh
+
+      - name: Cache LLVM for iOS
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            toolchains/llvm-project/llvm/include
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-ios-build/lib/*.a
+          key: llvm-ios-${{ env.LLVM_VERSION }}-v1
+
+      - name: Build LLVM ${{ env.LLVM_VERSION }} for iOS (host tblgen + iOS libs)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          mkdir -p toolchains
+          git clone --depth 1 --branch "llvmorg-${LLVM_VERSION}" https://github.com/llvm/llvm-project.git toolchains/llvm-project
+          # Apple ld has no --gc-sections (build/dxmt-ios/README.md step 3)
+          sed -i '' 's/MATCHES "Darwin"/MATCHES "Darwin|iOS"/' toolchains/llvm-project/llvm/cmake/modules/AddLLVM.cmake
+          # LLVM 15 predates newer libc++ dropping transitive <cstdint>
+          CXXFIX="-include cstdint"
+          cmake -G Ninja -S toolchains/llvm-project/llvm -B toolchains/llvm-host-build \
+            -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD= -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF -DCMAKE_CXX_FLAGS="$CXXFIX"
+          ninja -C toolchains/llvm-host-build llvm-tblgen
+          cmake -G Ninja -S toolchains/llvm-project/llvm -B toolchains/llvm-ios-build \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_HOST_TRIPLE=arm64-apple-ios17.0 -DLLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-ios17.0 \
+            -DLLVM_TARGET_ARCH=host -DLLVM_TARGETS_TO_BUILD= -DLLVM_ENABLE_PROJECTS= \
+            -DLLVM_BUILD_TOOLS=OFF -DLLVM_BUILD_UTILS=OFF -DLLVM_INCLUDE_TOOLS=OFF \
+            -DLLVM_INCLUDE_UTILS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_DOCS=OFF -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_TABLEGEN="$PWD/toolchains/llvm-host-build/bin/llvm-tblgen" \
+            -DCMAKE_CXX_FLAGS="$CXXFIX"
+          ninja -C toolchains/llvm-ios-build
+          ls toolchains/llvm-ios-build/lib/*.a | wc -l
+          rm -rf toolchains/llvm-host-build
+
+      - name: Save LLVM cache
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            toolchains/llvm-project/llvm/include
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-ios-build/lib/*.a
+          key: llvm-ios-${{ env.LLVM_VERSION }}-v1
+
+      - name: DXMT unix side + combined archive
+        run: |
+          set -eu
+          # airconv embeds its AIR helper shaders as headers (dxmt/src/airconv/meson.build)
+          mkdir -p build/dxmt-ios/shader-headers
+          for sh in air_msad air_samplepos air_tessellation; do
+            (cd build/dxmt-ios/shader-headers \
+             && xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+                  -o $sh.air -c ../../../dxmt/src/airconv/shaders/$sh.metal \
+             && xxd -n $sh -i $sh.air $sh.h)
+          done
+          build/dxmt-ios/build.sh
+          # libdxmt_combined.a = libdxmt_unix.a + the LLVM archives airconv needs
+          libtool -static -o build/dxmt-ios/libdxmt_combined.a \
+            build/dxmt-ios/libdxmt_unix.a toolchains/llvm-ios-build/lib/libLLVM*.a 2>&1 | grep -v "same member name" || true
+          cp build/dxmt-ios/libdxmt_combined.a app/Madeira/libdxmt_combined.a
+          ls -lh app/Madeira/*.a
+
+      - name: Madeira Dock (x86-64 PE)
+        run: build/madeira-dock/build.sh || echo "::warning::Madeira Dock build failed; the Dock stays hidden"
+
+      - name: In-app pairing library (Rust, aarch64-apple-ios)
+        run: |
+          rustup target add aarch64-apple-ios
+          build/rppairing-ios/build.sh
+
+      - name: Bundle inputs (licences, VC++ runtime)
+        run: |
+          set -eu
+          build/stage-licenses.sh
+          mkdir -p app/Madeira/x86_64-vcruntime app/Madeira/i386-windows
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.vcruntime }}" = "true" ]; then
+            curl -fsSL -o /tmp/vc_redist.x64.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
+            python3 .github/scripts/fetch_vcruntime.py /tmp/vc_redist.x64.exe app/Madeira/x86_64-vcruntime \
+              || echo "::error::VC++ runtime incomplete; this IPA ships without it (see the listing above)"
+          fi
+
+      # ---------------------------------------------------------------- app
+      - name: Host checks for this branch's app changes
+        run: |
+          python3 tests/host/check-log-summary.py
+          python3 tests/host/check-steam-activity.py
+          python3 tests/host/check-jit-pool-meter.py
+          python3 tests/host/check-harmless-warnings.py
+          python3 tests/host/check-install-registry.py
+          python3 tests/host/check-dock-start-program.py
+          python3 tests/host/check-d3d9-report-nvidia.py
+          python3 tests/host/check-d3d9-older-nvidia.py
+          python3 tests/host/check-game-recommendations.py --require-swift
+          python3 tests/host/check-ini-editor.py --require-swift
+          python3 tests/host/check-dll-overrides.py --require-swift
+          python3 tests/host/check-registry-editor.py --require-swift
+          python3 tests/host/check-steam-files-flag.py --require-swift
+          python3 tests/host/check-steam-owned-dlc.py
+          python3 tests/host/check-steam-missing-program.py
+          python3 tests/host/check-steam-dlc-list.py
+
+      - name: Host check for the starting screen (does not block the IPA)
+        continue-on-error: true
+        run: python3 tests/host/check-dock-start-screen.py
+
+      - name: Host check for the one-time installs (does not block the IPA)
+        continue-on-error: true
+        run: python3 tests/host/check-dock-installers.py
+
+      - name: Build app (iphoneos, unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project app/Madeira.xcodeproj \
+            -target Madeira \
+            -configuration "${{ inputs.configuration || 'Debug' }}" \
+            -sdk iphoneos \
+            SYMROOT="$PWD/app/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            DEVELOPMENT_TEAM="" | tee "$RUNNER_TEMP/xcodebuild.log" | tail -n 300
+
+      - name: Package IPA
+        run: |
+          set -eu
+          APP="app/build/${{ inputs.configuration || 'Debug' }}-iphoneos/Madeira.app"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # Ad-hoc sign with the entitlements so sideloaders carry them over (JIT, memory limit)
+          codesign --force --sign - --entitlements app/Madeira/Madeira.entitlements Payload/Madeira.app
+          zip -qry Madeira-sideload.ipa Payload
+          ls -lh Madeira-sideload.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-sideload-ipa
+          path: Madeira-sideload.ipa
+          retention-days: 14
+
+      - name: Print compiler errors
+        if: failure()
+        run: |
+          # Swift errors scroll out of the step's last 300 lines; print them here.
+          if [ -f "$RUNNER_TEMP/xcodebuild.log" ]; then
+            echo "::group::Swift errors"; grep -E -A3 '(\.swift:[0-9]+:[0-9]+: error:)' "$RUNNER_TEMP/xcodebuild.log" | head -n 120; echo "::endgroup::"
+          fi
+          for f in build/*/obj/*.err build/*/obj/err-*.txt; do
+            [ -s "$f" ] || continue
+            echo "::group::$f"; head -n 40 "$f"; echo "::endgroup::"
+          done
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/*/obj/*.err
+            build/*/obj/err-*.txt
+            wine/build-macos/config.log
+          if-no-files-found: ignore

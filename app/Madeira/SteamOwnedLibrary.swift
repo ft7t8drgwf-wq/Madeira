@@ -377,6 +377,50 @@ final class SteamOwnedLibrary: ObservableObject {
             .write(to: Self.cacheURL, options: .atomic)
     }
 
+    /// DLC names by app ID, asked of Steam once per DLC while the app runs.
+    private var dlcNames: [Int: String] = [:]
+
+    /// The names of DLC apps (Game details › Steam › Installed DLC): known ones at
+    /// once, the others asked of Steam (signed in, no session running), at most 32,
+    /// in one request; any still unnamed take the name of their depot in the
+    /// game's own app info.
+    func names(ofDLC ids: [Int], gameAppID: Int) async -> [Int: String] {
+        var result: [Int: String] = [:]
+        for id in ids {
+            if let name = dlcNames[id] ?? game(id)?.name { result[id] = name }
+        }
+        let missing = ids.filter { result[$0] == nil && $0 > 0 && $0 <= Int(UInt32.max) }.prefix(32)
+        guard !missing.isEmpty else { return result }
+        guard Self.enabled, signedIn, !inSession else {
+            SteamLog.event("[steam-dlc] names skipped signed-in=\(signedIn ? 1 : 0) session=\(inSession ? 1 : 0)")
+            return result
+        }
+        func keep(_ id: Int, _ name: String) {
+            let name = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+            guard !name.isEmpty, result[id] == nil else { return }
+            dlcNames[id] = name
+            result[id] = name
+        }
+        do {
+            for info in try await fetcher.fetchAppInfos(appIDs: missing.map { UInt32($0) }) {
+                keep(Int(info.appID), info.name)
+            }
+        } catch {
+            SteamLog.event("[steam-dlc] DLC app info failed: \(error)")
+        }
+        if missing.contains(where: { result[$0] == nil }), gameAppID > 0, gameAppID <= Int(UInt32.max) {
+            do {
+                for depot in try await fetcher.fetchAppInfo(appID: UInt32(gameAppID))?.depots ?? [] {
+                    if let dlc = depot.dlcAppID { keep(Int(dlc), depot.name) }
+                }
+            } catch {
+                SteamLog.event("[steam-dlc] game app info failed: \(error)")
+            }
+        }
+        SteamLog.event("[steam-dlc] names asked=\(missing.count) found=\(missing.filter { result[$0] != nil }.count)")
+        return result
+    }
+
     /// Steam's launch configuration for an owned app, for "Start with: The game"
     /// (SteamDirectStart): from the cached library, else asked of Steam once over the
     /// app's own connection (signed in, no session running) and kept in the cache.
