@@ -174,16 +174,19 @@ struct SteamAppInfo {
 
     /// The depots a Windows install takes: matching OS, architecture-neutral
     /// or matching osarch, common or requested-language content (by default
-    /// `depotLanguage`), no low-violence alternates, no DLC or shared
+    /// `depotLanguage`), no low-violence alternates, no shared
     /// redistributables, and only depots that publish a public manifest. A
-    /// 64-bit selection falls back to 32-bit depots when the app only
+    /// DLC depot (dlcappid) is taken only when the account's licenses include
+    /// it (`ownedDLC`, depot IDs), as Valve's client installs owned DLC with
+    /// the game: New Vegas's Courier's Stash packs are DLC depots of the game.
+    /// A 64-bit selection falls back to 32-bit depots when the app only
     /// publishes those.
     func installDepots(os: String = "windows", arch: String = "64",
-                       language: String? = nil) -> [DepotInfo] {
+                       language: String? = nil, ownedDLC: Set<UInt32> = []) -> [DepotInfo] {
         let language = language ?? depotLanguage
         func select(_ arch: String) -> [DepotInfo] {
             depots.filter { d in
-                d.supports(os: os) && d.dlcAppID == nil && !d.isSharedInstall &&
+                d.supports(os: os) && (d.dlcAppID == nil || ownedDLC.contains(d.depotID)) && !d.isSharedInstall &&
                 d.publicManifestID != nil && !d.lowViolence &&
                 (d.osarch.isEmpty || d.osarch == arch) &&
                 (d.language.isEmpty || d.language.caseInsensitiveCompare(language) == .orderedSame)
@@ -200,9 +203,9 @@ struct SteamAppInfo {
     /// Every depot with why it was or was not selected, for the install log
     /// ("sel", or the first failing rule). IDs and flags only.
     func depotSelectionSummary(os: String = "windows", arch: String = "64",
-                               language: String? = nil, limit: Int = 24) -> String {
+                               language: String? = nil, ownedDLC: Set<UInt32> = [], limit: Int = 24) -> String {
         let language = language ?? depotLanguage
-        let chosen = Set(installDepots(os: os, arch: arch, language: language).map(\.depotID))
+        let chosen = Set(installDepots(os: os, arch: arch, language: language, ownedDLC: ownedDLC).map(\.depotID))
         return depots.sorted { $0.depotID < $1.depotID }.prefix(limit).map { d in
             let why = selectionRule(d, chosen: chosen, os: os, language: language)
             let from = d.fromApp.map { "<\($0)" } ?? ""
