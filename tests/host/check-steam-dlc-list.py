@@ -29,9 +29,13 @@ check('Task.detached(priority: .utility)' in games and 'SteamInstallFiles.instal
 check('LabeledContent("Installed DLC", value: "None")' in games and 'ForEach(dlc) { item in' in games, 'Game details shows the list, or None')
 check('dlcNames[item.id] ?? "DLC \\(item.id)"' in games, 'falls back to the DLC app ID when no name is known')
 check('[steam-dlc] app=' in games, 'logs what it found')
-names = owned[owned.index('func names(ofDLC ids: [Int])'):]
+names = owned[owned.index('func names(ofDLC ids: [Int], gameAppID: Int)'):]
 names = names[:names.index('\n    }\n') + 6]
 check('guard Self.enabled, signedIn, !inSession' in names and '.prefix(32)' in names, 'asks Steam for names only when signed in, outside a session, at most 32')
+check('fetcher.fetchAppInfos(appIDs: missing.map' in names, 'DLC names are asked for in one request')
+check('depot.dlcAppID { keep(Int(dlc), depot.name) }' in names, "unnamed DLC fall back to their depot name in the game's app info")
+check('[steam-dlc] names asked=' in names and '[steam-dlc] names skipped' in names, 'logs how many names were found')
+check('names(ofDLC: list.map(\\.id), gameAppID: appID)' in games, 'Game details passes the game app ID')
 check('struct InstalledDLC: Identifiable' in games, 'rows are identifiable')
 
 print('FAIL' if failures else 'PASS')
