@@ -1233,6 +1233,12 @@ struct SteamCloudSection: View {
 /// the game starts (Madeira Dock, the default, with its per-launch pool choice and
 /// one-time installs; or The game, its own program without Steam, SteamDirectStart),
 /// its update, a repair of its files and Uninstall.
+/// One row of Game details › Steam › Installed DLC.
+struct InstalledDLC: Identifiable, Equatable {
+    let id: Int
+    let bytes: Int64
+}
+
 struct SteamEntrySection: View {
     @Binding var entry: LibraryEntry
     /// The game was uninstalled: the page closes without saving.
@@ -1247,6 +1253,9 @@ struct SteamEntrySection: View {
     /// Steam's launch configuration is being read.
     @State private var programs: [String] = []
     @State private var resolving = false
+    /// The DLC Steam's install record lists for this game (app ID, bytes), and their names.
+    @State private var installedDLC: [InstalledDLC]?
+    @State private var dlcNames: [Int: String] = [:]
 
     var body: some View {
         let appID = entry.steamAppID ?? 0
@@ -1324,6 +1333,20 @@ struct SteamEntrySection: View {
                     .disabled(!steam.signedIn)
             }
             LabeledContent("App ID", value: String(appID))
+            if let dlc = installedDLC {
+                if dlc.isEmpty {
+                    LabeledContent("Installed DLC", value: "None")
+                } else {
+                    DisclosureGroup {
+                        ForEach(dlc) { item in
+                            LabeledContent(dlcNames[item.id] ?? "DLC \(item.id)",
+                                           value: item.bytes > 0 ? formatBytes(item.bytes) : "")
+                        }
+                    } label: {
+                        LabeledContent("Installed DLC", value: String(dlc.count))
+                    }
+                }
+            }
             if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
             if let status = dock.status {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1349,6 +1372,7 @@ struct SteamEntrySection: View {
             freeSpace = values?.volumeAvailableCapacityForImportantUsage
         }
         .task(id: "\(entry.steamStart ?? "dock") \(installed?.installed == true) \(download == nil)") { await resolveProgram() }
+        .task(id: "\(installed?.installed == true) \(download == nil) \(games.builds[appID] ?? 0)") { await loadDLC() }
         .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
             Button("Uninstall", role: .destructive) {
@@ -1380,6 +1404,23 @@ struct SteamEntrySection: View {
         entry.steamProgramFolder = nil
         entry.steamProgramSource = "choice"
         LogStore.shared.log("[steam-start] app=\(entry.steamAppID ?? 0) program=choice")
+    }
+
+    /// Game details › Steam › Installed DLC: the install record's DLC depots, by DLC app.
+    private func loadDLC() async {
+        guard let appID = entry.steamAppID, let game = games.games.first(where: { $0.id == appID }), game.installed else {
+            installedDLC = nil
+            return
+        }
+        let steamApps = MadeiraDock.drive.appendingPathComponent(game.library, isDirectory: true)
+        let found = await Task.detached(priority: .utility) {
+            SteamInstallFiles.installedDLC(appID: appID, steamApps: steamApps)
+        }.value
+        let list = found.map { InstalledDLC(id: $0.key, bytes: $0.value) }.sorted { $0.id < $1.id }
+        installedDLC = list
+        LogStore.shared.log("[steam-dlc] app=\(appID) installed-dlc=\(list.count)")
+        guard !list.isEmpty else { return }
+        dlcNames = await steam.names(ofDLC: list.map(\.id))
     }
 
     /// "The game": lists the install folder's programs and, unless the user picked one that
