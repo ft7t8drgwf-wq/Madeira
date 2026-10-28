@@ -85,8 +85,9 @@ for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"'
               '"D3D9 anisotropic filtering"', '"On screen"', '"Performance overlay"', '"Live logs"', '"Touch controls"',
               '"Control opacity"', '"Control size"', '"Executable"', '"Game details"']:
     require(label in detail, f'Game details: {label}')
-require('if entry.desktop != true && entry.steamAppID == nil {' in detail,
-        "no Launch arguments for a Steam game: Dock starts Steam's own launch option")
+require('if entry.desktop != true && (entry.steamAppID == nil || entry.startsSteamGameDirectly) {' in detail and
+        'if !entry.startsSteamGameDirectly {' in detail and 'TextField("Launch arguments"' in detail,
+        'Launch arguments: on the Launch page for a game and for "The game", on the Steam page for a Dock start')
 entries_start = library.index('private var entries: [LibraryEntry] {')
 require('$0.steamAppID == nil' in library[entries_start:library.index('var body: some View {', entries_start)],
         'Steam games are listed in the Steam section only, not also under Games')
