@@ -1,0 +1,78 @@
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -5553,6 +5553,41 @@
+     if (!h || h == ~0u) h = base;
+     return h;
+ }
++
++/* iOS-Madeira: whether this caller gets the prefix serial above. WoW64
++ * callers always do. MADEIRA_VOLUME_SERIAL_ALL=1 gives 64-bit callers the
++ * same serial, so a 64-bit program and its 32-bit helper see one volume. */
++static BOOL ios_volume_serial_caller(void)
++{
++    static int all = -1;
++
++    if (NtCurrentTeb()->WowTebOffset) return TRUE;
++    if (all < 0)
++    {
++        const char *e = getenv( "MADEIRA_VOLUME_SERIAL_ALL" );
++        all = e && e[0] == '1';
++    }
++    return all;
++}
++
++/* iOS-Madeira: the first few volume queries of each class, with the answer,
++ * on stderr (MADEIRA_VOLUME_TRACE=1). */
++static void ios_volume_trace( unsigned int info_class, unsigned int status, DWORD serial )
++{
++    static int on = -1;
++    static int counts[64];
++
++    if (on < 0)
++    {
++        const char *e = getenv( "MADEIRA_VOLUME_TRACE" );
++        on = e && e[0] == '1';
++    }
++    if (!on || info_class >= ARRAY_SIZE(counts)) return;
++    if (__atomic_add_fetch( &counts[info_class], 1, __ATOMIC_RELAXED ) > 8) return;
++    dprintf( 2, "[vol-query] madeira-bcd pid=%04x tid=%04x class=%u status=%#x wow=%d serial=%08x\n",
++             (int)GetCurrentProcessId(), (int)GetCurrentThreadId(), info_class, status,
++             NtCurrentTeb()->WowTebOffset != 0, (unsigned int)serial );
++}
+ #endif
+ 
+ #ifdef WINE_IOS
+@@ -5796,7 +5831,7 @@
+             if (!get_mountmgr_fs_info( handle, fd, &drive, sizeof(drive) ))
+                 info->VolumeSerialNumber = drive.serial;
+ #ifdef WINE_IOS
+-            else if (NtCurrentTeb()->WowTebOffset)   /* WoW64 callers only, see ios_wow_volume_serial */
++            else if (ios_volume_serial_caller())   /* see ios_wow_volume_serial */
+                 info->VolumeSerialNumber = ios_wow_volume_serial( drive.letter );
+ #endif
+             memset( &info->FileId, 0, sizeof(info->FileId) );
+@@ -8700,9 +8735,10 @@
+         if (get_mountmgr_fs_info( handle, fd, drive, sizeof(data) ))
+         {
+ #ifdef WINE_IOS
+-            /* WoW64 callers only (see ios_wow_volume_serial): a prefix-stored
++            /* WoW64 callers (and 64-bit ones with MADEIRA_VOLUME_SERIAL_ALL=1,
++             * see ios_volume_serial_caller): a prefix-stored
+              * serial and an empty label instead of STATUS_NOT_IMPLEMENTED. */
+-            if (NtCurrentTeb()->WowTebOffset && (info->VolumeSerialNumber = ios_wow_volume_serial( drive->letter )))
++            if (ios_volume_serial_caller() && (info->VolumeSerialNumber = ios_wow_volume_serial( drive->letter )))
+             {
+                 info->VolumeCreationTime.QuadPart = 0;
+                 info->VolumeLabelLength = 0;
+@@ -8769,6 +8805,10 @@
+         status = STATUS_INVALID_PARAMETER;
+         break;
+     }
++#ifdef WINE_IOS
++    ios_volume_trace( info_class, status, (info_class == FileFsVolumeInformation && !status) ?
++                      ((FILE_FS_VOLUME_INFORMATION *)buffer)->VolumeSerialNumber : 0 );
++#endif
+     if (needs_close) close( fd );
+     return io->Status = status;
+ }
