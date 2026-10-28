@@ -144,6 +144,10 @@ final class DepotDownloader {
                                    hosts: pool, auth: auth,
                                    declaredSize: depot.publicSizeBytes, health: health))
         }
+        let dlcDepots = Set(depots.filter { $0.dlcAppID != nil }.map(\.depotID))
+        if !app.dlcOff.isEmpty || !dlcDepots.isEmpty {
+            SteamLog.event("[steam-dlc] install app=\(app.appID) off=\(app.dlcOff.count) dlc-depots=\(plans.filter { dlcDepots.contains($0.depotID) }.count)")
+        }
         if !licenseSkipped.isEmpty {
             SteamLog.event("[steam-depot] license app=\(app.appID) skipped=\(licenseSkipped.map(String.init).joined(separator: ",")) kept=\(plans.map { String($0.depotID) }.joined(separator: ","))")
         }
