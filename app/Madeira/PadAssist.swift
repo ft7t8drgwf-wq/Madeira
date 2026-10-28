@@ -27,12 +27,18 @@ struct PadAssistSettings: Codable, Equatable, Sendable {
     /// What turns the view left and right: twisting the pad flat (yaw) or
     /// tilting it like a wheel (roll).
     enum Turn: String, Codable, CaseIterable, Sendable { case yaw, roll }
+    /// What gyro aim moves: the right stick, the mouse, or (automatic) the mouse
+    /// when player 1 is not a controller the game reads (no controller and no
+    /// touch controller, or keyboard-and-mouse mode) and the right stick otherwise.
+    enum Output: String, Codable, CaseIterable, Sendable { case auto, stick, mouse }
 
     var gyro = false
     var source = Source.auto
     var when = When.always
     var turn = Turn.yaw
-    /// 0.25...4; 1 moves the stick fully at 150 degrees a second.
+    var output = Output.auto
+    /// 0.25...4; 1 moves the stick fully at 150 degrees a second, or the mouse
+    /// 8 pixels a degree.
     var sensitivity = 1.0
     var invertX = false
     var invertY = false
@@ -56,6 +62,7 @@ struct PadAssistSettings: Codable, Equatable, Sendable {
         source = (try? c.decodeIfPresent(Source.self, forKey: .source)) ?? .auto
         when = (try? c.decodeIfPresent(When.self, forKey: .when)) ?? .always
         turn = (try? c.decodeIfPresent(Turn.self, forKey: .turn)) ?? .yaw
+        output = (try? c.decodeIfPresent(Output.self, forKey: .output)) ?? .auto
         sensitivity = try c.decodeIfPresent(Double.self, forKey: .sensitivity) ?? 1
         invertX = try c.decodeIfPresent(Bool.self, forKey: .invertX) ?? false
         invertY = try c.decodeIfPresent(Bool.self, forKey: .invertY) ?? false
@@ -107,6 +114,17 @@ enum GyroAim {
         let floor = max(0, min(0.5, s.antiDeadzone))
         let out = floor + (1 - floor) * min(1, magnitude)
         return (x / magnitude * out, y / magnitude * out)
+    }
+
+    /// Mouse pixels a degree at sensitivity 1.
+    static let pixelsPerDegree = 8.0
+
+    /// Mouse motion (pixels, right and down positive) for the rotation over `dt`
+    /// seconds. No anti-dead zone: a mouse has none to pass.
+    static func mouse(turn: Double, pitch: Double, dt: Double, settings s: PadAssistSettings) -> (dx: Double, dy: Double) {
+        guard turn.isFinite, pitch.isFinite, dt.isFinite, dt > 0, hypot(turn, pitch) >= noiseFloor else { return (0, 0) }
+        let scale = max(0.25, min(4, s.sensitivity)) * pixelsPerDegree * dt
+        return (turn * scale * (s.invertX ? -1 : 1), -pitch * scale * (s.invertY ? -1 : 1))
     }
 
     /// `axis` moved by `amount` of full deflection, clamped to XInput's range.
@@ -277,6 +295,11 @@ struct PadAssistPage: View {
                     Text("While holding LB").tag(PadAssistSettings.When.lb)
                     Text("While holding RB").tag(PadAssistSettings.When.rb)
                 }
+                Picker("Moves", selection: bind(\.output)) {
+                    Text("Automatic").tag(PadAssistSettings.Output.auto)
+                    Text("Right stick").tag(PadAssistSettings.Output.stick)
+                    Text("Mouse").tag(PadAssistSettings.Output.mouse)
+                }
                 Picker("Turn with", selection: bind(\.turn)) {
                     Text("Twist (yaw)").tag(PadAssistSettings.Turn.yaw)
                     Text("Tilt (roll)").tag(PadAssistSettings.Turn.roll)
@@ -297,7 +320,7 @@ struct PadAssistPage: View {
                 Toggle("Invert left and right", isOn: bind(\.invertX))
             }
         } header: { Text("Gyro aim") } footer: {
-            Text("Moving the controller moves the right stick. Automatic uses the controller's gyro (DualSense, DualShock 4, Switch Pro) and this device's otherwise. Raise the anti-dead zone if slow aim does nothing.")
+            Text("Moving the controller (or this device) aims. Automatic gyro uses the controller's (DualSense, DualShock 4, Switch Pro) and this device's otherwise. Automatic moves the right stick when the game sees a controller and the mouse otherwise. Without a controller, only Always works. Raise the anti-dead zone if slow stick aim does nothing.")
         }
         Section {
             ForEach(PadAssistSettings.turboChoices, id: \.self) { name in

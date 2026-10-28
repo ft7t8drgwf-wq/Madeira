@@ -53,6 +53,19 @@ move = GyroAim.stick(turn: 15, pitch: 0, settings: s)
 assert(near(move.x, -0.4))                                  // sensitivity capped at 4
 assert(GyroAim.stick(turn: .nan, pitch: 0, settings: s).x == 0)
 
+// Gyro to mouse: 8 pixels a degree at sensitivity 1, down is positive.
+var m = PadAssistSettings()
+var px = GyroAim.mouse(turn: 100, pitch: 50, dt: 0.01, settings: m)
+assert(near(px.dx, 8) && near(px.dy, -4))
+let quiet = GyroAim.mouse(turn: 1, pitch: 1, dt: 0.01, settings: m)
+assert(quiet.dx == 0 && quiet.dy == 0)                     // under the noise floor
+m.sensitivity = 2; m.invertY = true; m.antiDeadzone = 0.5
+px = GyroAim.mouse(turn: -100, pitch: 50, dt: 0.01, settings: m)
+assert(near(px.dx, -16) && near(px.dy, 8))                 // no anti-dead zone on the mouse
+assert(GyroAim.mouse(turn: 100, pitch: 0, dt: 0, settings: m).dx == 0)
+let output = try! decoder.decode(PadAssistSettings.self, from: Data(#"{"gyro":true,"output":"mouse"}"#.utf8))
+assert(output.output == .mouse && PadAssistSettings().output == .auto)
+
 assert(GyroAim.add(1, to: 0) == 32767 && GyroAim.add(-1, to: 0) == -32768)
 assert(GyroAim.add(0.5, to: 32767) == 32767 && GyroAim.add(-2, to: 1000) == -32768)
 assert(GyroAim.add(0, to: -12345) == -12345 && GyroAim.add(0, to: 23456) == 23456)
@@ -123,7 +136,7 @@ both.gyro = false
 out = pad
 applyPadAssist(&out, settings: both, rates: (turn: 75, pitch: 0), turbo: &state, now: t0 + 80 * ms)
 assert(out.rx == 0)
-print("PASS: settings decoding, gyro stick mapping and axis frames, turbo timing")
+print("PASS: settings decoding, gyro stick mapping and axis frames, turbo timing, gyro mouse")
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-pad-assist-') as tmp:
     src, exe = Path(tmp) / 'main.swift', Path(tmp) / 'check'
