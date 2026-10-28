@@ -280,6 +280,9 @@ struct LibraryEntry: Codable, Identifiable {
     /// `graphicsAPI` were read for, and whether Steam's launch configuration was
     /// cached (LibraryModel.refreshSteamMetadata); any change reads them again.
     var steamMetadataInstall: String?
+    /// A GOG game (GOGLibrary.swift): its product id. `relativePath` is then its
+    /// program inside C:\GOG Games, from the build's goggame-<id>.info.
+    var gogProductID: String?
     /// Fastsync's per-game switches, used only while Settings › Sync engine is
     /// Fastsync: "Fast synchronization" (nil = on; off gives this game Wine's
     /// standard sync) and "Fast semaphore waits" (nil = off). Optional, so older
@@ -878,7 +881,8 @@ final class LibraryModel: ObservableObject {
         // A Steam game has one entry: a details page opened before its card first saved
         // one (refreshSteamMetadata) updates that entry.
         if let i = next.firstIndex(where: { $0.id == entry.id }) ??
-            next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) {
+            next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) ??
+            next.firstIndex(where: { entry.gogProductID != nil && $0.gogProductID == entry.gogProductID }) {
             // A details sheet may predate an asynchronous metadata refresh.
             if (next[i].metadataChecked ?? .distantPast) > (entry.metadataChecked ?? .distantPast) {
                 entry.folderBytes = next[i].folderBytes; entry.graphicsAPI = next[i].graphicsAPI
@@ -921,6 +925,52 @@ final class LibraryModel: ObservableObject {
         steamMetadataWaiting[appID] = nil
         guard entries.contains(where: { $0.steamAppID == appID }) else { return }
         persist(entries.filter { $0.steamAppID != appID })
+    }
+    /// A GOG download finished (GOGLibrary): the game gets its library entry, or an
+    /// existing one follows the new build's program and keeps its title, artwork and
+    /// settings. Arguments and working folder follow GOG's play task unless the player
+    /// changed them. A new entry gets GOG's cover art as its cover image.
+    @MainActor
+    func upsertGOG(_ game: GOGInstalledGame, previous: GOGInstalledGame?, cover: URL?) async {
+        guard !readOnly else { return }
+        let existing = entries.first { $0.gogProductID == game.productID }
+        var entry = existing ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        entry.gogProductID = game.productID
+        entry.relativePath = game.programPath
+        entry.folderBytes = game.installBytes
+        if existing == nil || entry.arguments == (previous?.arguments ?? "") { entry.arguments = game.arguments }
+        if existing == nil || entry.workingDirectory == previous?.workingWindowsPath { entry.workingDirectory = game.workingWindowsPath }
+        let program = Self.drive.appendingPathComponent(game.programPath)
+        if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI ?? entry.graphicsAPI
+        }
+        if entry.coverFile == nil, let cover, let jpeg = await Self.gogCover(cover) {
+            let dir = Self.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let name = entry.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                entry.coverFile = name
+            }
+        }
+        entry.metadataChecked = nil
+        save(entry)
+    }
+    /// GOG's cover art as a JPEG of at most 1200 pixels, or nil.
+    private static func gogCover(_ url: URL) async -> Data? {
+        guard url.scheme == "https", let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200, data.count < 20_000_000,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                                             kCGImageSourceThumbnailMaxPixelSize: 1200,
+                                                                             kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85)
+    }
+    /// A GOG game was uninstalled: its entry goes with its files.
+    func removeGOG(productID: String) {
+        guard entries.contains(where: { $0.gogProductID == productID }) else { return }
+        persist(entries.filter { $0.gogProductID != productID })
     }
     /// Publishes `next` and writes it. The write (encoding the whole library and replacing the file) happens off the
     /// main thread, newest snapshot wins; `wait` writes before returning and reports whether it worked (start-up).
@@ -2792,7 +2842,7 @@ struct LibraryView: View {
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
-        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
+        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.gogProductID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
         if sort == "added" { return visible.reversed() }
         return visible.sorted {
             if sort == "played", $0.lastPlayed != $1.lastPlayed { return ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
@@ -2930,6 +2980,9 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if GOGLibrary.enabled, settingsShow("GOG", "GOG Galaxy", "sign in", "account") {
+                GOGSettingsSection(open: { settingsSheet = $0 })
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
                 Section {
@@ -3003,6 +3056,7 @@ struct LibraryView: View {
             switch sheet {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
+            case .gogSignIn: GOGSignInView()
             case .dock: MadeiraDockView(start: startDock)
             case .registry: RegistryEditorView()
             }
@@ -3055,10 +3109,15 @@ struct LibraryView: View {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
-                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil }).isEmpty {
+                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.gogProductID == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
+                }
+                // The account's GOG games (GOGGames.swift): installed ones open their
+                // Game details page, the others their download sheet.
+                if GOGLibrary.enabled {
+                    GOGGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 }
             }
@@ -3351,6 +3410,15 @@ struct LibraryDetail: View {
         // A Steam game starts through Madeira Dock (ContentView.launchLibraryEntry)
         // once its files are complete and Dock can sign in; "The game" once its
         // program is chosen (no client or sign-in involved).
+        // A GOG game starts once its files are complete (GOGLibrary).
+        if let product = entry.gogProductID {
+            if GOGLibrary.shared.downloads[product] != nil {
+                error = "This game's download has not finished. Resume it and wait for it to complete before playing."; return
+            }
+            if GOGLibrary.shared.installed[product] == nil {
+                error = "This GOG game is no longer installed. Install it again from the GOG section."; return
+            }
+        }
         if let appID = entry.steamAppID {
             if SteamOwnedLibrary.shared.downloads[appID] != nil {
                 error = "This game's update has not finished. Resume it and wait for it to complete before playing."; return
@@ -3384,7 +3452,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, library, iniFiles, dllOverrides, advanced
+        case display, controls, launch, compatibility, steam, cloud, gog, library, iniFiles, dllOverrides, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3393,6 +3461,7 @@ struct LibraryDetail: View {
             case .compatibility: return "Compatibility"
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
+            case .gog: return "GOG"
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
             case .dllOverrides: return "DLL overrides"
@@ -3407,6 +3476,7 @@ struct LibraryDetail: View {
             case .compatibility: return "cpu"
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
+            case .gog: return "bag"
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
             case .dllOverrides: return "puzzlepiece.extension"
@@ -3419,7 +3489,8 @@ struct LibraryDetail: View {
     /// or library details; a Steam game has its Steam pages.
     private var pageGroups: [[Page]] {
         let launch = entry.usesLaunchOptions || (entry.desktop != true && entry.steamAppID == nil)
-        let steam: [Page] = entry.steamAppID == nil ? [] : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
+        let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID == nil ? [] : [.gog])
+            : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
         let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
@@ -3451,6 +3522,7 @@ struct LibraryDetail: View {
             case .compatibility: compatibilityPage
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
+            case .gog: GOGEntrySection(entry: $entry) { leaving = true; dismiss() }
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
             case .dllOverrides: GameDllOverridesSection(windowsPath: entry.windowsPath, gameFolder: overridesGameFolder) { reloadBCD() }
@@ -4268,7 +4340,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, dock, registry
+    case allSettings, steamSignIn, gogSignIn, dock, registry
     var id: String { rawValue }
 }
 
