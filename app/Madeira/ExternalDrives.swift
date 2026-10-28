@@ -420,13 +420,51 @@ struct ExternalGamesSheet: View {
     }
 }
 
+/// The folder picker for Add drive or folder, presented with UIKit. The
+/// Settings form holds other .fileImporter modifiers (saves, JIT pairing), and
+/// SwiftUI delivers a picked folder to only one of them, so Open did nothing.
+@MainActor final class FolderPicker: NSObject, UIDocumentPickerDelegate {
+    static let shared = FolderPicker()
+    private var done: ((URL) -> Void)?
+
+    func pick(_ done: @escaping (URL) -> Void) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else {
+            LogStore.shared.log("[external] no window to show the folder picker from")
+            return
+        }
+        while let next = top.presentedViewController { top = next }
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        picker.allowsMultipleSelection = false
+        picker.delegate = self
+        self.done = done
+        top.present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        LogStore.shared.log("[external] picked \(urls.count) folder(s)")
+        if let url = urls.first { done?(url) }
+        done = nil
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { done = nil }
+}
+
 /// Settings › External drives.
 struct ExternalDrivesSection: View {
     @ObservedObject private var drives = ExternalDrives.shared
-    @State private var picking = false
     @State private var error: String?
     @State private var scanning: ExternalFolder?
     @State private var removing: ExternalFolder?
+
+    private func picked(_ url: URL) {
+        do {
+            try drives.add(url); error = nil
+            SteamGamesModel.shared.refresh()
+            // Offer the games already on it.
+            scanning = drives.folders.last
+        } catch { self.error = error.localizedDescription }
+    }
 
     var body: some View {
         Section {
@@ -442,7 +480,7 @@ struct ExternalDrivesSection: View {
                     Button("Find games on \(folder.name)") { scanning = folder }
                 }
             }
-            Button("Add drive or folder") { picking = true }
+            Button("Add drive or folder") { FolderPicker.shared.pick { picked($0) } }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
@@ -454,14 +492,6 @@ struct ExternalDrivesSection: View {
             if let error { Text(error).foregroundStyle(.red) }
         } header: { Text("External drives") } footer: {
             Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
-        }
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
-            do {
-                try drives.add(try result.get()); error = nil
-                SteamGamesModel.shared.refresh()
-                // Offer the games already on it.
-                scanning = drives.folders.last
-            } catch { self.error = error.localizedDescription }
         }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
