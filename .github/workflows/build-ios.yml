@@ -365,11 +365,30 @@ jobs:
           zip -qry "Madeira-build-${{ github.run_number }}.ipa" Payload
           ls -lh "Madeira-build-${{ github.run_number }}.ipa"
 
+      # Antivirus scanners can flag a new, unsigned IPA (willfaust/Madeira#460). Publish its hash so anyone
+      # can check their download, and a VirusTotal link for it (it finds a report only once
+      # someone has uploaded the file there).
+      - name: Hash IPA
+        run: |
+          set -eu
+          IPA="Madeira-build-${{ github.run_number }}.ipa"
+          shasum -a 256 "$IPA" | tee "$IPA.sha256"
+          HASH=$(cut -d' ' -f1 "$IPA.sha256")
+          {
+            echo "### $IPA"
+            echo
+            echo "SHA-256: \`$HASH\`"
+            echo
+            echo "VirusTotal: https://www.virustotal.com/gui/file/$HASH"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: Madeira-build-${{ github.run_number }}
-          path: Madeira-build-${{ github.run_number }}.ipa
+          path: |
+            Madeira-build-${{ github.run_number }}.ipa
+            Madeira-build-${{ github.run_number }}.ipa.sha256
           retention-days: 14
 
       - name: Print compiler errors
