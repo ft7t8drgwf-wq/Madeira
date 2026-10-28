@@ -326,9 +326,14 @@ struct LibraryEntry: Codable, Identifiable {
     var usesLaunchOptions: Bool { desktop != true && (steamAppID == nil || startsSteamGameDirectly) }
     /// ml1163: a game (not the Desktop entry) started inside the Wine desktop.
     var runsInDesktop: Bool { usesLaunchOptions && launchMode == "desktop" }
-    /// The program's own arguments: Steam's launch configuration for "The game",
-    /// else the entry's Launch arguments.
-    var programArguments: String { startsSteamGameDirectly ? (steamProgramArguments ?? "") : arguments }
+    /// The program's own arguments: Steam's launch configuration for "The game"
+    /// followed by the entry's Launch arguments (Steam's own launch options, such as
+    /// Garry's Mod's -nochromium), else the entry's Launch arguments.
+    var programArguments: String {
+        guard startsSteamGameDirectly else { return arguments }
+        let extra = arguments.trimmingCharacters(in: .whitespaces)
+        return [steamProgramArguments ?? "", extra].filter { !$0.isEmpty }.joined(separator: " ")
+    }
     /// ml1163: the directory the program starts in (MADEIRA_WORKDIR): the chosen
     /// working folder, else Steam's for "The game", else the program's own folder.
     /// A desktop-mode game inherits explorer's directory and a .bat runs as
@@ -3489,8 +3494,9 @@ struct LibraryDetail: View {
                 }
             }
         }
-        // A Steam game starts with Steam's own launch option through Madeira Dock.
-        if entry.desktop != true && entry.steamAppID == nil {
+        // A Steam game starts with Steam's own launch option through Madeira Dock;
+        // "The game" adds these after Steam's arguments (programArguments).
+        if entry.desktop != true && (entry.steamAppID == nil || entry.startsSteamGameDirectly) {
             Section {
                 TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
                     .font(.body.monospaced()).lineLimit(1...4)
