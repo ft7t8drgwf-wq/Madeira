@@ -135,7 +135,12 @@ final class DepotDownloader {
             }
             plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
                                    hosts: pool, auth: auth,
-                                   declaredSize: depot.publicSizeBytes, health: health))
+                                   declaredSize: depot.publicSizeBytes, health: health,
+                                   dlcAppID: depot.dlcAppID))
+        }
+        let dlcPlans = plans.filter { $0.dlcAppID != nil }
+        if !app.dlcChoice.isEmpty || !dlcPlans.isEmpty {
+            SteamLog.event("[steam-dlc] install app=\(app.appID) chosen=\(app.dlcChoice.count) dlc-depots=\(dlcPlans.count)")
         }
         if !licenseSkipped.isEmpty {
             SteamLog.event("[steam-depot] license app=\(app.appID) skipped=\(licenseSkipped.map(String.init).joined(separator: ",")) kept=\(plans.map { String($0.depotID) }.joined(separator: ","))")
@@ -208,7 +213,8 @@ final class DepotDownloader {
         report(state)
         let installed = plans.map { plan in
             AppManifestWriter.InstalledDepot(depotID: Int(plan.depotID), manifestGID: plan.manifestGID,
-                                             size: Int64(plan.manifest.totalUncompressedSize))
+                                             size: Int64(plan.manifest.totalUncompressedSize),
+                                             dlcAppID: plan.dlcAppID.map(Int.init))
         }
         // Depots taken from another app are that app's content. Valve's client
         // refuses a launch until the owner app has its own record, so both
@@ -274,6 +280,8 @@ final class DepotDownloader {
         let auth: [String: String]
         let declaredSize: UInt64
         let health: ContentHostHealth
+        /// The DLC the depot belongs to, for its install record entry.
+        var dlcAppID: UInt32? = nil
     }
 
     struct WorkItem: Sendable {

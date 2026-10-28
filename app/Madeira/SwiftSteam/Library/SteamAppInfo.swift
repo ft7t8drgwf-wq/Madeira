@@ -40,6 +40,12 @@ struct SteamAppInfo {
     /// only uses the Steam Cloud API (its files live in the user's `remote` folder).
     var saveFiles: [SaveFile] = []
     var rootOverrides: [RootOverride] = []
+    /// The DLC the app lists (`extended.listofdlc`), in Steam's order. A DLC's
+    /// files are the app's depots that name it (`DepotInfo.dlcAppID`).
+    var dlcList: [UInt32] = []
+    /// The DLC an install of this app takes along (SteamDLC): the owned DLC the
+    /// player left on. Empty by default, so an install takes no DLC depots.
+    var dlcChoice: Set<UInt32> = []
 
     /// One `ufs.savefiles` entry: `root` names a folder ("WinAppDataLocalLow",
     /// "GameInstall", ...), `path` a subfolder of it, `pattern` a wildcard.
@@ -174,16 +180,17 @@ struct SteamAppInfo {
 
     /// The depots a Windows install takes: matching OS, architecture-neutral
     /// or matching osarch, common or requested-language content (by default
-    /// `depotLanguage`), no low-violence alternates, no DLC or shared
-    /// redistributables, and only depots that publish a public manifest. A
-    /// 64-bit selection falls back to 32-bit depots when the app only
-    /// publishes those.
+    /// `depotLanguage`), no low-violence alternates, no shared
+    /// redistributables, no DLC other than `dlc` (by default `dlcChoice`), and
+    /// only depots that publish a public manifest. A 64-bit selection falls
+    /// back to 32-bit depots when the app only publishes those.
     func installDepots(os: String = "windows", arch: String = "64",
-                       language: String? = nil) -> [DepotInfo] {
+                       language: String? = nil, dlc: Set<UInt32>? = nil) -> [DepotInfo] {
         let language = language ?? depotLanguage
+        let dlc = dlc ?? dlcChoice
         func select(_ arch: String) -> [DepotInfo] {
             depots.filter { d in
-                d.supports(os: os) && d.dlcAppID == nil && !d.isSharedInstall &&
+                d.supports(os: os) && (d.dlcAppID.map { dlc.contains($0) } ?? true) && !d.isSharedInstall &&
                 d.publicManifestID != nil && !d.lowViolence &&
                 (d.osarch.isEmpty || d.osarch == arch) &&
                 (d.language.isEmpty || d.language.caseInsensitiveCompare(language) == .orderedSame)
@@ -224,7 +231,27 @@ struct SteamAppInfo {
 
     /// Owned apps that can be installed for Windows at all.
     var installableOnWindows: Bool {
-        supportsWindows && type.isPlayable && !installDepots().isEmpty
+        supportsWindows && type.isPlayable && !installDepots(dlc: []).isEmpty
+    }
+
+    /// The depots one DLC adds to a Windows install of this app: the depots
+    /// that name it and pass the same rules as the app's own (OS, architecture,
+    /// language). Empty for a DLC that only unlocks content already installed.
+    func dlcDepots(_ dlcID: UInt32, os: String = "windows", arch: String = "64",
+                   language: String? = nil) -> [DepotInfo] {
+        installDepots(os: os, arch: arch, language: language, dlc: [dlcID]).filter { $0.dlcAppID == dlcID }
+    }
+
+    /// The DLC this app knows: the ones it lists and the ones its depots name,
+    /// without itself; at most 1024.
+    var knownDLC: [UInt32] {
+        var seen = Set<UInt32>(), result: [UInt32] = []
+        for id in dlcList + depots.sorted(by: { $0.depotID < $1.depotID }).compactMap(\.dlcAppID)
+        where id != appID && seen.insert(id).inserted {
+            result.append(id)
+            if result.count == 1024 { break }
+        }
+        return result
     }
 
     /// Approximate compressed download size for a platform. Per depot it
@@ -233,7 +260,7 @@ struct SteamAppInfo {
     /// `maxsize`. DLC depots and `sharedinstall` redistributables are not part
     /// of the base install and are left out. Treat the figure as "about".
     func downloadSize(for os: String) -> UInt64 {
-        installDepots(os: os).reduce(0) { total, d in
+        installDepots(os: os, dlc: []).reduce(0) { total, d in
             let bytes = d.publicDownloadBytes > 0 ? d.publicDownloadBytes : d.maxSize
             guard bytes > 0 else { return total }
             // Sizes are parsed from untrusted PICS VDF strings with no bound:
@@ -247,7 +274,7 @@ struct SteamAppInfo {
     /// selected depot, else its download figure. Same selection and caveats as
     /// downloadSize (shared depots whose owner's product info was not read count 0).
     func installSize(for os: String) -> UInt64 {
-        installDepots(os: os).reduce(0) { total, d in
+        installDepots(os: os, dlc: []).reduce(0) { total, d in
             let bytes = d.publicSizeBytes > 0 ? d.publicSizeBytes : (d.publicDownloadBytes > 0 ? d.publicDownloadBytes : d.maxSize)
             let (sum, overflow) = total.addingReportingOverflow(bytes)
             return overflow ? UInt64.max : sum
@@ -307,6 +334,13 @@ struct SteamAppInfo {
                     if !["0", "false"].contains(flag.lowercased()) { info.languages.insert(name.lowercased()) }
                 }
             }
+        }
+
+        // Extended section: the DLC the app lists, "id,id,...". Untrusted text, bounded.
+        if let extended = appInfo["extended"] as? [String: Any],
+           let list = extended["listofdlc"] as? String, list.utf8.count <= 64 << 10 {
+            info.dlcList = list.split(separator: ",").prefix(1024)
+                .compactMap { UInt32($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 != 0 && $0 != appID }
         }
 
         // Config section
@@ -554,5 +588,36 @@ enum SteamLanguage {
                          "tr": "turkish", "uk": "ukrainian", "vi": "vietnamese"]
             return names[language]
         }
+    }
+}
+
+// MARK: - DLC choice
+
+/// Which owned DLC a Steam download takes along. Like Valve's client, every
+/// owned DLC is on unless the player turned it off on the game's page; the
+/// turned-off DLC are kept per game in the app's defaults (`steam-dlc-off`).
+/// Steam still decides ownership: it gives a depot key only for owned content.
+enum SteamDLC {
+    private static let offKey = "steam-dlc-off"
+
+    /// The DLC the player turned off for a game.
+    static func off(_ appID: Int) -> Set<Int> {
+        let value = (UserDefaults.standard.dictionary(forKey: offKey) as? [String: [Int]])?[String(appID)] ?? []
+        return Set(value.prefix(1024))
+    }
+
+    static func setOn(_ dlcID: Int, _ on: Bool, for appID: Int) {
+        var all = UserDefaults.standard.dictionary(forKey: offKey) as? [String: [Int]] ?? [:]
+        var set = Set(all[String(appID)] ?? [])
+        if on { set.remove(dlcID) } else { set.insert(dlcID) }
+        all[String(appID)] = set.isEmpty ? nil : set.sorted()
+        UserDefaults.standard.set(all, forKey: offKey)
+        SteamLog.event("[steam-dlc] app=\(appID) dlc=\(dlcID) on=\(on ? 1 : 0)")
+    }
+
+    /// The DLC an install of the game takes: its owned DLC, less those turned off.
+    static func chosen(owned: [Int], appID: Int) -> Set<UInt32> {
+        let off = off(appID)
+        return Set(owned.filter { !off.contains($0) && $0 > 0 && $0 <= Int(UInt32.max) }.map { UInt32($0) })
     }
 }
