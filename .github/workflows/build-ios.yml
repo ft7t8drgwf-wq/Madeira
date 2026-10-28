@@ -51,7 +51,7 @@ jobs:
         uses: actions/checkout@v4
 
       - id: key
-        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh', 'build/dxmt-patches/**') }}" >> "$GITHUB_OUTPUT"
+        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh', 'build/dxmt-patches/**', 'build/wine-patches/**') }}" >> "$GITHUB_OUTPUT"
 
       - id: lookup
         uses: actions/cache/restore@v4
