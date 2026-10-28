@@ -508,6 +508,10 @@ struct SteamGamesSection: View {
         if SteamOwnedLibrary.enabled && SteamOwnedLibrary.shared.signedIn {
             await SteamOwnedLibrary.shared.refreshLibrary(interactive: true)
         }
+        // The GOG section refreshes with the same pull (GOGGames.swift).
+        if GOGLibrary.enabled && GOGLibrary.shared.signedIn {
+            await GOGLibrary.shared.refreshLibrary(interactive: true)
+        }
     }
 
     /// Sort by data from the Steam games' library entries.
