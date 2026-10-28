@@ -3354,6 +3354,43 @@ static void *ios_mach_exception_thread( void *arg )
                 {
                     uint32_t insn; ios_fault_read_insn( (uint64_t)(uintptr_t)fault_pc, &insn );  /* ml982 */
                     int emulated = 0;
+                    /* Stardew: a store that runs past the end of an anon-JIT alias chunk.
+                     * Each 16 KB chunk gets its own pool offset, so the RW alias of the
+                     * next chunk is usually NOT rw_addr + n. CoreCLR's JIT writes its code
+                     * byte stream with unaligned 4/8-byte stores; one landing on the last
+                     * bytes of a chunk wrote its tail into an unrelated pool chunk, left
+                     * the start of the next chunk unwritten, and FEX then hit "Invalid
+                     * instruction in entry block" there. When the next 16 bytes are not
+                     * contiguous in the RW alias, emulate into a scratch copy and write
+                     * back, byte by byte through each byte's own alias, only the bytes the
+                     * store changed. MADEIRA_ALIAS_SPLIT_STORE=0 turns this off. */
+                    uint8_t span_buf[32], span_old[32];
+                    uintptr_t span_va = 0;
+                    /* Exclusive/CAS and LSE atomics stay on the direct path: they are
+                     * aligned (never cross a chunk) and must stay single-copy atomic. */
+                    if (!in_jit && (insn & 0x3f000000) != 0x08000000 &&
+                        (insn & 0x3b200c00) != 0x38200000 &&
+                        ios_jit_anon_alias_lookup( fault_addr + 15 ) != rw_addr + 15)
+                    {
+                        static int split_on = -1;
+                        if (split_on < 0)
+                        {
+                            const char *e = getenv( "MADEIRA_ALIAS_SPLIT_STORE" );
+                            split_on = !(e && *e == '0');
+                        }
+                        if (split_on)
+                        {
+                            unsigned k;
+                            for (k = 0; k < sizeof(span_buf); k++)
+                            {
+                                uintptr_t b = ios_jit_anon_alias_lookup( fault_addr + k );
+                                span_buf[k] = b ? *(volatile uint8_t *)b : 0;
+                            }
+                            memcpy( span_old, span_buf, sizeof(span_old) );
+                            span_va = fault_addr;
+                            rw_addr = (uintptr_t)span_buf;
+                        }
+                    }
                     /* STP (SIMD&FP, signed offset, 128-bit Q): 10 101 1 1 0 0 0 imm7 Rt2 Rn Rt
                      *   pattern bits 31-22: 10 1011 1000  → top10 = 0x2B8 (= bits 31..22)
                      *   So mask 0xFFC00000 = top10. Match 0x2B8 << 22 = 0xAE000000? Hmm.
@@ -4144,6 +4181,26 @@ static void *ios_mach_exception_thread( void *arg )
                                 "rw_addr=0x%llx — alias OK, ADD THIS ENCODING to the case-4 emulator\n",
                                 ++undecoded_n, insn, (unsigned long long)fault_pc,
                                 (unsigned long long)fault_addr, (unsigned long long)rw_addr);
+                    }
+                    if (span_va)
+                    {
+                        static int split_n;
+                        unsigned k, changed = 0;
+                        if (emulated)
+                            for (k = 0; k < sizeof(span_buf); k++)
+                            {
+                                uintptr_t b;
+                                if (span_buf[k] == span_old[k]) continue;
+                                b = ios_jit_anon_alias_lookup( span_va + k );
+                                if (b) { *(volatile uint8_t *)b = span_buf[k]; changed++; }
+                            }
+                        if (split_n < 8)
+                            dprintf(STDERR_FILENO,
+                                "[alias-split] #%d insn=0x%08x addr=0x%llx emulated=%d bytes-written=%u "
+                                "(store crosses into a non-contiguous alias chunk)\n",
+                                ++split_n, insn, (unsigned long long)span_va, emulated, changed);
+                        /* the diag readback below compares rw_addr with the RX view */
+                        rw_addr = ios_jit_anon_alias_lookup( span_va );
                     }
                     if (emulated)
                     {
@@ -10939,6 +10996,22 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
             ERR("ILL diag: x6=0x%llx x10=0x%llx x11=0x%llx (pc==x11? %d pc==x10? %d)\n",
                 (unsigned long long)x6, (unsigned long long)x10, (unsigned long long)x11,
                 x11 == pc, x10 == pc);
+            /* Stardew: the guest bytes FEX refused, from 16 before x6 (the
+             * [alias-split] question is whether a chunk start was left unwritten). */
+            if (x6 >= 0x10000ULL && x6 < 0x8000000000ULL)
+            {
+                uint8_t gb[48];
+                vm_size_t gsz = sizeof(gb);
+                if (vm_read_overwrite(mach_task_self(), x6 - 16, sizeof(gb),
+                                      (vm_address_t)gb, &gsz) == KERN_SUCCESS)
+                {
+                    char hex[sizeof(gb) * 3 + 1];
+                    unsigned k;
+                    for (k = 0; k < sizeof(gb); k++)
+                        snprintf( hex + k * 3, 4, "%02x ", gb[k] );
+                    ERR("ILL diag: guest bytes @x6-16: %s\n", hex);
+                }
+            }
             /* FEX inline L1 exit-dispatch reads {L1Ptr, L1Mask} at STATE+0xa0
              * and the entry pair {host, guest} at L1Ptr + (rip & mask)<<?.
              * Dump the entry for x6 so a torn pair is visible at crash time.
