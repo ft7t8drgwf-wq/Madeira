@@ -1,0 +1,19 @@
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 7f0ed3d..15b81da 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -717,7 +717,13 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
+    * 16 MB call-ret reset) mostly for these patches. */
+   if (GuestBase) {
+     const char* Plain = getenv("MADEIRA_WOW_RWX_PLAIN");
+-    if (!Plain || !Plain[0] || Plain[0] == '1') {   /* ml1282: on unless plain memory is turned off (as ntdll reads it) */
++    /* MADEIRA_MONO_KEEP_SMC=1 keeps the backpatcher bridge but leaves SMC detection on, so a
++     * write Mono makes to live code outside the backpatcher still invalidates its translation.
++     * Terraria crashed in a Mono array icall on loading a player with it disabled. */
++    const char* KeepSMC = getenv("MADEIRA_MONO_KEEP_SMC");
++    if (KeepSMC && KeepSMC[0] == '1') {
++      LogMan::Msg::EFmt("[mono-site] ml1280 plain guest RWX: SMC detection kept on (MADEIRA_MONO_KEEP_SMC=1)");
++    } else if (!Plain || !Plain[0] || Plain[0] == '1') {   /* ml1282: on unless plain memory is turned off (as ntdll reads it) */
+       LogMan::Msg::EFmt("[mono-site] ml1280 plain guest RWX: SMC detection disabled after the backpatcher was found");
+       DisableSMCDetection();
+     }
