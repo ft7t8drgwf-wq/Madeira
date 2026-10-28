@@ -244,6 +244,15 @@ struct ios_fdt_ent
 static struct ios_fdt_ent ios_fdt[IOS_FDT_MAX];
 static unsigned int ios_fdt_gen;
 
+/* The ledger also runs on threads with no TEB yet: a 32-bit child's boot thread
+ * tears down the window of a process another one killed (ios_wow_window_reserve
+ * -> teardown -> ios_fd_cache_release), and GetCurrentThreadId() there reads
+ * NULL->ClientId (fault at 0x48, Garry's Mod on build 35). 0 for such a thread. */
+static unsigned int ios_fdt_tid(void)
+{
+    return NtCurrentTeb() ? (unsigned int)GetCurrentThreadId() : 0;
+}
+
 static void ios_fdt_reg( int fd, int kind, void *peb )
 {
     struct ios_fdt_ent *e;
@@ -256,11 +265,11 @@ static void ios_fdt_reg( int fd, int kind, void *peb )
         if (reuse_cap++ < 200)
             wine_log_write("[fdtrace] SILENT-CLOSE fd=%d was %s owner_tid=%04x owner_peb=%p gen=%u; rereg %s tid=%04x peb=%p rev=ml586",
                            fd, ios_fdt_names[e->kind], e->tid, e->peb, e->gen,
-                           ios_fdt_names[kind], (unsigned int)GetCurrentThreadId(), peb);
+                           ios_fdt_names[kind], ios_fdt_tid(), peb);
     }
     e->kind = (unsigned char)kind;
     e->prev_kind = 0;
-    e->tid  = (unsigned int)GetCurrentThreadId();
+    e->tid  = ios_fdt_tid();
     e->peb  = peb;
     e->gen  = __sync_add_and_fetch( &ios_fdt_gen, 1 );
 }
@@ -294,14 +303,14 @@ static void ios_fdt_note_close( int fd, const char *why, void *dead_peb )
         int cross = (e->peb != dead_peb);
         wine_log_write("[fdtrace]%s close fd=%d why=%s kind=%s owner_tid=%04x owner_peb=%p gen=%u closer_tid=%04x dead_peb=%p rev=ml586",
                        cross ? " CROSS!" : "", fd, why, ios_fdt_names[e->kind],
-                       e->tid, e->peb, e->gen, (unsigned int)GetCurrentThreadId(), dead_peb);
+                       e->tid, e->peb, e->gen, ios_fdt_tid(), dead_peb);
         e->prev_kind = e->kind;
         e->kind = FDT_CLOSED;
     }
     else
         wine_log_write("[fdtrace] close fd=%d why=%s untracked%s closer_tid=%04x dead_peb=%p rev=ml586",
                        fd, why, (e->kind == FDT_CLOSED) ? " (prev comm fd)" : "",
-                       (unsigned int)GetCurrentThreadId(), dead_peb);
+                       ios_fdt_tid(), dead_peb);
 }
 
 /* victim autopsy: what the ledger knows about a failing comm fd */
@@ -309,7 +318,7 @@ static void ios_fdt_autopsy( const char *what, int fd, int ret, int err )
 {
     struct ios_fdt_ent *e = (fd >= 0 && fd < IOS_FDT_MAX) ? &ios_fdt[fd] : NULL;
     wine_log_write("[fdtrace] VICTIM %s tid=%04x fd=%d ret=%d errno=%d ledger=%s owner_tid=%04x owner_peb=%p gen=%u prev=%s rev=ml586",
-                   what, (unsigned int)GetCurrentThreadId(), fd, ret, err,
+                   what, ios_fdt_tid(), fd, ret, err,
                    e ? ios_fdt_names[e->kind] : "oob", e ? e->tid : 0, e ? e->peb : NULL,
                    e ? e->gen : 0, e ? ios_fdt_names[e->prev_kind] : "oob");
 }
