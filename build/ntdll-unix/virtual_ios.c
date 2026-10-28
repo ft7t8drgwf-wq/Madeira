@@ -33891,6 +33891,51 @@ NTSTATUS WINAPI NtSetInformationVirtualMemory( HANDLE process,
 }
 
 
+#ifdef WINE_IOS
+/* madeira-pz: a flush of FEX's own code buffer must not reach FEX again.
+ *
+ * FEX writes its blocks through the pool's RW alias and flushes them here by
+ * their RX address: after each compiled block, and after each block link and
+ * unlink. The ARM64EC wrapper (signal_arm64ec.c) then hands any flush that
+ * returns STATUS_SUCCESS back to FEX as BTCpu64FlushInstructionCache, which
+ * invalidates that range as guest code. A code buffer holds no guest code, so
+ * the invalidation finds nothing, but it takes FEX's invalidation locks from
+ * wherever the flush was issued. An unlink is issued from inside an
+ * invalidation, which holds CodeBufferListLock, and the nested one waits for
+ * that lock on the same thread forever. Project Zomboid (HotSpot JIT, wowfree
+ * build): main thread parked in InvalidateIntervalInternalLocked after
+ * "[inval-nested] #1 invalidate 0x16acdb000", an address inside a 16 MB tail
+ * carve, and every other thread stuck behind it on the code lock.
+ *
+ * The tail of the pool holds nothing but EC_CODE carves (the head allocator
+ * refuses to cross it), and region C carves are looked up in the carve table.
+ * Such a flush still invalidates the icache; it returns
+ * STATUS_ALREADY_COMPLETE, a success status that is not STATUS_SUCCESS, so the
+ * wrapper does not notify. FEX ignores the status of these flushes.
+ * MADEIRA_FLUSH_NOTIFY_FEX_CODE=1 notifies them again (the old behaviour). */
+static int ios_flush_is_fex_code( const void *addr, SIZE_T size )
+{
+    static int notify = -1;
+    uintptr_t a = (uintptr_t)addr, rx = (uintptr_t)ios_jit_rx_base_global;
+    uintptr_t end, tail;
+    unsigned long long cbase = 0, csize = 0;
+    int cfree = 1;
+
+    if (notify < 0)
+    {
+        const char *e = getenv( "MADEIRA_FLUSH_NOTIFY_FEX_CODE" );
+        notify = (e && e[0] == '1');
+    }
+    if (notify || !rx || !ios_jit_pool_size_global || !a || !size || a + size < a) return 0;
+    end = rx + ios_jit_pool_size_global;
+    tail = ios_jit_tail_reserved;
+    if (tail && tail <= ios_jit_pool_size_global && a >= end - tail && a + size <= end) return 1;
+    if (!ios_jit_low_contains( a )) return 0;
+    return ios_tail_carve_lookup_trylock( a, NULL, &cbase, &csize, &cfree ) == 1 && !cfree &&
+           a + size <= cbase + csize;
+}
+#endif
+
 /**********************************************************************
  *           NtFlushInstructionCache  (NTDLL.@)
  */
@@ -33970,13 +34015,20 @@ NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T
      * alias is readable, so it is a valid address for both. */
     if (handle == GetCurrentProcess())
     {
-        static int seen;
+        static int seen, quiet;
         if (addr && size) sys_icache_invalidate( (void *)addr, size );
         /* Say so, a few times. The old build logged a FIXME here and flushed
          * nothing; the absence of that FIXME is weaker evidence than this. */
         if (seen < 3 && ++seen)
             dprintf( 2, "[icache] ml795 invalidated %p+%lu (call %d) -- the pre-fix build "
                      "flushed nothing here\n", addr, (unsigned long)size, seen );
+        if (ios_flush_is_fex_code( addr, size ))
+        {
+            if (quiet < 3 && ++quiet)
+                dprintf( 2, "[icache] madeira-pz FEX code %p+%lu flushed without notifying FEX "
+                         "(MADEIRA_FLUSH_NOTIFY_FEX_CODE=1 notifies)\n", addr, (unsigned long)size );
+            return STATUS_ALREADY_COMPLETE;
+        }
     }
     else
     {
