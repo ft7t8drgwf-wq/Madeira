@@ -1,0 +1,51 @@
+diff --git a/dlls/wow64/syscall.c b/dlls/wow64/syscall.c
+--- a/dlls/wow64/syscall.c
++++ b/dlls/wow64/syscall.c
+@@ -699,6 +699,21 @@
+ }
+ 
+ 
++/* iOS-Madeira: 32-bit thread context reads and writes, with the debug
++ * registers, on stderr (ERR channel, first 200 calls). Steam's CEG step
++ * needs the debug registers under Proton; this shows whether a 32-bit
++ * program uses them here and what it reads back. */
++static void trace_context( const char *what, HANDLE handle, const WOW64_CONTEXT *context, NTSTATUS status )
++{
++    static LONG count;
++
++    if (!context || InterlockedIncrement( &count ) > 200) return;
++    ERR( "[wow-ctx] %s handle=%p flags=%08lx dr0=%08lx dr1=%08lx dr2=%08lx dr3=%08lx dr6=%08lx dr7=%08lx eip=%08lx status=%08lx\n",
++         what, handle, (long)context->ContextFlags, (long)context->Dr0, (long)context->Dr1, (long)context->Dr2,
++         (long)context->Dr3, (long)context->Dr6, (long)context->Dr7, (long)context->Eip, (long)status );
++}
++
++
+ /**********************************************************************
+  *           wow64_NtGetContextThread
+  */
+@@ -706,8 +721,10 @@
+ {
+     HANDLE handle = get_handle( &args );
+     WOW64_CONTEXT *context = get_ptr( &args );
++    NTSTATUS status = RtlWow64GetThreadContext( handle, context );
+ 
+-    return RtlWow64GetThreadContext( handle, context );
++    trace_context( "get", handle, context, status );
++    return status;
+ }
+ 
+ 
+@@ -792,8 +809,12 @@
+ {
+     HANDLE handle = get_handle( &args );
+     WOW64_CONTEXT *context = get_ptr( &args );
++    NTSTATUS status;
+ 
+-    return RtlWow64SetThreadContext( handle, context );
++    trace_context( "set", handle, context, STATUS_PENDING );
++    status = RtlWow64SetThreadContext( handle, context );
++    trace_context( "set-done", handle, context, status );
++    return status;
+ }
+ 
+ 
