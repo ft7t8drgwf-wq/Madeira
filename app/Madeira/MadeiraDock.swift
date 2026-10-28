@@ -431,12 +431,17 @@ enum MadeiraDock {
     }
 
     /// The host's environment for one launch.
-    static func configure(_ game: DockGame, launchOption: UInt32 = 0) {
+    /// `arguments`: Game details › Launch arguments, which Valve's client adds after the
+    /// launch option's own (Steam's "Set launch options"; madeira-dock patch 0003).
+    static func configure(_ game: DockGame, launchOption: UInt32 = 0, arguments: String = "") {
         for key in ["MADEIRA_STEAM_HOST_PROBE", "MADEIRA_STEAM_HOST_SESSION", "MADEIRA_STEAM_HOST_LOGIN", "MADEIRA_STEAM_HOST_LAUNCH"] {
             setenv(key, "1", 1)
         }
         setenv("MADEIRA_STEAM_HOST_APPID", String(game.id), 1)
         setenv("MADEIRA_STEAM_HOST_LAUNCH_OPTION", String(launchOption), 1)
+        let arguments = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        if arguments.isEmpty { unsetenv("MADEIRA_STEAM_HOST_LAUNCH_ARGS") }
+        else { setenv("MADEIRA_STEAM_HOST_LAUNCH_ARGS", arguments, 1) }
         setenv("MADEIRA_STEAM_HOST_CLIENT_DIR", SteamRuntimeFiles.windowsRoot, 1)
         setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.windowsInstallPath, 1)
         setenv("MADEIRA_STEAM_HOST_LOG", "C:\\madeira-dock.txt", 1)

@@ -3494,7 +3494,7 @@ struct LibraryDetail: View {
                 }
             }
         }
-        // A Steam game starts with Steam's own launch option through Madeira Dock;
+        // A Steam game started through Madeira Dock has them on its Steam page;
         // "The game" adds these after Steam's arguments (programArguments).
         if entry.desktop != true && (entry.steamAppID == nil || entry.startsSteamGameDirectly) {
             Section {
@@ -3568,6 +3568,17 @@ struct LibraryDetail: View {
                     Text(entry.launchArguments).font(.caption.monospaced()).textSelection(.enabled)
                 }
             } header: { Text("Executable") }
+            // Madeira Dock: Valve's client adds these after the launch option's own
+            // arguments, as Steam's "Set launch options" does (MadeiraDock.configure).
+            if !entry.startsSteamGameDirectly {
+                Section {
+                    TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
+                        .font(.body.monospaced()).lineLimit(1...4)
+                        .autocorrectionDisabled().textInputAutocapitalization(.never)
+                } header: { Text("Launch arguments") } footer: {
+                    Text("Steam's launch options for this game, such as -nochromium. Passed on every start.")
+                }
+            }
         }
     }
 
