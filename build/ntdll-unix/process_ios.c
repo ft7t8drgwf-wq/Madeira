@@ -3485,6 +3485,31 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         exit_process( exit_code );
         /* noreturn */
     }
+    /* A 32-bit pseudo-process killed by ANOTHER one (Chromium ends its GPU
+     * helper this way) never reaches its own process_exit_wrapper, so its guest
+     * window stayed bound to the dead PEB.  The next 32-bit child then resolved
+     * that window as its own (ios_wow_slot_current via the session peb, which
+     * still named the dead child), mapped over the leftovers at shifted
+     * addresses, and published ITS i386 ntdll entry points in the shared
+     * LdrSystemDllInitBlock: the killer's next thread start and exception
+     * dispatch went to the other process's ntdll (Garry's Mod, NoExec at
+     * 0xffede3a8).  Read the victim's PEB while it is still alive and mark its
+     * window released once the kill went through.  Nothing is unmapped here;
+     * ios_wow_reclaim_dead_windows() tears it down later only when no thread
+     * is left in it.  A 64-bit victim has no window, so this does nothing. */
+    extern void *ios_jit_current_peb(void);
+    void *victim_peb = NULL;
+
+    if (handle && handle != NtCurrentProcess())
+    {
+        SERVER_START_REQ( get_process_info )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            if (!wine_server_call( req ) && !is_machine_64bit( reply->machine ))
+                victim_peb = wine_server_get_ptr( reply->peb );
+        }
+        SERVER_END_REQ;
+    }
 #endif
     SERVER_START_REQ( terminate_process )
     {
@@ -3494,6 +3519,14 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         self = reply->self;
     }
     SERVER_END_REQ;
+#ifdef WINE_IOS
+    if (victim_peb && !ret && !self && victim_peb != ios_jit_current_peb())
+    {
+        dprintf( 2, "[wow-window] 32-bit process peb=%p killed by another process: "
+                    "releasing its window\n", victim_peb );
+        ios_wow_window_release( victim_peb );
+    }
+#endif
     if (self)
     {
 #ifdef WINE_IOS
