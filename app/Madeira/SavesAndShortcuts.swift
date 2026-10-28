@@ -320,7 +320,6 @@ struct SavesSection: View {
     @State private var busy = false
     @State private var message: String?
     @State private var shareURL: URL?
-    @State private var importing = false
     @State private var pendingRestore: URL?
 
     var body: some View {
@@ -349,7 +348,7 @@ struct SavesSection: View {
                 }
             }
             .disabled(busy)
-            Button { importing = true } label: {
+            Button { DocumentPicker.shared.pick([.zip]) { pendingRestore = $0 } } label: {
                 Label("Restore saves from a backup…", systemImage: "arrow.uturn.backward.circle")
             }
             .disabled(busy)
@@ -369,9 +368,6 @@ struct SavesSection: View {
             }
         })) { f in
             ActivitySheet(items: [f.url])
-        }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.zip]) { r in
-            if case .success(let url) = r { pendingRestore = url }
         }
         .confirmationDialog("Restore saves from \(pendingRestore?.lastPathComponent ?? "the backup")?",
                             isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 { pendingRestore = nil } }),

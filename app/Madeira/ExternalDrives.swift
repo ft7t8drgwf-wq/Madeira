@@ -420,21 +420,21 @@ struct ExternalGamesSheet: View {
     }
 }
 
-/// The folder picker for Add drive or folder, presented with UIKit. The
-/// Settings form holds other .fileImporter modifiers (saves, JIT pairing), and
-/// SwiftUI delivers a picked folder to only one of them, so Open did nothing.
-@MainActor final class FolderPicker: NSObject, UIDocumentPickerDelegate {
-    static let shared = FolderPicker()
+/// The Files picker for Settings (Add drive or folder, Restore saves),
+/// presented with UIKit. The Settings form held several .fileImporter
+/// modifiers, and on iPad picking in any of them did nothing.
+@MainActor final class DocumentPicker: NSObject, UIDocumentPickerDelegate {
+    static let shared = DocumentPicker()
     private var done: ((URL) -> Void)?
 
-    func pick(_ done: @escaping (URL) -> Void) {
+    func pick(_ types: [UTType], _ done: @escaping (URL) -> Void) {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else {
-            LogStore.shared.log("[external] no window to show the folder picker from")
+            LogStore.shared.log("[picker] no window to show the Files picker from")
             return
         }
         while let next = top.presentedViewController { top = next }
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types)
         picker.allowsMultipleSelection = false
         picker.delegate = self
         self.done = done
@@ -442,7 +442,7 @@ struct ExternalGamesSheet: View {
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        LogStore.shared.log("[external] picked \(urls.count) folder(s)")
+        LogStore.shared.log("[picker] picked \(urls.count) item(s)")
         if let url = urls.first { done?(url) }
         done = nil
     }
@@ -480,7 +480,7 @@ struct ExternalDrivesSection: View {
                     Button("Find games on \(folder.name)") { scanning = folder }
                 }
             }
-            Button("Add drive or folder") { FolderPicker.shared.pick { picked($0) } }
+            Button("Add drive or folder") { DocumentPicker.shared.pick([.folder]) { picked($0) } }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
