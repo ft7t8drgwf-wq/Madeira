@@ -227,7 +227,7 @@ final class GamepadInput: @unchecked Sendable {
         }
         queue.async { [self] in
             if assist != live {
-                let gyroText = live.map { $0.gyro ? "\($0.source.rawValue)/\($0.when.rawValue)/\($0.turn.rawValue)" : "off" } ?? "off"
+                let gyroText = live.map { $0.gyro ? "\($0.source.rawValue)/\($0.when.rawValue)/\($0.turn.rawValue)/\($0.output.rawValue)" : "off" } ?? "off"
                 let turbo = live.map { $0.turbo.joined(separator: "+") } ?? ""
                 LogStore.shared.log("[pad-assist] gyro=\(gyroText) sensitivity=\(live?.sensitivity ?? 0) "
                                     + "anti-dead-zone=\(live?.antiDeadzone ?? 0) turbo=\(turbo.isEmpty ? "off" : turbo) rate=\(live?.turboRate ?? 0)")
@@ -243,23 +243,65 @@ final class GamepadInput: @unchecked Sendable {
     private var assist: PadAssistSettings?
     private var turboState = TurboState()
 
-    /// Player 1's sample through gyro aim and turbo (queue).
-    private func applyAssist(_ state: inout winios_gamepad) {
+    /// Gyro aim's rotation in the player's view, from the source the game's choices allow (queue).
+    private func gyroRates(_ assist: PadAssistSettings) -> (turn: Double, pitch: Double)? {
+        if assist.source != .device, let motion = controllers[0]?.motion, motion.hasRotationRate {
+            let r = motion.rotationRate
+            return GyroAim.controllerRates(x: r.x, y: r.y, z: r.z, turn: assist.turn)
+        }
+        return assist.source != .controller ? PadAssistSensors.shared.rates(turn: assist.turn) : nil
+    }
+
+    /// Player 1's sample through gyro aim and turbo (queue). `mouse`: gyro aim
+    /// moves the mouse instead of the right stick.
+    private func applyAssist(_ state: inout winios_gamepad, mouse: Bool) {
         guard let assist else { return }
         var pad = AssistPad(buttons: state.buttons, lt: state.left_trigger, rt: state.right_trigger, rx: state.rx, ry: state.ry)
-        var rates: (turn: Double, pitch: Double)?
-        if assist.gyro {
-            if assist.source != .device, let motion = controllers[0]?.motion, motion.hasRotationRate {
-                let r = motion.rotationRate
-                rates = GyroAim.controllerRates(x: r.x, y: r.y, z: r.z, turn: assist.turn)
-            } else if assist.source != .controller {
-                rates = PadAssistSensors.shared.rates(turn: assist.turn)
-            }
+        if mouse && assist.gyro {
+            gyroToMouse(assist, held: GyroAim.held(pad, assist.when))
         }
-        applyPadAssist(&pad, settings: assist, rates: rates, turbo: &turboState, now: DispatchTime.now().uptimeNanoseconds)
+        var stickOnly = assist
+        if mouse { stickOnly.gyro = false }
+        let rates = stickOnly.gyro ? gyroRates(assist) : nil
+        applyPadAssist(&pad, settings: stickOnly, rates: rates, turbo: &turboState, now: DispatchTime.now().uptimeNanoseconds)
         state.buttons = pad.buttons
         state.left_trigger = pad.lt; state.right_trigger = pad.rt
         state.rx = pad.rx; state.ry = pad.ry
+    }
+
+    /// Whether gyro aim moves the mouse for this sample of player 1: chosen, or
+    /// automatic while the game sees no controller from the pad.
+    private func gyroMouse(physical: Bool, touch: Bool) -> Bool {
+        guard let assist, assist.gyro else { return false }
+        switch assist.output {
+        case .mouse: return true
+        case .stick: return false
+        case .auto: return keyboardMouse != nil || (!physical && !touch)
+        }
+    }
+
+    private var gyroMouseCarry = MotionCarry()
+    private var gyroMouseAt: UInt64 = 0
+    private var gyroMouseMoving = false
+
+    /// Gyro aim as relative mouse motion, by the time since the last sample (queue).
+    private func gyroToMouse(_ assist: PadAssistSettings, held: Bool) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let dt = gyroMouseAt == 0 ? 0 : min(Double(now &- gyroMouseAt) / 1e9, 1.0 / 15)
+        gyroMouseAt = now
+        guard held, HardwareInput.shared.baseFocused, !LibraryController.shared.ownsInput,
+              let rates = gyroRates(assist) else {
+            gyroMouseCarry.reset(); gyroMouseMoving = false
+            return
+        }
+        let m = GyroAim.mouse(turn: rates.turn, pitch: rates.pitch, dt: dt, settings: assist)
+        let d = gyroMouseCarry.add(m.dx, m.dy, gain: 1)
+        guard d.dx != 0 || d.dy != 0 else { return }
+        if !gyroMouseMoving {
+            gyroMouseMoving = true
+            DispatchQueue.main.async { HardwareInput.shared.stickMoved() }
+        }
+        HardwareInput.shared.postRelative(d.dx, d.dy)
     }
 
     private let queue = DispatchQueue(label: "madeira.gamepad", qos: .userInteractive)
@@ -400,7 +442,9 @@ final class GamepadInput: @unchecked Sendable {
 
     private func updateTimer() {
         // Touch play with gyro aim (the device's gyro) or turbo is polled as a pad is.
-        let needed = active && (profiles.contains(where: { $0 != nil }) || (touchState.connected && assist != nil))
+        // So is gyro aim moving the mouse with no controller at all.
+        let mouseGyro = assist.map { $0.gyro && $0.output != .stick } ?? false
+        let needed = active && (profiles.contains(where: { $0 != nil }) || (assist != nil && (touchState.connected || mouseGyro)))
         if !needed { timer?.cancel(); timer = nil; return }
         guard timer == nil else { return }
         let source = DispatchSource.makeTimerSource(queue: queue)
@@ -435,6 +479,11 @@ final class GamepadInput: @unchecked Sendable {
             }
             let hid = i == 0 && hidActive
             guard pad != nil || touchConnected else {
+                // No controller for the game: gyro aim can still move the mouse
+                // (with nothing to hold, only "Always" does).
+                if i == 0, active, let assist, gyroMouse(physical: false, touch: false) {
+                    gyroToMouse(assist, held: assist.when == .always)
+                }
                 winios_gamepad_set_state(Int32(i), nil)
                 clearBattery(i)
                 if hid { winios_hidpad_set_state(nil) }
@@ -481,7 +530,7 @@ final class GamepadInput: @unchecked Sendable {
                         assisted = true
                         if keyboardMouse != nil { PadKeyboardMouse.shared.releaseAll("library menu") }
                     } else if let kbm = keyboardMouse {
-                        applyAssist(&state)
+                        applyAssist(&state, mouse: gyroMouse(physical: true, touch: touchConnected))
                         assisted = true
                         // Keyboard-and-mouse mode: the pad becomes keys and mouse
                         // motion; XInput sees no physical player 1 (touch may still
@@ -510,7 +559,9 @@ final class GamepadInput: @unchecked Sendable {
                 state.left_trigger = merged.lt; state.right_trigger = merged.rt
                 state.lx = merged.lx; state.ly = merged.ly; state.rx = merged.rx; state.ry = merged.ry
             }
-            if !assisted && !LibraryController.shared.ownsInput { applyAssist(&state) }
+            if !assisted && !LibraryController.shared.ownsInput {
+                applyAssist(&state, mouse: gyroMouse(physical: pad != nil, touch: touchConnected))
+            }
             if hid {
                 publishHID(state, live: hidLive, pad: pad)
                 // One controller, one API: player 1 is not also an XInput pad,

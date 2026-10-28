@@ -198,6 +198,11 @@ follows the pad while the stick still works on top of it.
   Pads whose sensors are off until asked have them switched on only while a
   session uses gyro aim.
 - *Active*: always, or only while holding LT, LB or RB.
+- *Moves*: the **Right stick**, the **Mouse** (8 pixels a degree at 1×), or
+  **Automatic**: the mouse while the game sees no controller from the pad (no
+  controller and no touch controller, or keyboard-and-mouse mode) and the
+  right stick otherwise. With no controller there is nothing to hold, so only
+  *Always* moves the mouse.
 - *Turn with*: twisting the pad flat (yaw) or tilting it like a wheel (roll).
 - *Sensitivity* 0.25× to 4×; 1× is full deflection at 150 degrees a second.
 - *Anti-dead zone* (default 25%, XInput's standard right-stick dead zone):
@@ -211,7 +216,7 @@ second while they are held, starting pressed. It applies to touch buttons too.
 
 Player 1's sample passes through both after the touch merge, so XInput and the
 HID controller see the result; in keyboard-and-mouse mode it passes through
-before the key feed, so gyro aim moves the right-stick mouse. Neither applies
+before the key feed. Neither applies
 while the library or the Session menu has the pad. Touch play with either on
 keeps the 4 ms poll running without a physical pad. `[pad-assist]` log lines
 record each session's choices and the sensors switching on and off.
