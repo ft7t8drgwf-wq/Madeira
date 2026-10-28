@@ -39,6 +39,9 @@ LOG="$B/madeira-i386-build.log"
 
 [ -x "$STRIP" ] || { echo "llvm-mingw not found at $TC (docs/BUILDING.md)" >&2; exit 1; }
 
+# This repository's wine patches (build/wine-patches) go into the i386 farm too.
+"$R/build/wine-patches/apply.sh"
+
 # ---------------------------------------------------------------- configure
 # Its own tree, like build-arm64ec: reconfiguring build-macos with an extra
 # arch would regenerate every module Makefile the ntdll-unix build relies on.
