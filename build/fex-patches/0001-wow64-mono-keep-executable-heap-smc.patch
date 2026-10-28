@@ -1,0 +1,161 @@
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 7f0ed3d..68f0008 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -3,6 +3,7 @@
+ #include <atomic>
+ #include <cstdlib>  // ml623: getenv/strtoull for the IR-capture target
+ #include <cstring>  // ml623: strlen
++#include <FEXCore/fextl/vector.h>
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/Utils/SignalScopeGuards.h>
+@@ -85,7 +86,7 @@ static bool ProtIsWritable(ULONG Prot) {
+   return (Prot & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+ }
+ 
+-void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
++void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot, ULONG AllocType) {
+   if (IntervalsLock.HeldByThisThread()) {
+     // FEX's own heap, changed while this thread holds IntervalsLock: see OwnedSharedMutex.
+     NestedNotificationSkips.fetch_add(1, std::memory_order_relaxed);
+@@ -115,6 +116,12 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
+       if (EffectiveRWX) {
+         LogMan::Msg::DFmt("Add SMC interval: {:X} - {:X}", AlignedBase, AlignedBase + AlignedSize);
+         RWXIntervals.Insert(ProtInterval);
++        if (GuestBase && (AllocType & MEM_COMMIT) && !(AllocType & MEM_RESERVE) && HasExec) {
++          const char* HeapSMC = getenv("MADEIRA_MONO_HEAP_SMC");
++          if (!HeapSMC || HeapSMC[0] != '0') {
++            HeapRWXIntervals.Insert(ProtInterval);
++          }
++        }
+       }
+       if (EagerDEP && !HasExec) {
+         DEPPromotedIntervals.Insert(ProtInterval);
+@@ -162,6 +169,9 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
+                         ProtInterval.Offset, ProtInterval.End);
+       XIntervals.Remove(ProtInterval);
+       RWXIntervals.Remove(ProtInterval);
++#if !defined(ARCHITECTURE_arm64ec)
++      HeapRWXIntervals.Remove(ProtInterval);
++#endif
+       if (DEPDisabled) {
+         DEPPromotedIntervals.Remove(ProtInterval);
+       }
+@@ -466,6 +476,9 @@ InvalidationTracker::InvalidateContainingSectionResult InvalidationTracker::Inva
+                       SectionBase, SectionBase + SectionSize);
+     XIntervals.Remove({SectionBase, SectionBase + SectionSize});
+     RWXIntervals.Remove({SectionBase, SectionBase + SectionSize});
++#if !defined(ARCHITECTURE_arm64ec)
++    HeapRWXIntervals.Remove({SectionBase, SectionBase + SectionSize});
++#endif
+   }
+ 
+   return {SectionBase, SectionSize};
+@@ -502,6 +515,9 @@ void InvalidationTracker::InvalidateAlignedInterval(uint64_t Address, uint64_t S
+     }
+     XIntervals.Remove({AlignedBase, AlignedBase + AlignedSize});
+     RWXIntervals.Remove({AlignedBase, AlignedBase + AlignedSize});
++#if !defined(ARCHITECTURE_arm64ec)
++    HeapRWXIntervals.Remove({AlignedBase, AlignedBase + AlignedSize});
++#endif
+   }
+ }
+ 
+@@ -736,6 +752,13 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
+ }
+ 
+ void InvalidationTracker::DisableSMCDetection() {
++#if !defined(ARCHITECTURE_arm64ec)
++  // The executable-heap ranges stay trapped (see HeapRWXIntervals). The loop below untraps them
++  // with the rest, so trap them again and drop their code once the lock is released: a write made
++  // in between did not fault.
++  fextl::vector<FEXCore::IntervalList<uint64_t>::Interval> Heap;
++  {
++#endif
+   std::unique_lock Lock(IntervalsLock);
+   SMCDetectionDisabled = true;
+   uint64_t Address = 0;
+@@ -752,6 +775,21 @@ void InvalidationTracker::DisableSMCDetection() {
+     }
+     Address += Query.Size;
+   } while (Query.Size);
++#if !defined(ARCHITECTURE_arm64ec)
++  for (const auto& Interval : HeapRWXIntervals) {
++    void* TmpAddress = reinterpret_cast<void*>(Interval.Offset);
++    SIZE_T TmpSize = static_cast<SIZE_T>(Interval.End - Interval.Offset);
++    ULONG TmpProt;
++    NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, GetTrapProt(Interval.Offset), &TmpProt);
++    Heap.push_back(Interval);
++  }
++  LogMan::Msg::EFmt("[mono-site] ml1280 executable heap: {} range(s) stay write-trapped (MADEIRA_MONO_HEAP_SMC=0 turns this off)",
++                    Heap.size());
++  }
++  for (const auto& Interval : Heap) {
++    InvalidateIntervalInternal(Interval.Offset, Interval.End - Interval.Offset);
++  }
++#endif
+ }
+ 
+ ULONG InvalidationTracker::GetTrapProt(uint64_t Address) const {
+@@ -835,13 +873,19 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
+   const auto End = Address + Size;
+   std::shared_lock Lock(IntervalsLock);
+ 
++#if !defined(ARCHITECTURE_arm64ec)
++  // With SMC detection off only the executable-heap ranges are still trapped.
++  const auto& Intervals = SMCDetectionDisabled ? HeapRWXIntervals : RWXIntervals;
++#else
+   if (SMCDetectionDisabled) {
+     return false;
+   }
++  const auto& Intervals = RWXIntervals;
++#endif
+ 
+   bool HitRWXInterval = false;
+   do {
+-    const auto Query = RWXIntervals.Query(Address);
++    const auto Query = Intervals.Query(Address);
+     if (Query.Enclosed) {
+       if (!HitRWXInterval) {
+         if (ForWriteLocked) {
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index 41ca38d..0f26450 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -42,7 +42,8 @@ public:
+ #else
+   InvalidationTracker(FEXCore::Context::Context& CTX, const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads);
+ #endif
+-  void HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot);
++  // AllocType: the NtAllocateVirtualMemory type for an allocation notification, 0 otherwise.
++  void HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot, ULONG AllocType = 0);
+   void HandleProcessExecuteFlagsChange(ULONG Flags);
+   void HandleImageMap(std::string_view Name, uint64_t Address);
+   struct InvalidateContainingSectionResult {
+@@ -90,6 +91,12 @@ private:
+ 
+   FEXCore::IntervalList<uint64_t> XIntervals;
+   FEXCore::IntervalList<uint64_t> RWXIntervals;
++#if !defined(ARCHITECTURE_arm64ec)
++  // RWX memory committed into a separately reserved region: what a heap created with
++  // HEAP_CREATE_ENABLE_EXECUTE grows by. Its blocks are freed and handed out again without any
++  // notification, so these stay write-trapped after DisableSMCDetection (ml1280). Subset of RWXIntervals.
++  FEXCore::IntervalList<uint64_t> HeapRWXIntervals;
++#endif
+   // MADEIRA: a std::shared_mutex that remembers which thread holds it exclusively. Anything that
+   // grows or shrinks FEX's own heap under the lock (a log line, an interval insert) comes back on
+   // the same thread through the memory notifications (HandleMemoryProtectionNotification,
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 5c7dd86..4a656ac 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1981,7 +1981,7 @@ void BTCpuNotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot,
+   } else {
+     // MEM_RESET(_UNDO) ignores the passed permissions
+     if (!Status && !(Type & (MEM_RESET | MEM_RESET_UNDO))) {
+-      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot);
++      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), Prot, Type);
+     }
+     ThreadCreationMutex.unlock();
+   }
