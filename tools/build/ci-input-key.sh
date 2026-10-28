@@ -7,10 +7,13 @@ repo_root=$(git rev-parse --show-toplevel)
 rustc=$(cd "$repo_root/build/rppairing-ios" && rustc -vV)
 fingerprint() { shasum -a 256 | cut -c1-20; }
 flags() { env | LC_ALL=C sort | awk -F= -v pattern="$1" '$1 ~ pattern'; }
-key=$( { printf '%s\n' "$xcode" "$sdk" "$compiler"; uname -sm; flags '^(CC|CXX|AR|RANLIB|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|SDKROOT|MACOSX_DEPLOYMENT_TARGET|IPHONEOS_DEPLOYMENT_TARGET|ImageOS|ImageVersion)$'; } | fingerprint)
+key=$( { printf '%s\n' "$xcode" "$sdk" "$compiler"; uname -sm; flags '^(CC|CXX|AR|RANLIB|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|SDKROOT|MACOSX_DEPLOYMENT_TARGET|IPHONEOS_DEPLOYMENT_TARGET)$'; } | fingerprint)
 rust=$( { printf '%s\n' "$key" "$rustc"; flags '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTUP_TOOLCHAIN)$'; } | fingerprint)
 graphics=$( { printf '%s\n' "$key"; flags '^(DXMT_METAL_STD|MADEIRA_ONLY|MADEIRA_MSC_ROOT)$'; } | fingerprint)
 ipa=$( { printf '%s\n' "$key" "$rust" "$graphics"; flags '^(CONFIGURATION|MADEIRA_MOLTENVK)$'; } | fingerprint)
+# GitHub's hosted pool mixes runner image versions within one run, so the
+# image version is logged, not keyed: Xcode, the SDK and clang still are.
+printf 'image=%s %s\nxcode=%s\nsdk=%s\nclang=%s\nkey=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$(echo "$xcode" | tr '\n' ' ')" "$sdk" "$(echo "$compiler" | head -1)" "$key" >&2
 if [[ -n "${MADEIRA_PLANNED_SDK:-}" && "$key" != "$MADEIRA_PLANNED_SDK" ]]; then
   echo "ERROR: this runner's build inputs differ from the planned IPA key" >&2
   exit 1

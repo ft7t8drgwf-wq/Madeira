@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: macos-26
+    runs-on: xcode-27
     outputs:
       ipa: ${{ steps.key.outputs.ipa }}
       reuse: ${{ steps.ipa.outputs.cache-hit }}
@@ -48,7 +48,7 @@ jobs:
   reuse:
     needs: plan
     if: needs.plan.outputs.reuse == 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/cache/restore@v4
         with:
@@ -71,7 +71,7 @@ jobs:
   llvm:
     needs: plan
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
     timeout-minutes: 360
@@ -111,7 +111,7 @@ jobs:
   fex:
     needs: plan
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
     timeout-minutes: 360
@@ -151,7 +151,7 @@ jobs:
   i386:
     needs: plan
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
     timeout-minutes: 360
@@ -201,7 +201,7 @@ jobs:
   app:
     needs: [plan, llvm, fex, i386]
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
       MADEIRA_PLANNED_IPA: ${{ needs.plan.outputs.ipaenv }}
