@@ -299,23 +299,24 @@ func record(_ appID: Int, _ name: String, _ folder: String, flags: Int) -> Strin
             return SteamAppInfo.parse(appID: id, from: Data("\"appinfo\" { \"common\" { \"name\" \"\(name)\" \"type\" \"DLC\" \(p) } }".utf8))!
         }
         require(dlcHost.dlcList == [7101, 7102, 7103] && dlcHost.knownDLC == [7101, 7102, 7103, 7104], "the DLC an app lists and its depots name: \(dlcHost.knownDLC)")
-        require(dlcHost.installDepots().map(\.depotID) == [7001], "no DLC chosen: the game's own depots only")
+        require(dlcHost.installDepots().map(\.depotID) == [7001], "no DLC licensed: the game's own depots only")
         require(dlcHost.downloadSize(for: "windows") == 10, "the game's size leaves DLC out")
         require(dlcHost.dlcDepots(7101, language: "english").map(\.depotID) == [7002], "a DLC's depots follow the game's language rule")
-        dlcHost.dlcChoice = [7101]
-        require(dlcHost.installDepots(language: "english").map(\.depotID) == [7001, 7002], "a chosen DLC's depots come along")
-        require(dlcHost.depotSelectionSummary(language: "english").contains("7004[-]dlc"), "an unchosen DLC depot is logged as dlc")
+        require(dlcHost.installDepots(language: "english", ownedDLC: [7002, 7004]).map(\.depotID) == [7001, 7002, 7004], "licensed DLC depots come along")
+        dlcHost.dlcOff = [7104]
+        require(dlcHost.installDepots(language: "english", ownedDLC: [7002, 7004]).map(\.depotID) == [7001, 7002], "a DLC turned off is left out")
+        require(dlcHost.depotSelectionSummary(language: "english", ownedDLC: [7002, 7004]).contains("7004[-]dlc"), "a turned-off DLC depot is logged as dlc")
         let ownedDLC: [UInt32: SteamAppInfo] = [7101: dlcApp(7101, "Expansion", parent: 7000), 7102: dlcApp(7102, "Skin Pack", parent: nil),
                                                 7200: dlcApp(7200, "Other Game DLC", parent: 9999)]
         let dlcGame = SteamOwnedGame(SteamAppInfo.parse(appID: 7000, from: Data(dlcGameVDF.utf8))!, ownedDLC: ownedDLC)
         require(dlcGame.dlc?.map(\.id) == [7101, 7102], "owned DLC of the game only, by name: \(String(describing: dlcGame.dlc?.map(\.id)))")
         require(dlcGame.dlc?.first?.downloadBytes == 20 && dlcGame.dlc?.first?.installBytes == 25 && dlcGame.dlc?.last?.depots == [],
                 "sizes per DLC, and a DLC without files has no depots")
-        require(dlcGame.chosenDLC == [7101, 7102], "every owned DLC is on by default")
+        require(SteamDLC.offApps(7000).isEmpty, "every owned DLC is on by default")
         require(dlcGame.dlcToDownload(installedDepots: [7001]).map(\.id) == [7101] && dlcGame.dlcToDownload(installedDepots: [7001, 7002]).isEmpty,
                 "an installed game lacking a DLC's depots offers it")
         SteamDLC.setOn(7101, false, for: 7000)
-        require(dlcGame.chosenDLC == [7102] && dlcGame.dlcToDownload(installedDepots: [7001]).isEmpty, "a DLC turned off is not taken or offered")
+        require(SteamDLC.offApps(7000) == [7101] && dlcGame.dlcToDownload(installedDepots: [7001]).isEmpty, "a DLC turned off is not taken or offered")
         SteamDLC.setOn(7101, true, for: 7000)
         require(SteamDLC.off(7000).isEmpty, "turning it back on forgets the choice")
         let merged = R.items(installed: found, owned: owned, search: "")

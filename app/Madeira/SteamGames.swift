@@ -306,6 +306,22 @@ enum SteamDirectStart {
         return nil
     }
 
+    /// The program Steam's launch settings start when none of the Windows entries'
+    /// programs is in the install folder (Valve's client then stops with
+    /// launch-client-error 28, "could not find the game's executable"); nil when one
+    /// is there or Steam's settings are not known.
+    static func missingProgram(_ options: [SteamLaunchOption], installFolder root: URL) -> String? {
+        // The entries choose() considers: the game itself, for Windows, outside beta branches.
+        let windows = options.filter { option in
+            option.betaKey.isEmpty && !option.executable.isEmpty && !otherKinds.contains(option.type.lowercased()) &&
+                (option.requiredDLC == nil || option.requiredDLC == "" || option.requiredDLC == "0") &&
+                (option.oslist.isEmpty || option.oslist.lowercased().contains("windows"))
+        }
+        guard let first = windows.first(where: { $0.type.lowercased() == "default" }) ?? windows.first,
+              choose(options, installFolder: root) == nil else { return nil }
+        return String(first.executable.replacingOccurrences(of: "/", with: "\\").prefix(200))
+    }
+
     /// The install folder's Windows programs for the Program picker: every .exe up to
     /// six folders deep (linked folders are not followed), at most 400, sorted.
     static func programs(in root: URL) -> [String] {
@@ -1288,6 +1304,12 @@ struct SteamCloudSection: View {
 /// the game starts (Madeira Dock, the default, with its per-launch pool choice and
 /// one-time installs; or The game, its own program without Steam, SteamDirectStart),
 /// its update, a repair of its files and Uninstall.
+/// One row of Game details › Steam › Installed DLC.
+struct InstalledDLC: Identifiable, Equatable {
+    let id: Int
+    let bytes: Int64
+}
+
 struct SteamEntrySection: View {
     @Binding var entry: LibraryEntry
     /// The game was uninstalled: the page closes without saving.
@@ -1303,6 +1325,13 @@ struct SteamEntrySection: View {
     /// Steam's launch configuration is being read.
     @State private var programs: [String] = []
     @State private var resolving = false
+    /// Madeira Dock's "Steam starts" choice (DockStartProgram); nil: Steam's own program.
+    @State private var dockProgram: String?
+    /// The program Steam's launch settings name when it is missing from the install folder.
+    @State private var missingProgram: String?
+    /// The DLC Steam's install record lists for this game (app ID, bytes), and their names.
+    @State private var installedDLC: [InstalledDLC]?
+    @State private var dlcNames: [Int: String] = [:]
 
     var body: some View {
         let appID = entry.steamAppID ?? 0
@@ -1342,6 +1371,18 @@ struct SteamEntrySection: View {
                     Text("Needs Valve's client: Settings › Steam › Madeira Dock.")
                         .font(.caption).foregroundStyle(.orange)
                 }
+                // A program in place of the one Steam's launch entry names (DockStartProgram).
+                Picker("Steam starts", selection: Binding(get: { dockProgram ?? "" }, set: { pickDockProgram($0) })) {
+                    Text("Steam's choice").tag("")
+                    ForEach(dockPrograms, id: \.self) { Text($0).tag($0) }
+                }.pickerStyle(.navigationLink)
+                if dockProgram != nil {
+                    Text("Madeira puts a copy of this program in place of the one Steam starts (the launcher is kept, and goes back with Steam's choice). Steam still starts the game and checks ownership.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("For a game whose launcher closes Madeira when it starts the game (Fallout: New Vegas): pick the game's own program.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Toggle("Smaller JIT pool (512 MB) for this launch", isOn: $dock.compactPool)
                 // The game's One-time installs choice (Madeira Dock, DockInstallers).
                 if DockInstallers.choiceEnabled, dock.installPrograms[appID] != nil {
@@ -1375,9 +1416,14 @@ struct SteamEntrySection: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            if let missingProgram, download == nil, dockProgram == nil {
+                Text("Steam's launch settings start \(missingProgram), which is not in the game's folder, so Steam will stop with \"could not find the game's executable\"." +
+                     (downloads ? " Repair installed files downloads it again." : ""))
+                    .font(.caption).foregroundStyle(.orange)
+            }
             if downloads, SteamOwnedLibrary.dlcEnabled, let owned = steam.game(appID)?.dlc, !owned.isEmpty {
                 let installedDepots = games.depots[appID] ?? []
-                DisclosureGroup("DLC (\(owned.count))") {
+                DisclosureGroup("Owned DLC (\(owned.count))") {
                     SteamDLCRows(appID: appID, installedDepots: installedDepots)
                     Text("A DLC turned off is left out of the next update or repair; its files stay until you uninstall the game.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -1395,7 +1441,25 @@ struct SteamEntrySection: View {
                 Button { steam.repair(appID) } label: { Label("Repair installed files", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(!steam.signedIn)
             }
+            // Steam's "files missing/corrupted" mark that blocks every start (SteamFilesFlag.swift).
+            if let installed, download == nil {
+                SteamFilesFlagRows(appID: appID, library: installed.library)
+            }
             LabeledContent("App ID", value: String(appID))
+            if let dlc = installedDLC {
+                if dlc.isEmpty {
+                    LabeledContent("Installed DLC", value: "None")
+                } else {
+                    DisclosureGroup {
+                        ForEach(dlc) { item in
+                            LabeledContent(dlcNames[item.id] ?? "DLC \(item.id)",
+                                           value: item.bytes > 0 ? formatBytes(item.bytes) : "")
+                        }
+                    } label: {
+                        LabeledContent("Installed DLC", value: String(dlc.count))
+                    }
+                }
+            }
             if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
             if let status = dock.status {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1415,12 +1479,13 @@ struct SteamEntrySection: View {
                 Text("Starts through Valve's Steam client, signed in as you.")
             }
         }
-        .onAppear { dock.refresh(); games.refresh() }
+        .onAppear { dock.refresh(); games.refresh(); dockProgram = DockStartProgram.chosen(appID) }
         .task(id: download?.state) {
             let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             freeSpace = values?.volumeAvailableCapacityForImportantUsage
         }
         .task(id: "\(entry.steamStart ?? "dock") \(installed?.installed == true) \(download == nil)") { await resolveProgram() }
+        .task(id: "\(installed?.installed == true) \(download == nil) \(games.builds[appID] ?? 0)") { await loadDLC() }
         .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
             Button("Uninstall", role: .destructive) {
@@ -1428,6 +1493,23 @@ struct SteamEntrySection: View {
                 uninstalled()
             }
         }
+    }
+
+    /// "Steam starts" rows: the folder's programs, and a kept choice that is not among them.
+    private var dockPrograms: [String] {
+        guard let chosen = dockProgram, !programs.contains(chosen) else { return programs }
+        return [chosen] + programs
+    }
+
+    /// Madeira Dock's "Steam starts": the next Dock start puts the program in place
+    /// (or the kept launcher back for Steam's choice).
+    private func pickDockProgram(_ program: String) {
+        guard let appID = entry.steamAppID else { return }
+        let next: String? = program.isEmpty ? nil : program
+        guard next != dockProgram else { return }
+        dockProgram = next
+        DockStartProgram.setChosen(appID, next)
+        LogStore.shared.log("[dock-start-program] app=\(appID) chosen=\(next ?? "steam")")
     }
 
     /// The Program picker's rows: the folder's programs, and a kept choice that is not among them.
@@ -1454,14 +1536,44 @@ struct SteamEntrySection: View {
         LogStore.shared.log("[steam-start] app=\(entry.steamAppID ?? 0) program=choice")
     }
 
+    /// Game details › Steam › Installed DLC: the install record's DLC depots, by DLC app.
+    private func loadDLC() async {
+        guard let appID = entry.steamAppID, let game = games.games.first(where: { $0.id == appID }), game.installed else {
+            installedDLC = nil
+            return
+        }
+        let steamApps = MadeiraDock.drive.appendingPathComponent(game.library, isDirectory: true)
+        let found = await Task.detached(priority: .utility) {
+            SteamInstallFiles.installedDLC(appID: appID, steamApps: steamApps)
+        }.value
+        let list = found.map { InstalledDLC(id: $0.key, bytes: $0.value) }.sorted { $0.id < $1.id }
+        installedDLC = list
+        LogStore.shared.log("[steam-dlc] app=\(appID) installed-dlc=\(list.count)")
+        guard !list.isEmpty else { return }
+        dlcNames = await steam.names(ofDLC: list.map(\.id), gameAppID: appID)
+    }
+
     /// "The game": lists the install folder's programs and, unless the user picked one that
     /// is still there, takes Steam's launch configuration for the app (SteamDirectStart.choose);
     /// failing that, the only program when there is exactly one.
     private func resolveProgram() async {
-        guard entry.startsSteamGameDirectly, let appID = entry.steamAppID else { return }
+        guard let appID = entry.steamAppID else { return }
         let folder = LibraryModel.drive.appendingPathComponent(entry.relativePath, isDirectory: true)
         let found = await Task.detached(priority: .userInitiated) { SteamDirectStart.programs(in: folder) }.value
         programs = found
+        // Steam's cached launch settings only: no Steam request just for this note.
+        let launches = steam.game(appID)?.launches ?? []
+        let installed = games.games.first { $0.id == appID }?.installed == true
+        if installed {
+            missingProgram = await Task.detached(priority: .utility) {
+                SteamDirectStart.missingProgram(launches, installFolder: folder)
+            }.value
+        } else {
+            missingProgram = nil
+        }
+        if missingProgram != nil { LogStore.shared.log("[steam-start] app=\(appID) launch program missing from the install folder") }
+        // Madeira Dock's "Steam starts" needs only the list.
+        guard entry.startsSteamGameDirectly else { return }
         if entry.steamProgramSource == "choice", let program = entry.steamProgram, found.contains(program) { return }
         resolving = true
         let options = await steam.launchOptions(appID: appID) ?? []

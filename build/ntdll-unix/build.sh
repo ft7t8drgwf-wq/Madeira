@@ -11,6 +11,9 @@ APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
+# dlls/ntdll/unix/*.c from the submodule are compiled below; apply this repository's wine patches first
+"$REPO_ROOT/build/wine-patches/apply.sh"
+
 # Detect optional diagnostic fields in the SDK used for this target build.
 # Keep SDK versions without this member buildable; it is not a runtime requirement.
 RUSAGE_PAGE_WAIT_FLAGS=()

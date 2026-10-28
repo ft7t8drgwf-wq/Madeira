@@ -427,6 +427,7 @@ struct ios_child_args {
     int slot;   /* ios_child_slots index, -1 = none */
 };
 
+
 /* Pseudo-process children that are still running. A launcher stub that
  * starts the game and exits at once (GTA V Enhanced: PlayGTAV.exe starts
  * GTA5_Enhanced.exe and exits ~1 s later) ended the whole session: the main
@@ -1496,17 +1497,110 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
          * "EnterEC wrote it" does NOT name the origin — Core.cpp says so explicitly:
          * EnterEC storing an x64 target in State.rip is its job. The upstream producer
          * still needs finding via x9 at DispatchJump/RetToEntryThunk/ExitToX64. */
+        /* A game in a Madeira Dock session asks Steam to start another game: it
+         * runs steam.exe with steam://run/<App ID> (or steam://rungameid/<App ID>)
+         * and exits. Black Ops II's campaign does this when the player chooses
+         * Zombies (build 30, 2026-10-27). In a Dock session Valve's client runs
+         * inside dockhost.exe, so steam.exe found no client, began a 229 MB
+         * self-update and stopped at a black window. The request goes to the app
+         * instead (wine_steam_run_requested, WineProcessBridge.m), which starts
+         * that game in its next run; steam.exe is not started.
+         * env.MADEIRA_DOCK_STEAM_RUN=0 lets steam.exe start as before. */
+        {
+            extern void wine_steam_run_requested( unsigned int appid ) __attribute__((weak));
+            const char *dock = getenv( "MADEIRA_DOCK_SESSION" ), *sr = getenv( "MADEIRA_DOCK_STEAM_RUN" );
+            const WCHAR *cl = params->CommandLine.Buffer;
+            int cl_len = params->CommandLine.Length / sizeof(WCHAR);
+
+            if (dock && dock[0] == '1' && !(sr && sr[0] == '0' && !sr[1]) && cl &&
+                ios_image_name_is( params->ImagePathName.Buffer, params->ImagePathName.Length / sizeof(WCHAR),
+                                   "steam.exe" ))
+            {
+                static const char * const prefixes[] = { "steam://rungameid/", "steam://run/" };
+                unsigned int appid = 0;
+                unsigned p;
+                int k, j, found = 0;
+
+                for (p = 0; p < 2 && !found; p++)
+                {
+                    int pl = (int)strlen( prefixes[p] );
+                    for (k = 0; k + pl <= cl_len && !found; k++)
+                    {
+                        for (j = 0; j < pl; j++)
+                        {
+                            WCHAR c = cl[k + j];
+                            if (c >= 'A' && c <= 'Z') c += 32;
+                            if (c != (WCHAR)prefixes[p][j]) break;
+                        }
+                        if (j < pl) continue;
+                        for (j = k + pl; j < cl_len && cl[j] >= '0' && cl[j] <= '9' && appid < 100000000u; j++)
+                            appid = appid * 10 + (cl[j] - '0');
+                        found = appid != 0;
+                    }
+                }
+                if (found)
+                {
+                    dprintf( 2, "[dock-steam-run] %s asks Steam to start app %u: steam.exe not started, "
+                             "the app starts it in its next run (env.MADEIRA_DOCK_STEAM_RUN=0 starts steam.exe)\n",
+                             debugstr_us( &params->CommandLine ), appid );
+                    if (wine_steam_run_requested) wine_steam_run_requested( appid );
+                    return STATUS_ACCESS_DENIED;
+                }
+            }
+        }
+
         static const char * const blocked_names[] = { "steamerrorreporter", "gldriverquery", "vulkandriverquery",
                                                       "steamsysinfo", "hardwareupdater",
                                                       "unitycrashhandler64" };
         const WCHAR *ip = params->ImagePathName.Buffer;
         int ip_len = params->ImagePathName.Length / sizeof(WCHAR);
         unsigned b;
+        /* ml1357: the full Windows Steam client (steam.exe, started by the in-session
+         * launcher or a library entry) runs its own crash reporter, hardware survey and
+         * GPU probes. These names were refused because, before ml937, a helper's crash or
+         * self-terminate took the whole app down; now each ends only its own
+         * pseudo-process. When the PARENT is steam.exe they may start (Dock sessions
+         * host Valve's client in dockhost.exe, so their spawns keep the gate).
+         * hardwareupdater (pool churn) and the web helper's --type= children (a second
+         * CEF instance, see below) stay refused. env.MADEIRA_PROC_GATE_STEAM=0 refuses
+         * them all as before. */
+        int full_client_parent = 0;
+        {
+            const char *g = getenv( "MADEIRA_PROC_GATE_STEAM" );
+            const RTL_USER_PROCESS_PARAMETERS *cur = NtCurrentTeb()->Peb->ProcessParameters;
+            if (!(g && g[0] == '0') && cur && cur->ImagePathName.Buffer &&
+                ios_image_name_is( cur->ImagePathName.Buffer, cur->ImagePathName.Length / sizeof(WCHAR),
+                                   "steam.exe" ))
+                full_client_parent = 1;
+        }
 
         for (b = 0; b < sizeof(blocked_names)/sizeof(blocked_names[0]); b++)
         {
             const char *blocked = blocked_names[b];
             int bl = (int)strlen( blocked ), k, j;
+
+            if (full_client_parent && b < 4)
+            {
+                /* the first four names: steamerrorreporter, gldriverquery,
+                 * vulkandriverquery, steamsysinfo (keep that order above) */
+                int hit = 0;
+                for (k = 0; k + bl <= ip_len && !hit; k++)
+                {
+                    for (j = 0; j < bl; j++)
+                    {
+                        WCHAR c = ip[k + j];
+                        if (c >= 'A' && c <= 'Z') c += 32;
+                        if (c != (WCHAR)blocked[j]) break;
+                    }
+                    if (j == bl) hit = 1;
+                }
+                if (hit)
+                    dprintf( 2, "[proc-gate] ml1357 allowing %s: started by the full Steam client "
+                             "(steam.exe), whose own helpers run in this session "
+                             "(env.MADEIRA_PROC_GATE_STEAM=0 refuses them as before)\n",
+                             debugstr_us( &params->ImagePathName ) );
+                continue;
+            }
 
             for (k = 0; k + bl <= ip_len; k++)
             {
@@ -3485,6 +3579,31 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         exit_process( exit_code );
         /* noreturn */
     }
+    /* A 32-bit pseudo-process killed by ANOTHER one (Chromium ends its GPU
+     * helper this way) never reaches its own process_exit_wrapper, so its guest
+     * window stayed bound to the dead PEB.  The next 32-bit child then resolved
+     * that window as its own (ios_wow_slot_current via the session peb, which
+     * still named the dead child), mapped over the leftovers at shifted
+     * addresses, and published ITS i386 ntdll entry points in the shared
+     * LdrSystemDllInitBlock: the killer's next thread start and exception
+     * dispatch went to the other process's ntdll (Garry's Mod, NoExec at
+     * 0xffede3a8).  Read the victim's PEB while it is still alive and mark its
+     * window released once the kill went through.  Nothing is unmapped here;
+     * ios_wow_reclaim_dead_windows() tears it down later only when no thread
+     * is left in it.  A 64-bit victim has no window, so this does nothing. */
+    extern void *ios_jit_current_peb(void);
+    void *victim_peb = NULL;
+
+    if (handle && handle != NtCurrentProcess())
+    {
+        SERVER_START_REQ( get_process_info )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            if (!wine_server_call( req ) && !is_machine_64bit( reply->machine ))
+                victim_peb = wine_server_get_ptr( reply->peb );
+        }
+        SERVER_END_REQ;
+    }
 #endif
     SERVER_START_REQ( terminate_process )
     {
@@ -3494,6 +3613,14 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         self = reply->self;
     }
     SERVER_END_REQ;
+#ifdef WINE_IOS
+    if (victim_peb && !ret && !self && victim_peb != ios_jit_current_peb())
+    {
+        dprintf( 2, "[wow-window] 32-bit process peb=%p killed by another process: "
+                    "releasing its window\n", victim_peb );
+        ios_wow_window_release( victim_peb );
+    }
+#endif
     if (self)
     {
 #ifdef WINE_IOS
@@ -4027,7 +4154,11 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                              MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION |
                              MEM_EXECUTE_OPTION_PERMANENT;
         else
-            *(ULONG *)info = execute_flags;
+        {
+            /* ml1354: a 32-bit pseudo-process's own flags (virtual_ios.c ios_dep_per_process) */
+            extern ULONG ios_wow_exec_flags_current( ULONG fallback );
+            *(ULONG *)info = ios_wow_exec_flags_current( execute_flags );
+        }
         break;
 
     case ProcessPriorityClass:
@@ -4313,9 +4444,16 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
 
     case ProcessExecuteFlags:
         if ((is_win64 && !is_wow64()) || size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
-        if (execute_flags & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
-        else
         {
+            /* ml1354: DEP is per process. The flags were one session-wide value, so a
+             * 32-bit browser making DEP permanent for itself also locked every later
+             * 32-bit process out of turning it off. */
+            extern ULONG ios_wow_exec_flags_current( ULONG fallback );
+            if (ios_wow_exec_flags_current( execute_flags ) & MEM_EXECUTE_OPTION_PERMANENT)
+                return STATUS_ACCESS_DENIED;
+        }
+        {
+            extern int ios_wow_exec_flags_store_current( ULONG flags );
             BOOL enable;
             switch (*(ULONG *)info & (MEM_EXECUTE_OPTION_ENABLE|MEM_EXECUTE_OPTION_DISABLE))
             {
@@ -4328,7 +4466,8 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
             default:
                 return STATUS_INVALID_PARAMETER;
             }
-            execute_flags = *(ULONG *)info;
+            /* the session-wide value stays for processes without a guest window */
+            if (!ios_wow_exec_flags_store_current( *(ULONG *)info )) execute_flags = *(ULONG *)info;
             virtual_set_force_exec( enable );
         }
         break;

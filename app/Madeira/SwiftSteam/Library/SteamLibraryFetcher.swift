@@ -91,6 +91,15 @@ class SteamLibraryFetcher {
         return try await fetchAppInfo(appIDs: [appID], tokens: tokens).first
     }
 
+    /// Fetches PICS info for several apps in one token and one product-info
+    /// round trip (DLC names for Game details).
+    func fetchAppInfos(appIDs: [UInt32]) async throws -> [SteamAppInfo] {
+        guard !appIDs.isEmpty else { return [] }
+        try await session.ensureConnected()
+        let tokens = try await fetchPICSAccessTokens(appIDs: appIDs)
+        return try await fetchAppInfo(appIDs: appIDs, tokens: tokens)
+    }
+
     // MARK: - Install metadata
 
     /// The app's metadata for an install, with the content metadata of the

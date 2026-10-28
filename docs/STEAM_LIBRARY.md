@@ -217,7 +217,7 @@ A game's owned DLC downloads with it, as in Valve's client.
 **DLC** section: every DLC the account owns for the game, with a switch (on
 by default) and about how much it downloads. A DLC with no files of its own
 (it only unlocks content the game already has) is listed as **No download**,
-without a switch. An installed game's Game details page has **DLC (n)** in its
+without a switch. An installed game's Game details page has **Owned DLC (n)** in its
 Steam section, with the same switches and, per DLC, **Installed** or
 **not installed**. When a DLC that is on is missing from the install,
 **Download DLC: <name>** (or **Download n DLC**) runs Repair with it: the DLC's
@@ -235,11 +235,12 @@ by the same OS, architecture and language rules as the game's own
 DLC's name, depots and sizes (`SteamOwnedGame.dlc`; an older cache has none
 until the next refresh, and downloads then take no DLC).
 
-A download sets `SteamAppInfo.dlcChoice` to the owned DLC left on
-(`SteamDLC.chosen`), and `installDepots()` then takes their depots with the
-game's. Steam still decides ownership: it gives a depot key only for content
-the account owns, and a refused DLC depot that the licenses do not include is
-left out like any other. The install record lists DLC depots under
+A download takes every DLC depot the account's licenses include
+(`installDepots(ownedDLC:)`, the licensed depot IDs) except those of the DLC
+the player turned off (`SteamAppInfo.dlcOff`, from `SteamDLC.offApps`). Steam
+still decides ownership: it gives a depot key only for content the account
+owns, and a DLC depot it refuses a key for is left out; the game installs
+without it. The install record lists DLC depots under
 `InstalledDepots` with their `dlcappid`, as Valve's client writes them. The
 switches are kept per game in the app's defaults (`steam-dlc-off`: the DLC
 turned off, by App ID).
@@ -247,7 +248,7 @@ turned off, by App ID).
 `env.MADEIRA_STEAM_DLC = 0` turns it off: no DLC is listed or downloaded, and
 downloads take the game's depots only, as before.
 
-Log: `[steam-dlc] install app=<id> chosen=<n> dlc-depots=<n>`, `[steam-dlc]
+Log: `[steam-dlc] install app=<id> off=<n> dlc-depots=<n>`, `[steam-dlc]
 app=<id> dlc=<id> on=<0|1>` and the `dlc=<n>` count on `[steam-library] owned`.
 
 Not checked on a device yet: whether Valve's client, started through Madeira

@@ -2151,6 +2151,7 @@ struct ContentView: View {
             case .steamSignIn: SteamSignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
             case .allSettings: AllSettingsView()
+            case .registry: RegistryEditorView()
             }
         }
     }
@@ -2482,10 +2483,19 @@ struct ContentView: View {
 
     /// A Home Screen shortcut waiting for the library (a link opened at a cold start
     /// arrives before the library is up).
+    /// Then the Steam game the last run's game asked to start (NextSteamApp).
     private func launchPendingShortcut() {
-        guard library.enabled, library.current == nil, let exe = ShortcutRouter.shared.pendingExe else { return }
-        ShortcutRouter.shared.pendingExe = nil
-        launchShortcut(exe)
+        guard library.enabled, library.current == nil else { return }
+        if let exe = ShortcutRouter.shared.pendingExe {
+            ShortcutRouter.shared.pendingExe = nil
+            launchShortcut(exe); return
+        }
+        guard LibraryModel.sessionsThisRun == 0, let appID = NextSteamApp.take() else { return }
+        guard let entry = library.entries.first(where: { $0.steamAppID == appID }) else {
+            LogStore.shared.log("[dock-steam-run] app \(appID) is not in the library: not started", level: .error); return
+        }
+        LogStore.shared.log("[dock-steam-run] starting app \(appID), which the last run's game asked for")
+        launchLibraryEntry(entry)
     }
 
     /// A Home Screen shortcut starts a game that is in the library, by its Windows
@@ -2953,12 +2963,14 @@ struct ContentView: View {
             // freezing a thread that holds the malloc lock or FEX's CodeInvalidationMutex
             // can deadlock whoever suspended it. Windows apps tolerate preemptive suspend
             // because the suspender does not share their heap; here it does.
-            if let txt = MadeiraConfig.get("real-suspend") {
-                let v = txt.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !v.isEmpty {
-                    setenv("MADEIRA_REAL_SUSPEND", v, 1)
-                    logStore.log("Thread suspension: MADEIRA_REAL_SUSPEND=\(v) via madeira.cfg real-suspend")
-                }
+            // madeira-bcd: per game too (BCDLaunch.realSuspend: the game's switch, then
+            // madeira.cfg, then on for a Unity IL2CPP game). Unset otherwise, so an
+            // earlier session's choice in this app run does not carry over.
+            if let rs = BCDLaunch.realSuspend(profile) {
+                setenv("MADEIRA_REAL_SUSPEND", rs.value, 1)
+                logStore.log("Thread suspension: MADEIRA_REAL_SUSPEND=\(rs.value) via \(rs.source)")
+            } else {
+                unsetenv("MADEIRA_REAL_SUSPEND")
             }
 
             // ml713: Mono suspend-policy A/B. Documents/madeira-mono-suspend.txt
@@ -3393,7 +3405,8 @@ struct ContentView: View {
             // used before; Dock stops at once if Steam names that entry missing.
             let options = await SteamOwnedLibrary.shared.launchOptions(appID: game.id)
             let installFolder = MadeiraDock.drive.appendingPathComponent(game.library + "/common/" + game.installDir)
-            let chosen = options.flatMap { SteamDirectStart.choose($0, installFolder: installFolder)?.launchIndex }
+            let steamEntry = options.flatMap { SteamDirectStart.choose($0, installFolder: installFolder) }
+            let chosen = steamEntry?.launchIndex
             // madeira-bcd exe-window-mb: measure the game's own fixed-base exe now, so the
             // JIT pool is placed above it (StikJITHelper.allocatePool reads this once).
             if let need = StikJITHelper.fixedBaseWindowMB(in: installFolder) {
@@ -3417,7 +3430,20 @@ struct ContentView: View {
                 }
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
-            MadeiraDock.configure(game, launchOption: launchOption)
+            MadeiraDock.configure(game, launchOption: launchOption, arguments: profile?.arguments ?? "")
+            // "Steam starts" (DockStartProgram): the chosen program takes the place of the
+            // one Steam's launch entry names, or the kept launcher goes back. No session runs.
+            let program = DockStartProgram.chosen(game.id)
+            if let launcher = steamEntry?.program {
+                let outcome = DockStartProgram.apply(launcher: launcher, program: program, folder: installFolder)
+                if case .failed(let why) = outcome {
+                    logStore.log("[dock-start-program] app=\(game.id) launcher=\(launcher) program=\(program ?? "steam") failed: \(why)", level: .error)
+                } else if outcome != .unchanged || program != nil {
+                    logStore.log("[dock-start-program] app=\(game.id) launcher=\(launcher) program=\(program ?? "steam") \(outcome)")
+                }
+            } else if program != nil {
+                logStore.log("[dock-start-program] app=\(game.id) program=\(program ?? "") not used: Steam's launch entry is not known", level: .error)
+            }
             // The game's one-time installs (its Steam install script) run first, in the same
             // session. No session runs yet, so the registry files can be read and written.
             // madeira-bcd: they run in a session of their own (DockInstallers.installsOnly), and
