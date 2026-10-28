@@ -13072,6 +13072,37 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                     static unsigned long wr_seen, wr_healed;
                     int stripped = (is_write && (want & PROT_WRITE) &&
                                     host_prot >= 0 && !(host_prot & VM_PROT_WRITE));
+                    /* Stardew: never heal a page owned by a live anon-JIT alias.
+                     * Those pages are RX on purpose (writes go through the RW alias)
+                     * and FEX tracks them as RWX intervals: the write has to reach
+                     * the guest as an access violation so FEX invalidates the code
+                     * it translated from the page. Healing made the page RWX behind
+                     * FEX's back; CoreCLR then patched a FixupPrecode (8-byte CAS)
+                     * with no invalidation, the stale translation kept calling
+                     * PreStubWorker (~11M/s) and the game never got past startup.
+                     * The fall-through AV path is the one that already works for the
+                     * same CAS on pages Wine marks RX ([smc-atomic]).
+                     * MADEIRA_WRSTRIP_ALIAS_HEAL=1 restores the old heal. */
+                    if (stripped)
+                    {
+                        extern uintptr_t ios_jit_anon_alias_lookup(uintptr_t fault_addr);
+                        static int alias_heal = -1;
+                        if (alias_heal < 0)
+                        {
+                            const char *e = getenv( "MADEIRA_WRSTRIP_ALIAS_HEAL" );
+                            alias_heal = e && *e == '1';
+                        }
+                        if (!alias_heal &&
+                            ios_jit_anon_alias_lookup( (uintptr_t)siginfo->si_addr ))
+                        {
+                            static unsigned alias_skips;
+                            if (alias_skips++ < 8)
+                                ERR("[wr-strip] %p is a live anon-JIT alias page — not healing, "
+                                    "delivering the write fault so FEX sees it (skips=%u)\n",
+                                    siginfo->si_addr, alias_skips);
+                            stripped = 0;
+                        }
+                    }
                     ++wr_seen;
                     if (wr_seen <= 12 || (wr_seen % 4096) == 0)
                         ERR("[wr-strip] #%lu addr=%p pc=%p esr=0x%llx write=%d "
