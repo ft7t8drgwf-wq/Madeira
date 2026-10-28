@@ -3430,7 +3430,7 @@ struct ContentView: View {
                 }
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
-            MadeiraDock.configure(game, launchOption: launchOption)
+            MadeiraDock.configure(game, launchOption: launchOption, arguments: profile?.arguments ?? "")
             // "Steam starts" (DockStartProgram): the chosen program takes the place of the
             // one Steam's launch entry names, or the kept launcher goes back. No session runs.
             let program = DockStartProgram.chosen(game.id)
