@@ -779,6 +779,29 @@ enum GameRecommendations {
         """,
         launchMode: "desktop", startServices: true)
 
+    /// Final Fantasy XIV's launcher (boot\ffxivboot.exe; LauncherSupport.swift), kept
+    /// for installing and updating the game: Madeira signs the game itself in
+    /// (FFXIVLaunch.swift). Its window is Internet Explorer's engine (mshtml), not
+    /// Chromium, so the Wine desktop and the standard line only. Not device-tested yet.
+    static let ffxivLauncher = GameRecommendation(
+        id: "ffxiv-launcher", title: "Final Fantasy XIV launcher", version: 1,
+        config: """
+        # Madeira's recommended settings for the Final Fantasy XIV launcher.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        launchMode: "desktop")
+
+    /// Final Fantasy XIV's installer (ffxivsetup.exe), which installs the launcher.
+    static let ffxivSetup = GameRecommendation(
+        id: "ffxiv-setup", title: "Final Fantasy XIV installer", version: 1,
+        config: """
+        # Madeira's recommended settings for the Final Fantasy XIV installer.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        launchMode: "desktop")
+
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
     /// the owner tried outside these lists closed at start until the [ec-hook]
     /// reporter was off. It reads code a game's protection rewrites at run time
@@ -799,7 +822,8 @@ enum GameRecommendations {
 
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
                       darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid,
-                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, standard]
+                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup,
+                      ffxivLauncher, ffxivSetup, standard]
 
     // MARK: Recognising a game
 
@@ -884,6 +908,10 @@ enum GameRecommendations {
             return parts.dropLast().last == "battle.net" ? battleNet : nil
         case "battle.net-setup.exe":
             return battleNetSetup
+        case "ffxivboot.exe":
+            return parts.dropLast().last == "boot" ? ffxivLauncher : nil
+        case "ffxivsetup.exe":
+            return ffxivSetup
         default:
             return nil
         }

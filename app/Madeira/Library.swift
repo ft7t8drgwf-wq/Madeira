@@ -358,7 +358,8 @@ struct LibraryEntry: Codable, Identifiable {
     /// The program's own arguments: Steam's launch configuration for "The game"
     /// followed by the entry's Launch arguments (Steam's own launch options, such as
     /// Garry's Mod's -nochromium), else the entry's Launch arguments; an Epic game's
-    /// sign-in arguments come first while its launch is being prepared.
+    /// sign-in arguments (and Final Fantasy XIV's session) come first while its launch
+    /// is being prepared.
     var programArguments: String {
         let own: String
         if startsSteamGameDirectly {
@@ -367,11 +368,11 @@ struct LibraryEntry: Codable, Identifiable {
         } else {
             own = arguments
         }
-        guard epicAppName != nil, let transient = Self.transientArguments(for: id), !transient.isEmpty else { return own }
+        guard let transient = Self.transientArguments(for: id), !transient.isEmpty else { return own }
         return own.isEmpty ? transient : transient + " " + own
     }
     /// Arguments for the launch being prepared only (an Epic game's one-use sign-in
-    /// code): never part of the saved entry. ContentView sets them before the launch;
+    /// code, Final Fantasy XIV's session): never part of the saved entry. ContentView sets them before the launch;
     /// applyEnvironment clears them once the bridge's command is exported.
     private static let transientLock = NSLock()
     private static var transient: [UUID: String] = [:]

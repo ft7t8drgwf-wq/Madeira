@@ -32,6 +32,8 @@ folder, and each installer by the name it downloads with:
 | `Battle.net-Setup.exe` | `battle-net-setup` |
 | `Rockstar Games\Launcher\Launcher.exe` | `rockstar-launcher` (125hz) |
 | `Rockstar-Games-Launcher.exe` | `rockstar-launcher-setup` (125hz) |
+| `boot\ffxivboot.exe` | `ffxiv-launcher` |
+| `ffxivsetup.exe` | `ffxiv-setup` |
 
 Every one of them starts in the Wine desktop with Windows services first (the
 lists' `launchMode` and `startServices`): the launchers install services and use
@@ -48,6 +50,10 @@ Battle.net's list also turns off Windows' location service
 (`env.WINEDLLOVERRIDES = locationapi=d`), which the client stops on under Wine.
 
 The Ubisoft Connect and Battle.net lists are not device-tested yet.
+
+Final Fantasy XIV's launcher is in the same section, for installing and updating the
+game only: its window is Internet Explorer's engine, so its lists are the Wine
+desktop and the standard line. The game signs in through Madeira (docs/FFXIV.md).
 
 ## Ubisoft repairs
 

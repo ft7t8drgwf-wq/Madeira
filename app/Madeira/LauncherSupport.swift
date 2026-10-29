@@ -2,8 +2,8 @@
 // Copyright 2026 Madeira contributors
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 //
-// Publishers' own Windows launchers: Ubisoft Connect, Battle.net and the Rockstar
-// Games Launcher, run inside the Wine desktop (docs/LAUNCHERS.md). None of them has
+// Publishers' own Windows launchers: Ubisoft Connect, Battle.net, the Rockstar
+// Games Launcher and Final Fantasy XIV's, run inside the Wine desktop (docs/LAUNCHERS.md). None of them has
 // a client Madeira could speak for, as it does for Steam, Epic and GOG: their games
 // check their licence through the running launcher. So the launchers stay the
 // publishers' programs, downloaded from their own HTTPS addresses only when the
@@ -26,7 +26,7 @@ import Foundation
 import SwiftUI
 
 enum LauncherID: String, CaseIterable, Identifiable, Sendable {
-    case ubisoft, battleNet, rockstar
+    case ubisoft, battleNet, rockstar, ffxiv
 
     var id: String { rawValue }
 
@@ -35,6 +35,7 @@ enum LauncherID: String, CaseIterable, Identifiable, Sendable {
         case .ubisoft: return "Ubisoft Connect"
         case .battleNet: return "Battle.net"
         case .rockstar: return "Rockstar Games Launcher"
+        case .ffxiv: return "Final Fantasy XIV launcher"
         }
     }
 
@@ -53,6 +54,9 @@ enum LauncherID: String, CaseIterable, Identifiable, Sendable {
         case .rockstar:
             return ["Program Files\\Rockstar Games\\Launcher\\Launcher.exe",
                     "Program Files (x86)\\Rockstar Games\\Launcher\\Launcher.exe"]
+        case .ffxiv:
+            return ["Program Files (x86)\\SquareEnix\\FINAL FANTASY XIV - A Realm Reborn\\boot\\ffxivboot.exe",
+                    "Program Files\\SquareEnix\\FINAL FANTASY XIV - A Realm Reborn\\boot\\ffxivboot.exe"]
         }
     }
 
@@ -65,6 +69,8 @@ enum LauncherID: String, CaseIterable, Identifiable, Sendable {
             return URL(string: "https://www.battle.net/download/getInstallerForGame?os=win&locale=enUS&version=LIVE&gameProgram=BATTLENET_APP")!
         case .rockstar:
             return URL(string: "https://gamedownloads.rockstargames.com/public/installer/Rockstar-Games-Launcher.exe")!
+        case .ffxiv:
+            return URL(string: "https://gdl.square-enix.com/ffxiv/inst/ffxivsetup.exe")!
         }
     }
 
@@ -74,6 +80,7 @@ enum LauncherID: String, CaseIterable, Identifiable, Sendable {
         case .ubisoft: return "UbisoftConnectInstaller.exe"
         case .battleNet: return "Battle.net-Setup.exe"
         case .rockstar: return "Rockstar-Games-Launcher.exe"
+        case .ffxiv: return "ffxivsetup.exe"
         }
     }
 
@@ -165,13 +172,29 @@ final class LauncherSupportModel: ObservableObject {
             var entry = try LibraryModel.inspect(program)
             if LibraryModel.shared.entries.contains(where: { $0.relativePath.caseInsensitiveCompare(entry.relativePath) == .orderedSame }) {
                 status = "\(id.title) is already in the library."
+                if id == .ffxiv { addFFXIVGame(boot: program) }
                 return
             }
             entry.title = id.title
             LibraryModel.shared.save(entry)
             status = "Added \(id.title) to the library. Sign in in its own window."
             LogStore.shared.log("[launcher] added \(id.rawValue) path=\(entry.relativePath)")
+            if id == .ffxiv { addFFXIVGame(boot: program) }
         } catch { self.error = error.localizedDescription }
+    }
+
+    /// Final Fantasy XIV's game beside the launcher's boot folder, once it is installed:
+    /// its Play signs in through Madeira (FFXIVLaunch.swift).
+    private func addFFXIVGame(boot: URL) {
+        let game = boot.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("game", isDirectory: true).appendingPathComponent("ffxiv_dx11.exe")
+        guard FileManager.default.fileExists(atPath: game.path), var entry = try? LibraryModel.inspect(game),
+              !LibraryModel.shared.entries.contains(where: { $0.relativePath.caseInsensitiveCompare(entry.relativePath) == .orderedSame })
+        else { return }
+        entry.title = "Final Fantasy XIV"
+        LibraryModel.shared.save(entry)
+        status = "Added the Final Fantasy XIV launcher (for updates) and the game to the library."
+        LogStore.shared.log("[launcher] added ffxiv game path=\(entry.relativePath)")
     }
 
     func repair() {
@@ -258,7 +281,7 @@ struct LauncherSupportSettingsSection: View {
         } header: {
             Text("PC game launchers")
         } footer: {
-            Text("These publishers' games only start with their own launcher running, so Madeira runs the real launcher in the Wine desktop. The installer comes from the publisher when you tap Download, and you sign in in the launcher's own window; Madeira never sees your password. Ubisoft games bought on Steam need Ubisoft Connect installed too.")
+            Text("These publishers' games only start with their own launcher running, so Madeira runs the real launcher in the Wine desktop. The installer comes from the publisher when you tap Download, and you sign in in the launcher's own window; Madeira never sees your password. Ubisoft games bought on Steam need Ubisoft Connect installed too. Final Fantasy XIV's launcher installs and updates the game; the game itself signs in through Madeira when you play it.")
         }
         .onAppear { model.refresh() }
     }

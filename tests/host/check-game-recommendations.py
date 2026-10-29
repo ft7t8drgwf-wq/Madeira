@@ -67,10 +67,11 @@ for m in re.finditer(r'static let (\w+) = GameRecommendation\(\n\s*id: "([^"]+)"
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'ghost-of-tsushima', 'god-of-war',
                         'horizon-zero-dawn', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid',
                         'rockstar-launcher', 'rockstar-launcher-setup', 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net',
-                        'battle-net-setup', 'standard'}, sorted(presets)
+                        'battle-net-setup', 'ffxiv-launcher', 'ffxiv-setup', 'standard'}, sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,\n'
         '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid,\n'
-        '                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, standard]') in lists_src
+        '                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup,\n'
+        '                      ffxivLauncher, ffxivSetup, standard]') in lists_src
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
 # so every game's own list ends with them. The standard list reaches every other game
@@ -87,7 +88,7 @@ for ident, p in presets.items():
     # The publishers' launchers' Chromium clients take no release delay (their allocator
     # reserves, releases and reserves again), and their installers the standard line only.
     if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'rockstar-launcher-setup',
-                 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net', 'battle-net-setup'):
+                 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net', 'battle-net-setup', 'ffxiv-launcher', 'ffxiv-setup'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -324,6 +325,10 @@ for ident in ('ubisoft-connect', 'battle-net'):
     assert not any(line.startswith('env.MADEIRA_FREE_DELAY_MS') for line in presets[ident]['lines']), ident
 assert 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist' in presets['rockstar-launcher']['lines']
 assert 'env.WINEDLLOVERRIDES = locationapi=d' in presets['battle-net']['lines'], 'Battle.net without Windows\' location service'
+# Final Fantasy XIV's launcher is Internet Explorer's engine, not Chromium: the Wine desktop and the standard line.
+for ident in ('ffxiv-launcher', 'ffxiv-setup'):
+    p = presets[ident]
+    assert p['tested'] == presets['standard']['tested'] and p['switches'] == 'launchMode: "desktop"', (ident, p)
 assert 'if let mode = rec.launchMode { entry.launchMode = mode == "desktop" ? mode : nil }' in apply_src
 assert 'if let on = rec.startServices { entry.startServices = on ? true : nil }' in apply_src
 assert 'case "launcher.exe" where Array(parts.dropLast().suffix(2)) == ["rockstar games", "launcher"]:' in lists_src
@@ -533,6 +538,10 @@ check(id(#"C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe"#) == "batt
       && id(#"C:\Program Files (x86)\Battle.net\Battle.net.exe"#) == "battle-net", "Battle.net")
 check(id(#"C:\Games\Battle.net.exe"#) == "none", "Battle.net.exe outside its folder")
 check(id(#"C:\Madeira Downloads\Battle.net-Setup.exe"#) == "battle-net-setup", "the Battle.net installer")
+check(id(#"C:\Program Files (x86)\SquareEnix\FINAL FANTASY XIV - A Realm Reborn\boot\ffxivboot.exe"#) == "ffxiv-launcher"
+      && id(#"C:\Games\ffxivboot.exe"#) == "none", "the Final Fantasy XIV launcher in its boot folder only")
+check(id(#"C:\Madeira Downloads\ffxivsetup.exe"#) == "ffxiv-setup", "the Final Fantasy XIV installer")
+check(id(#"C:\Program Files (x86)\SquareEnix\FINAL FANTASY XIV - A Realm Reborn\game\ffxiv_dx11.exe"#) == "none", "the game itself: no list yet")
 check(R.battleNet.switchSummary == "starts in the Wine desktop, Windows services first", R.battleNet.switchSummary)
 check(R.falloutNewVegas.switchSummary == "older NVIDIA card on", R.falloutNewVegas.switchSummary)
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, Horizon Zero Dawn, the Fallouts and Black Ops II by their programs, others none")

@@ -63,8 +63,9 @@ names |= set(re.findall(r'return "([^"]+\.exe)"', source))
 for name in sorted(names, key=str.lower):
     require('case "%s"' % name.lower() in recs or '"%s"' % name.lower() in recs, 'GameRecommendations recognises ' + name)
 urls = re.findall(r'URL\(string: "([^"]+)"\)!', source)
-require(len(urls) == 3 and all(u.startswith('https://') for u in urls) and
-        any('ubistatic' in u for u in urls) and any('battle.net' in u for u in urls) and any('rockstargames.com' in u for u in urls),
+require(len(urls) == 4 and all(u.startswith('https://') for u in urls) and
+        any('ubistatic' in u for u in urls) and any('battle.net' in u for u in urls) and any('rockstargames.com' in u for u in urls)
+        and any('gdl.square-enix.com' in u for u in urls),
         "the installers come from the publishers' own HTTPS addresses")
 require('epic' not in source.split('enum LauncherID')[1].split('}')[0].lower(), "Epic's launcher is left out (Madeira has Epic's store)")
 require((root / 'docs/LAUNCHERS.md').exists(), 'docs/LAUNCHERS.md')
