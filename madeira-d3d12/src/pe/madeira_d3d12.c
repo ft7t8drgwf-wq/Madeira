@@ -1184,6 +1184,7 @@ struct mad_resource {
     unsigned nxview, xview_cap;
     UINT64 reserved_bytes;   /* d3d12-tiled-resources: created by CreateReservedResource (fully backed), its tiles x 64 KB */
     UINT64 metal_bytes;      /* madeira-bcd metal-gap: a standalone texture, as Metal sizes it (0 = not counted) */
+    obj_handle_t shared_base;   /* OpenSharedHandle: the D3D11 texture `texture` is a view of (owned) */
 };
 /* srv_res / uav_res membership, O(1) through the resource's slot (the linear
  * scan it replaces ran over ~15,000 textures on every view creation). */
@@ -1693,6 +1694,11 @@ static int mad_list_type_ok(D3D12_COMMAND_LIST_TYPE t) {
     return t == D3D12_COMMAND_LIST_TYPE_DIRECT || t == D3D12_COMMAND_LIST_TYPE_COMPUTE ||
            t == D3D12_COMMAND_LIST_TYPE_COPY;
 }
+/* Allocators and lists may also be bundles (queues may not): a bundle records
+ * like any list and is replayed inside the direct list that executes it. */
+static int mad_alloc_type_ok(D3D12_COMMAND_LIST_TYPE t) {
+    return mad_list_type_ok(t) || t == D3D12_COMMAND_LIST_TYPE_BUNDLE;
+}
 
 struct mad_alloc {
     ID3D12CommandAllocatorVtbl *vtbl;
@@ -1903,6 +1909,52 @@ static HRESULT STDMETHODCALLTYPE list_Reset(ID3D12GraphicsCommandList *This,
     memset(l->rec_tab, 0, sizeof l->rec_tab); memset(l->lat_va, 0, sizeof l->lat_va); memset(l->lat_data, 0, sizeof l->lat_data);
     mad_list_rings_rewind(l);   /* ml1061: only reuses chunks the GPU has finished with */
     return S_OK;
+}
+
+/* ExecuteBundle: the bundle's recorded commands are copied into this list at
+ * this point, so the replay sees them as if they had been recorded here. The
+ * bundle's root-constant, clear-rectangle and latch words are appended to this
+ * list's word store and the copied commands point at the copies. */
+static void STDMETHODCALLTYPE list_ExecuteBundle(ID3D12GraphicsCommandList *This,
+                                                 ID3D12GraphicsCommandList *bundle) {
+    struct mad_list *l = (struct mad_list *)This, *b = (struct mad_list *)bundle;
+    static LONG logged;
+    unsigned i, base;
+    if (!b || b == l || l->closed || !b->closed || b->type != D3D12_COMMAND_LIST_TYPE_BUNDLE ||
+        l->type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        if (InterlockedIncrement(&logged) <= 4)
+            d3d12_log("[madeira-d3d12] ExecuteBundle refused: bundle %p (type %d, %s) into list type %d%s\n",
+                      (void *)b, b ? (int)b->type : -1, b && b->closed ? "closed" : "open", (int)l->type,
+                      l->closed ? ", list closed" : "");
+        return;
+    }
+    if (InterlockedIncrement(&logged) == 1)
+        d3d12_log("[madeira-d3d12] ExecuteBundle: bundles are replayed inline (first: %u commands)\n", b->ncmds);
+    base = l->ncdata;
+    if (b->ncdata) {
+        if (!mad_grow((void **)&l->cdata, &l->cdcap, l->ncdata + b->ncdata, sizeof *l->cdata)) return;
+        memcpy(&l->cdata[l->ncdata], b->cdata, (size_t)b->ncdata * sizeof *l->cdata);
+        l->ncdata += b->ncdata;
+    }
+    for (i = 0; i < b->ncmds; i++) {
+        struct mad_cmd *c = mad_list_push(l, b->cmds[i].kind);
+        if (!c) return;
+        *c = b->cmds[i];
+        switch (c->kind) {
+        case MC_ROOT_CONST: case MC_CROOT_CONST: c->u.rconst.data += base; break;
+        case MC_CLEAR_RT: case MC_CLEAR_DS: if (c->u.clear.nrect) c->u.clear.rect_at += base; break;
+        case MC_CBV_LATCH: c->u.latch.data += base; break;
+        default: break;
+        }
+    }
+    for (i = 0; i < b->nused; i++) mad_list_note_used(l, b->used[i]);
+    /* What the bundle bound stays bound after it, as in D3D12. */
+    for (i = 0; i < 2; i++) if (b->rec_rs[i]) {
+        l->rec_rs[i] = b->rec_rs[i];
+        memcpy(l->rec_tab[i], b->rec_tab[i], sizeof l->rec_tab[i]);
+    }
+    if (b->rec_heap) l->rec_heap = b->rec_heap;
+    memset(l->lat_va, 0, sizeof l->lat_va); memset(l->lat_data, 0, sizeof l->lat_data);
 }
 static D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE list_GetType(ID3D12GraphicsCommandList *This) {
     (void)This;
@@ -11485,7 +11537,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommandAllocator(ID3D12Device *Thi
         D3D12_COMMAND_LIST_TYPE type, REFIID riid, void **out) {
     (void)This;
     if (!out) return E_INVALIDARG;
-    if (!mad_list_type_ok(type)) return E_NOTIMPL;
+    if (!mad_alloc_type_ok(type)) return E_NOTIMPL;
     struct mad_alloc *a = calloc(1, sizeof *a);
     if (!a) return E_OUTOFMEMORY;
     a->type = type;
@@ -11500,7 +11552,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommandList(ID3D12Device *This, UI
         ID3D12PipelineState *pso, REFIID riid, void **out) {
     (void)This; (void)node; (void)pso;
     if (!out || !allocator) return E_INVALIDARG;
-    if (!mad_list_type_ok(type)) return E_NOTIMPL;
+    if (!mad_alloc_type_ok(type)) return E_NOTIMPL;
     if (((struct mad_alloc *)allocator)->type != type) return E_INVALIDARG;
     struct mad_list *l = calloc(1, sizeof *l);
     if (!l) return E_OUTOFMEMORY;
@@ -13350,6 +13402,7 @@ static ULONG STDMETHODCALLTYPE res_Release(ID3D12Resource *This) {
         { unsigned k; for (k = 0; k < r->nview_old; k++) free(r->view_old[k]); free(r->tview); free(r->xview); }
         if (r->buffer) NSObject_release(r->buffer);
         if (r->texture && !r->borrowed) NSObject_release(r->texture);
+        if (r->shared_base) { mad_unresident(r->owner, r->shared_base); NSObject_release(r->shared_base); }
         if (r->resolve_tmp) NSObject_release(r->resolve_tmp);
         if (r->placed_heap) { mad_pl_del(r->placed_heap, r); ID3D12Heap_Release((ID3D12Heap *)r->placed_heap); }   /* ml1145 */
         if (r->own_mem) {   /* ml1154: the GPU may still read it; free after its serial (reclaimed with the ml1148 list) */
@@ -19266,7 +19319,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommandList1(ID3D12Device10 *This,
     (void)node;
     if (!out) return E_INVALIDARG;
     if (flags != D3D12_COMMAND_LIST_FLAG_NONE) return E_INVALIDARG;
-    if (!mad_list_type_ok(type)) return E_NOTIMPL;
+    if (!mad_alloc_type_ok(type)) return E_NOTIMPL;
     struct mad_list *l = calloc(1, sizeof *l);
     if (!l) return E_OUTOFMEMORY;
     l->type = type;
@@ -19530,6 +19583,91 @@ static HRESULT STDMETHODCALLTYPE rootsig_GetDevice(ID3D12RootSignature *This, RE
     (void)This; return mad_child_get_device(NULL, riid, out);
 }
 
+/* ---- OpenSharedHandle ------------------------------------------------------
+ * A texture the application's D3D11 device (DXMT) created with
+ * D3D11_RESOURCE_MISC_SHARED, opened here by its legacy shared handle. DXMT keeps
+ * such textures in a process-local table (iOS has no cross-process Metal
+ * sharing) and d3d11.dll's MadeiraSharedTextureLookup returns the Metal texture.
+ * The resource wraps a full view of it: the view supplies the resource id
+ * descriptors use, and both refer to the same storage, so D3D11 writes are
+ * visible here once the D3D11 work has completed (the application orders that,
+ * as it must on Windows). */
+struct mad_d3d11_tex2d_desc {   /* D3D11_TEXTURE2D_DESC */
+    UINT Width, Height, MipLevels, ArraySize;
+    DXGI_FORMAT Format;
+    DXGI_SAMPLE_DESC SampleDesc;
+    UINT Usage, BindFlags, CPUAccessFlags, MiscFlags;
+};
+typedef BOOL (WINAPI *mad_shared_lookup_fn)(HANDLE, obj_handle_t *, struct mad_d3d11_tex2d_desc *);
+
+static HRESULT STDMETHODCALLTYPE device_OpenSharedHandle(ID3D12Device *This, HANDLE handle, REFIID riid, void **out) {
+    struct mad_device *d = (struct mad_device *)This;
+    static mad_shared_lookup_fn lookup;
+    static unsigned said;
+    struct mad_d3d11_tex2d_desc d11;
+    D3D12_RESOURCE_DESC desc;
+    struct WMTTextureSwizzleChannels sw = { WMTTextureSwizzleRed, WMTTextureSwizzleGreen, WMTTextureSwizzleBlue, WMTTextureSwizzleAlpha };
+    struct mad_resource *r;
+    obj_handle_t base = 0, view;
+    UINT64 id = 0;
+    enum WMTPixelFormat pf;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!lookup) {
+        HMODULE m = GetModuleHandleW(L"d3d11.dll");
+        if (m) lookup = (mad_shared_lookup_fn)(void *)GetProcAddress(m, "MadeiraSharedTextureLookup");
+    }
+    memset(&d11, 0, sizeof d11);
+    if (!lookup || !lookup(handle, &base, &d11) || !base) {
+        if (said++ < 8) d3d12_log("[madeira-d3d12] OpenSharedHandle %p: not a shared D3D11 texture (lookup %s)\n", handle, lookup ? "present" : "absent");
+        return E_INVALIDARG;
+    }
+    pf = MTLTexture_pixelFormat(base);
+    view = MTLTexture_newTextureView(base, pf, d11.ArraySize > 1 ? WMTTextureType2DArray : WMTTextureType2D,
+                                     0, (uint16_t)MTLTexture_mipmapLevelCount(base), 0,
+                                     (uint16_t)(d11.ArraySize ? d11.ArraySize : 1), sw, &id);
+    if (!view) { NSObject_release(base); return mad_creation_failure(d, "shared texture view"); }
+
+    memset(&desc, 0, sizeof desc);
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = d11.Width; desc.Height = d11.Height;
+    desc.DepthOrArraySize = (UINT16)(d11.ArraySize ? d11.ArraySize : 1);
+    desc.MipLevels = (UINT16)MTLTexture_mipmapLevelCount(base);
+    desc.Format = d11.Format;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    if (d11.BindFlags & 0x20 /* D3D11_BIND_RENDER_TARGET */) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (d11.BindFlags & 0x80 /* D3D11_BIND_UNORDERED_ACCESS */) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
+    r = calloc(1, sizeof *r);
+    if (!r) { NSObject_release(view); NSObject_release(base); return E_OUTOFMEMORY; }
+    r->vtbl = &g_res_vtbl; r->refs = 1; r->iid = &IID_ID3D12Resource; r->name = "SharedTexture";
+    r->serial = (unsigned)InterlockedIncrement(&g_res_serial);
+    r->heap = D3D12_HEAP_TYPE_DEFAULT;
+    r->desc = desc;
+    r->owner = d;
+    r->texture = view;
+    r->shared_base = base;   /* the lookup's reference */
+    mad_resident(d, base);
+    r->gpu_resource_id = id;
+    r->width = d11.Width; r->height = d11.Height;
+    r->tex_type = d11.ArraySize > 1 ? WMTTextureType2DArray : WMTTextureType2D;
+    r->tex_pf = pf; r->tex_mips = desc.MipLevels; r->tex_layers = desc.DepthOrArraySize; r->tex_depth = 1;
+    r->samples = 1;
+    EnterCriticalSection(&d->view_lock);
+    mad_vmap_put_locked(d, r->gpu_resource_id, r->tex_layers, 0);
+    LeaveCriticalSection(&d->view_lock);
+    if (said++ < 8)
+        d3d12_log("[madeira-d3d12] OpenSharedHandle %p: %ux%u format %u (pixel format %u) mips %u\n", handle,
+                  d11.Width, d11.Height, (unsigned)d11.Format, (unsigned)pf, (unsigned)desc.MipLevels);
+    hr = res_QI((ID3D12Resource *)r, riid, out);
+    res_Release((ID3D12Resource *)r);
+    return hr;
+}
+
 /* ---- vtable construction ------------------------------------------------- */
 static void build_vtables(void) {
     static LONG done;
@@ -19572,6 +19710,7 @@ static void build_vtables(void) {
     g_device_vtbl.CreateQueryHeap = (void *)device_CreateQueryHeap;
     g_device_vtbl.CreateHeap = (void *)device_CreateHeap;
     g_device_vtbl.CreatePlacedResource = (void *)device_CreatePlacedResource;
+    g_device_vtbl.OpenSharedHandle = (void *)device_OpenSharedHandle;
     g_memheap_vtbl.QueryInterface          = memheap_QI;
     g_memheap_vtbl.AddRef                  = memheap_AddRef;
     g_memheap_vtbl.Release                 = memheap_Release;
@@ -19710,6 +19849,7 @@ static void build_vtables(void) {
     g_list_vtbl.ResourceBarrier         = (void *)list_ResourceBarrier;
     g_list_vtbl.Dispatch                = (void *)list_Dispatch;
     g_list_vtbl.ExecuteIndirect         = (void *)list_ExecuteIndirect;
+    g_list_vtbl.ExecuteBundle           = (void *)list_ExecuteBundle;
     g_list_vtbl.SetGraphicsRootShaderResourceView  = (void *)list_SetGraphicsRootShaderResourceView;
     g_list_vtbl.SetGraphicsRootUnorderedAccessView = (void *)list_SetGraphicsRootUnorderedAccessView;
     g_list_vtbl.SetGraphicsRoot32BitConstant       = (void *)list_SetGraphicsRoot32BitConstant;
