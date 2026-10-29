@@ -48,4 +48,6 @@ in #235 apply to its own build.
 If the folder picker shows the drive but Open does nothing, drag the drive or
 folder from the Files app (Split View) onto Add drive or folder instead. The
 log records `[picker] shown`, `[picker] picked`, `[picker] cancelled` and
-`[external] dropped folder` lines, so a missing step shows where it stopped.
+`[external] drop types=` and `[external] dropped folder` lines, so a missing
+step shows where it stopped. `[picker] identity` records the bundle identifier
+and signing entitlements that an in-place grant is issued to.
