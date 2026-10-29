@@ -1,0 +1,53 @@
+From 87f3b7e504ee2f113248f3214e5d0bc903b83446 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 07:12:30 +0000
+Subject: [PATCH] kernelbase: implement SetThreadIdealProcessorEx
+
+The ideal processor is a scheduling hint and Windows succeeds for any valid
+processor. Intel Embree (Counter-Strike 2's embree3.dll) sets it for each
+worker thread it creates and treats the stub's FALSE as fatal: CS2 crashed
+just before its main menu.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QwPPpyEGW7D4dmNsNKzK6P
+---
+ dlls/kernelbase/thread.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index 13040915817..f42b0b3dcd7 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -586,9 +586,26 @@ DWORD WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessor( HANDLE thread, DWORD pro
+ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessorEx( HANDLE thread, PROCESSOR_NUMBER *ideal,
+                                                          PROCESSOR_NUMBER *previous )
+ {
+-    FIXME( "(%p %p %p): stub\n", thread, ideal, previous );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++    DWORD prev;
++
++    TRACE( "(%p %p %p)\n", thread, ideal, previous );
++
++    /* The ideal processor is a scheduling hint. Windows succeeds for any valid
++     * processor; Intel Embree (Counter-Strike 2) treats a failure as fatal. */
++    if (!ideal || ideal->Group || ideal->Number >= MAXIMUM_PROCESSORS)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++    prev = SetThreadIdealProcessor( thread, ideal->Number );
++    if (prev == ~0u) return FALSE;
++    if (previous)
++    {
++        previous->Group = 0;
++        previous->Number = prev;
++        previous->Reserved = 0;
++    }
++    return TRUE;
+ }
+ 
+ 
+-- 
+2.43.0
+
