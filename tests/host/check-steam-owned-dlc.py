@@ -28,8 +28,8 @@ info = (steam / 'Library/SteamAppInfo.swift').read_text(encoding='utf-8')
 downloader = (steam / 'Content/DepotDownloader.swift').read_text(encoding='utf-8')
 library = (root / 'tests/host/check-steam-library.py').read_text(encoding='utf-8')
 
-check('ownedDLC: Set<UInt32> = []) -> [DepotInfo]' in info and '(d.dlcAppID == nil || ownedDLC.contains(d.depotID))' in info,
-      'the selection takes a DLC depot only when it is owned')
+check('ownedDLC: Set<UInt32> = []) -> [DepotInfo]' in info and '(d.dlcAppID.map { ownedDLC.contains(d.depotID) && !dlcOff.contains($0) } ?? true)' in info,
+      'the selection takes a DLC depot only when it is owned and not turned off')
 check('ownedDLC = await ownedDepots() ?? []' in downloader and 'app.installDepots(ownedDLC: ownedDLC)' in downloader,
       "the download asks for the account's depots and passes them to the selection")
 check('depotSelectionSummary(ownedDLC: ownedDLC)' in downloader, 'the selection log shows owned DLC as selected')

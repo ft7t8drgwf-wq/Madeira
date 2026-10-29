@@ -921,6 +921,52 @@ struct SteamGameLanguagePicker: View {
     }
 }
 
+// MARK: - DLC
+
+/// Tells the pages that show a game's DLC that a switch moved (SteamDLC keeps
+/// the choices).
+final class SteamDLCChoices: ObservableObject {
+    static let shared = SteamDLCChoices()
+
+    @MainActor func set(_ dlcID: Int, on: Bool, for appID: Int) {
+        SteamDLC.setOn(dlcID, on, for: appID)
+        objectWillChange.send()
+    }
+}
+
+/// The DLC the account owns for a Steam game: a switch for each one with files
+/// (on: downloaded with the game), its size and, for an installed game, whether
+/// the install has it. A DLC without files only unlocks content: no switch.
+struct SteamDLCRows: View {
+    let appID: Int
+    /// The depots the game's install record holds; nil before it is installed.
+    var installedDepots: Set<Int>?
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @ObservedObject private var choices = SteamDLCChoices.shared
+
+    var body: some View {
+        let off = SteamDLC.off(appID)
+        ForEach(steam.game(appID)?.dlc ?? []) { dlc in
+            if dlc.depots.isEmpty {
+                LabeledContent(dlc.name, value: "No download")
+            } else {
+                Toggle(isOn: Binding(get: { !off.contains(dlc.id) }, set: { choices.set(dlc.id, on: $0, for: appID) })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(dlc.name)
+                        Text(detail(dlc)).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func detail(_ dlc: SteamOwnedDLC) -> String {
+        let size = dlc.downloadBytes > 0 ? "About " + formatBytes(Int64(clamping: dlc.downloadBytes)) : "Size not stated"
+        guard let installedDepots else { return size }
+        return Set(dlc.depots).isSubset(of: installedDepots) ? "Installed" : size + ", not installed"
+    }
+}
+
 // MARK: - Download sheet
 
 /// A game the account owns that is not installed: Install, Pause, Resume and
@@ -998,6 +1044,15 @@ struct SteamGameSheet: View {
                         if let freeSpace { LabeledContent("Free space there", value: formatBytes(freeSpace)) }
                         Text(SteamGameSheet.downloadNote)
                             .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if item.installed == nil, SteamOwnedLibrary.dlcEnabled, let dlc = steam.game(appID)?.dlc, !dlc.isEmpty {
+                        Section {
+                            SteamDLCRows(appID: appID)
+                        } header: {
+                            Text("DLC")
+                        } footer: {
+                            Text("DLC you own downloads with the game, as in Steam. Turn one off to leave its files out; a change applies when the download next starts or resumes. The sizes above are the game's alone.")
+                        }
                     }
                     Section {
                         Link(destination: URL(string: "https://store.steampowered.com/app/\(appID)/")!) {
@@ -1266,6 +1321,7 @@ struct SteamEntrySection: View {
     @ObservedObject private var steam = SteamOwnedLibrary.shared
     @ObservedObject private var games = SteamGamesModel.shared
     @ObservedObject private var languageChoices = SteamGameLanguageChoices.shared
+    @ObservedObject private var dlcChoices = SteamDLCChoices.shared
     @State private var confirmUninstall = false
     @State private var freeSpace: Int64?
     /// "The game": the install folder's programs (the Program picker) and whether
@@ -1358,6 +1414,22 @@ struct SteamEntrySection: View {
                         Label("Download in \(SteamLanguage.name(wanted))", systemImage: "character.bubble")
                     }.disabled(!steam.signedIn)
                     Text("Adds the game's \(SteamLanguage.name(wanted)) content and tells Steam to start it in that language. Files of the current language are kept.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if downloads, SteamOwnedLibrary.dlcEnabled, let owned = steam.game(appID)?.dlc, !owned.isEmpty {
+                let installedDepots = games.depots[appID] ?? []
+                DisclosureGroup("Owned DLC (\(owned.count))") {
+                    SteamDLCRows(appID: appID, installedDepots: installedDepots)
+                    Text("A DLC turned off is left out of the next update or repair; its files stay until you uninstall the game.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if download == nil, let missing = steam.game(appID)?.dlcToDownload(installedDepots: installedDepots), !missing.isEmpty {
+                    Button { steam.repair(appID) } label: {
+                        Label(missing.count == 1 ? "Download DLC: \(missing[0].name)" : "Download \(missing.count) DLC",
+                              systemImage: "puzzlepiece.extension")
+                    }.disabled(!steam.signedIn)
+                    Text("Adds the DLC's files to the game. The game's own files are checked and kept, so this takes a little longer than the DLC alone.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
