@@ -1,0 +1,136 @@
+Subject: [PATCH] ntdll ARM64EC: register unnamed executable image views with FEX (opt-in)
+
+Black Ops III maps a second gdi32.dll with NtMapViewOfSection outside the
+loader (no ArbitraryUserPointer) and calls into it; the view had its pool
+copy but no FEX interval, so the first call decoded as NOEXEC (c0000005).
+With MADEIRA_MAP_NOTIFY_UNNAMED=1 such a view is registered with FEX when its
+section handle grants SECTION_MAP_EXECUTE, and a hybrid (ARM64EC) view gets
+its __os_arm64x_* dispatch pointers filled. Resource-only views stay
+unregistered. Off by default (the original change was always on); log tag
+[map-notify].
+
+Originally-by: Tomba247 (https://github.com/Tomba247/Madeira, bo3-build 042570f2
+and 104e3fe0, build/patches/wine/0002-map-notify-unnamed-exec-image.patch);
+the MADEIRA_MAP_NOTIFY_UNNAMED switch is ours.
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 9ed09f7e..a61314fe 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -1891,9 +1891,61 @@ static void ios_log_unmap( void *addr )
+     }
+ }
+ 
++/* madeira-bcd: the ARM64EC dispatch pointers of an image view the loader is not
++ * mapping. The loader fills a hybrid module's __os_arm64x_* pointers (its CHPE
++ * metadata) once it is mapped (arm64ec_update_hybrid_metadata, from loader.c);
++ * a view a program maps itself never gets them, so its ARM64EC code branches to
++ * a null __os_arm64x_dispatch_call. BO3 (2026-10-19, with env.MADEIRA_SYSX64_IMAGE)
++ * calls GdiDllInitialize in its own gdi32.dll copy and died at pc 0 from
++ * gdi32+0x544e4. The metadata pointer is a VA of the preferred base until the
++ * view is relocated, so either base is accepted. */
++static void ios_unnamed_hybrid_metadata( void *module )
++{
++    IMAGE_NT_HEADERS *nt = RtlImageNtHeader( module );
++    IMAGE_LOAD_CONFIG_DIRECTORY *cfg;
++    ULONG_PTR meta, base = (ULONG_PTR)module, pref, end;
++    ULONG size;
++    static int said;
++
++    if (!nt || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) return;
++    if (!(cfg = RtlImageDirectoryEntryToData( module, TRUE, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, &size ))) return;
++    size = min( size, cfg->Size );
++    if (size <= offsetof( IMAGE_LOAD_CONFIG_DIRECTORY, CHPEMetadataPointer ) || !cfg->CHPEMetadataPointer) return;
++    meta = cfg->CHPEMetadataPointer;
++    pref = nt->OptionalHeader.ImageBase;
++    end = nt->OptionalHeader.SizeOfImage;
++    if (meta >= base && meta < base + end) ;
++    else if (meta >= pref && meta < pref + end) meta = meta - pref + base;
++    else return;
++    if (said++ < 16) ERR( "[map-notify] unnamed hybrid image %p: ARM64EC dispatch pointers set (metadata %p)\n", module, (void *)meta );
++    arm64ec_update_hybrid_metadata( module, nt, (const IMAGE_ARM64EC_METADATA *)meta );
++}
++
++/* Opt-in (env MADEIRA_MAP_NOTIFY_UNNAMED = 1, set in a game's own file): register
++ * image views mapped outside the loader with FEX (below). Off, such a view is
++ * skipped as before, so games that never ask keep the old behaviour. */
++static BOOL ios_map_notify_unnamed_enabled(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        UNICODE_STRING name, value;
++        WCHAR buffer[2];
++
++        RtlInitUnicodeString( &name, L"MADEIRA_MAP_NOTIFY_UNNAMED" );
++        value.Buffer = buffer;
++        value.Length = 0;
++        value.MaximumLength = sizeof(buffer);
++        on = !RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
++             value.Length == sizeof(WCHAR) && buffer[0] == '1';
++    }
++    return on;
++}
++
+ static void notify_map_view_of_section( HANDLE handle, void *addr, SIZE_T size, ULONG alloc,
+                                         ULONG protect, NTSTATUS *ret_status )
+ {
++    BOOL unnamed = FALSE;
+     SECTION_IMAGE_INFORMATION info;
+     NTSTATUS status;
+ 
+@@ -1915,13 +1967,6 @@ static void notify_map_view_of_section( HANDLE handle, void *addr, SIZE_T size,
+         }
+     }
+     if (!pNotifyMapViewOfSection) return;
+-    if (!NtCurrentTeb()->Tib.ArbitraryUserPointer)
+-    {
+-        static int skip_aup;
+-        if (skip_aup < 20)
+-        { skip_aup++; ERR( "[map-notify] SKIP (no ArbitraryUserPointer) addr=%p size=%p\n", addr, (void *)size ); }
+-        return;
+-    }
+     if (NtQuerySection( handle, SectionImageInformation, &info, sizeof(info), NULL ))
+     {
+         static int skip_qs;
+@@ -1929,9 +1974,40 @@ static void notify_map_view_of_section( HANDLE handle, void *addr, SIZE_T size,
+         { skip_qs++; ERR( "[map-notify] SKIP (not an image section) addr=%p size=%p\n", addr, (void *)size ); }
+         return;
+     }
++    /* madeira-bcd: an image view the loader is not mapping (no ArbitraryUserPointer)
++     * is still registered with FEX when its section handle grants SECTION_MAP_EXECUTE.
++     * BO3 (2026-10-19) maps a second gdi32.dll that way and calls into it: the view
++     * got its executable pool copy, but FEX had no interval for it, so the first
++     * call decoded as NOEXEC and the process died with c0000005. FEX takes the
++     * module name from the section file, not from ArbitraryUserPointer. A view
++     * without execute access stays unregistered: it is a resource / version query
++     * (LOAD_LIBRARY_AS_IMAGE_RESOURCE), mapped without a pool copy on the unix side.
++     * Only with MADEIRA_MAP_NOTIFY_UNNAMED = 1: a failed registration unmaps the view. */
++    if (!NtCurrentTeb()->Tib.ArbitraryUserPointer)
++    {
++        OBJECT_BASIC_INFORMATION obj;
++        BOOL exec = ios_map_notify_unnamed_enabled() &&
++                    !NtQueryObject( handle, ObjectBasicInformation, &obj, sizeof(obj), NULL ) &&
++                    (obj.GrantedAccess & SECTION_MAP_EXECUTE);
++        static int skip_aup, unnamed_n;
++        if (!exec)
++        {
++            if (skip_aup < 20)
++            { skip_aup++; ERR( "[map-notify] SKIP (no ArbitraryUserPointer%s) addr=%p size=%p\n",
++                                    ios_map_notify_unnamed_enabled() ? ", no execute access" : "", addr, (void *)size ); }
++            return;
++        }
++        if (unnamed_n < 20)
++        { unnamed_n++; ERR( "[map-notify] unnamed image view with execute access addr=%p size=%p: registering it with FEX\n", addr, (void *)size ); }
++        unnamed = TRUE;
++    }
+     ios_note_big_image( addr, size );
+     status = pNotifyMapViewOfSection( NULL, addr, NULL, size, alloc, protect );
+-    if (NT_SUCCESS(status)) return;
++    if (NT_SUCCESS(status))
++    {
++        if (unnamed) ios_unnamed_hybrid_metadata( addr );   /* the view's own headers: the unix side may map another file (sysx64-image) */
++        return;
++    }
+     NtUnmapViewOfSection( GetCurrentProcess(), addr );
+     *ret_status = status;
+ }
