@@ -348,7 +348,7 @@ struct SavesSection: View {
                 }
             }
             .disabled(busy)
-            Button { DocumentPicker.shared.pick([.zip]) { pendingRestore = $0 } } label: {
+            Button { DocumentPicker.shared.pick([.zip], asCopy: true) { pendingRestore = $0 } } label: {
                 Label("Restore saves from a backup…", systemImage: "arrow.uturn.backward.circle")
             }
             .disabled(busy)

@@ -427,17 +427,20 @@ struct ExternalGamesSheet: View {
     static let shared = DocumentPicker()
     private var done: ((URL) -> Void)?
 
-    func pick(_ types: [UTType], _ done: @escaping (URL) -> Void) {
+    /// asCopy: Files hands over a copy instead of the item in place (files
+    /// only; a drive or folder has to be opened in place).
+    func pick(_ types: [UTType], asCopy: Bool = false, _ done: @escaping (URL) -> Void) {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else {
             LogStore.shared.log("[picker] no window to show the Files picker from")
             return
         }
         while let next = top.presentedViewController { top = next }
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: asCopy)
         picker.allowsMultipleSelection = false
         picker.delegate = self
         self.done = done
+        LogStore.shared.log("[picker] shown types=\(types.map(\.identifier).joined(separator: ",")) asCopy=\(asCopy) from=\(type(of: top))")
         top.present(picker, animated: true)
     }
 
@@ -447,7 +450,10 @@ struct ExternalGamesSheet: View {
         done = nil
     }
 
-    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { done = nil }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        LogStore.shared.log("[picker] cancelled")
+        done = nil
+    }
 }
 
 /// Settings › External drives.
