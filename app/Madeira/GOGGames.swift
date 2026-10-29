@@ -344,6 +344,17 @@ struct GOGGameSheet: View {
                         }
                     }
                     Section {
+                        if item.installed == nil {
+                            switch gog.sizes[productID] {
+                            case .known(let download, let install):
+                                if download > 0 { LabeledContent("Download size", value: "About " + ByteCountFormatter.string(fromByteCount: download, countStyle: .file)) }
+                                if install > 0 { LabeledContent("Size on this device", value: "About " + ByteCountFormatter.string(fromByteCount: install, countStyle: .file)) }
+                            case .unavailable(let reason):
+                                Text(reason).font(.caption).foregroundStyle(.secondary)
+                            case nil:
+                                if gog.signedIn { LabeledContent("Download size") { ProgressView() } }
+                            }
+                        }
                         if let freeSpace { LabeledContent("Free space on this device", value: ByteCountFormatter.string(fromByteCount: freeSpace, countStyle: .file)) }
                         Text("Games download directly from GOG with your account into C:\\GOG Games, with the DLC you own. Keep Madeira open while it downloads: in the background iOS allows only a short time, then the download pauses and continues when you return. A download also pauses while a game is running.")
                             .font(.footnote).foregroundStyle(.secondary)
@@ -358,6 +369,7 @@ struct GOGGameSheet: View {
             .task(id: gog.downloads[productID]?.state) {
                 freeSpace = GOGDownloader.freeSpace(at: URL.documentsDirectory)
             }
+            .task(id: productID) { await gog.loadSize(productID) }
             .confirmationDialog(gog.installed[productID] == nil ? "Cancel this download? Downloaded files are deleted." : "Stop this download?",
                                 isPresented: $confirmCancel, titleVisibility: .visible) {
                 Button("Cancel download", role: .destructive) { gog.cancel(productID) }
