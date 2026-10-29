@@ -1463,7 +1463,16 @@ static void winios_ensure_compositor(void) {
                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         dispatch_source_set_timer(stack_timer, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC),
                                   20 * NSEC_PER_SEC, NSEC_PER_SEC);
-        dispatch_source_set_event_handler(stack_timer, ^{ ios_dump_all_thread_stacks(); });
+        dispatch_source_set_event_handler(stack_timer, ^{
+            /* madeira-bcd: each dump reads the state of every thread of the session
+             * (265-300 during Red Dead Redemption 2) and symbolizes their frames
+             * with dladdr; a game's own config can turn the timer's dumps off. The
+             * main-stall watcher's dumps stay. Read at every tick, so the line
+             * applies whenever the timer was armed. */
+            const char *e = getenv("MADEIRA_PERIODIC_STACK_DUMP");   /* 0: no all-thread stack dump every 20 s */
+            if (e && e[0] == '0' && !e[1]) return;
+            ios_dump_all_thread_stacks();
+        });
         dispatch_resume(stack_timer);
     }
 }
@@ -1620,6 +1629,7 @@ static unsigned long long winios_hidden_present_interval_ns(void) {
 @interface MadeiraWindowMetalLayer : CAMetalLayer
 @property (nonatomic) uintptr_t madeiraHwnd;
 - (void)madeiraSetWindowHidden:(BOOL)hidden;
+- (BOOL)madeiraWindowHidden;   /* read by DXMT's frame generation (winemetal), any thread */
 @end
 
 @implementation MadeiraWindowMetalLayer {
@@ -1629,6 +1639,9 @@ static unsigned long long winios_hidden_present_interval_ns(void) {
 }
 - (void)madeiraSetWindowHidden:(BOOL)hidden {
     __atomic_store_n(&_windowHidden, hidden ? 1 : 0, __ATOMIC_RELAXED);
+}
+- (BOOL)madeiraWindowHidden {
+    return __atomic_load_n(&_windowHidden, __ATOMIC_RELAXED) != 0;
 }
 - (nullable id<CAMetalDrawable>)nextDrawable {
     if (!__atomic_exchange_n(&_firstDrawableSaid, 1, __ATOMIC_RELAXED)) {
