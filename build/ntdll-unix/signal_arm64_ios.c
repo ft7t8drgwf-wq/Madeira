@@ -2338,9 +2338,30 @@ static inline void ios_note_guest_delivery( uint64_t thread )
  * (not a crossing store this helper decodes; the per-encoding cases run).
  * ml1292: also called by the thread sampler (server_ios.c) to complete a store
  * the kernel keeps faulting on, with the thread suspended. */
+static int ios_store_split_crossing_ex( uint32_t insn, arm_thread_state64_t *st,
+                                        const arm_neon_state64_t *neon,
+                                        uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked );
+
 int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
                                      const arm_neon_state64_t *neon,
                                      uintptr_t rx, uintptr_t rw, size_t sz )
+{
+    uintptr_t blocked;
+    return ios_store_split_crossing_ex( insn, st, neon, rx, rw, sz, &blocked );
+}
+
+/* madeira-pz: *blocked names the guest page a refused store is waiting on.
+ * A crossing store whose SECOND page FEX protects (cached translations) was
+ * refused here, and the caller then dispatched the host FAR, which lies in
+ * the FIRST page. FEX's handler unprotected that page again (it already was:
+ * NtProtect old=0x40 new=0x40), never the second, and the store faulted the
+ * same way until the 2000-redelivery guard killed the process (Project
+ * Zomboid's JVM, "Unhandled non-JIT atomic", addr ...7ff0 with the next page
+ * at ...8000). Dispatching the blocked page lets FEX invalidate it, as the
+ * CASP path below already does for its spanning stores. */
+static int ios_store_split_crossing_ex( uint32_t insn, arm_thread_state64_t *st,
+                                        const arm_neon_state64_t *neon,
+                                        uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked )
 {
     extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t fault_addr );
     extern void ios_jit_anon_alias_note_write( unsigned long long );
@@ -2355,6 +2376,7 @@ int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
     unsigned bytes, elem, rt2 = (insn >> 10) & 31, parts = 0, done = 0, i, part_len[2];
     uintptr_t part_rw[2];
 
+    *blocked = 0;
     if ((insn & 0x3a000000u) == 0x28000000u)                    /* STP/STNP and SIMD&FP pairs */
     {
         const unsigned mode = (insn >> 23) & 3;              /* 0 stnp, 1 post, 2 offset, 3 pre */
@@ -2423,9 +2445,18 @@ int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
         if (len > 0x4000 - (a & 0x3fff)) len = 0x4000 - (unsigned)(a & 0x3fff);
         part_rw[parts] = (rx && rw && len <= sz && a >= rx && a - rx <= sz - len)
                          ? rw + (a - rx) : ios_write_alias( (uintptr_t)a );
-        if (part_rw[parts] && (ios_write_alias( a + len - 1 ) != part_rw[parts] + len - 1 ||
-            (honor_guest_prot && (ios_alias_write_is_trapped( a ) || ios_alias_write_is_trapped( a + len - 1 )))))
+        if (part_rw[parts] && ios_write_alias( a + len - 1 ) != part_rw[parts] + len - 1)
             return -1;
+        if (part_rw[parts] && honor_guest_prot && ios_alias_write_is_trapped( a ))
+        {
+            *blocked = a;
+            return -1;
+        }
+        if (part_rw[parts] && honor_guest_prot && ios_alias_write_is_trapped( a + len - 1 ))
+        {
+            *blocked = (a + len - 1) & ~(uintptr_t)0xfff;
+            return -1;
+        }
         if (!part_rw[parts])
         {
             /* A page with no alias that is plain writable memory (the aliased page is
@@ -4443,8 +4474,8 @@ static void *ios_mach_exception_thread( void *arg )
                      * 16-byte copies are correct. Rn==31 is SP, never __x[31]. */
                     /* ml1289: a store that crosses a 16 KB page is written per page here;
                      * every other store goes on to its per-encoding case below. */
-                    const int split_r = ios_store_split_crossing( insn, &state, have_neon ? &neon_state : NULL,
-                                                                  rx, rw, sz );
+                    const int split_r = ios_store_split_crossing_ex( insn, &state, have_neon ? &neon_state : NULL,
+                                                                     rx, rw, sz, &alias_fault );
                     if (split_r)
                     {
                         if (split_r > 0) emulated = 1;
