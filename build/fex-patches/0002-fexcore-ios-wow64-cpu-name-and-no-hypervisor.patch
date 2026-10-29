@@ -1,0 +1,41 @@
+FEXCore: 32-bit programs on iOS see "Apple Silicon" and no hypervisor bit
+
+Test for Steam's CEG step (Black Ops 1). On the iOS host FEX reports a
+GenuineIntel CPU whose brand string is "Unknown ARM CPU", with the
+hypervisor bit set. For the WOW64 module only (HostType Wow64), the brand
+is "Apple Silicon" and the hypervisor bit is clear.
+
+Applies on top of 0001. The rebuilt WOW64 module is
+app/Madeira/aarch64-windows/xtajit.dll. Not for FEX-Emu.
+
+diff --git a/FEXCore/Source/Interface/Core/CPUID.cpp b/FEXCore/Source/Interface/Core/CPUID.cpp
+index 5b0ea4a..4e964d7 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.cpp
++++ b/FEXCore/Source/Interface/Core/CPUID.cpp
+@@ -171,6 +171,13 @@ void CPUIDEmu::SetupHostHybridFlag() {
+ 
+     // Truncate to 32-bits, top 32-bits are all reserved in MIDR
+     PerCPUData[i].ProductName = ProductNames::ARM_UNKNOWN;
++#ifdef FEX_IOS_HOST
++    /* MADEIRA cpu-name test: 32-bit programs on iOS see "Apple Silicon" instead of "Unknown ARM CPU"
++     * (the iOS host publishes one synthetic MIDR that matches no table entry). Black Ops 1's CEG step. */
++    if (CTX->HostFeatures.HostType == FEXCore::HostFeatures::HostTypeEnum::Wow64) {
++      PerCPUData[i].ProductName = ProductNames::ARM_AppleSilicon;
++    }
++#endif
+     PerCPUData[i].MIDR = NewMIDR;
+     MIDR = NewMIDR;
+   }
+@@ -454,6 +461,12 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_01h(uint32_t Leaf) const {
+ 
+   // Hypervisor bit is normally set but some applications have issues with it.
+   uint32_t Hypervisor = HideHypervisorBit() ? 0 : 1;
++#ifdef FEX_IOS_HOST
++  // MADEIRA cpu-name test: 32-bit programs on iOS see no hypervisor, like most Windows PCs.
++  if (CTX->HostFeatures.HostType == FEXCore::HostFeatures::HostTypeEnum::Wow64) {
++    Hypervisor = 0;
++  }
++#endif
+ 
+   Res.eax = FAMILY_IDENTIFIER;
+ 
