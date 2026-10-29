@@ -1,0 +1,57 @@
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 60f8b746..b66c7a9c 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -7366,7 +7366,7 @@ static int ios_guest_log_keep( const char *line, size_t len )
+     static const char *const words[] =
+     {
+         "error", "fail", "exception", "unsupported", "not supported", "gpu", "driver",
+-        "adapter", "graphics", "monitor", "display", "nvapi", "nvidia",
++        "adapter", "graphics", "monitor", "display", "nvapi", "nvidia", "traceback",
+     };
+     char lower[320];
+     size_t i;
+@@ -7380,6 +7380,27 @@ static int ios_guest_log_keep( const char *line, size_t len )
+     return 0;
+ }
+ 
++/* Which files the mirror reads: *.log and Unity's output_log.txt, and the
++ * text files a Ren'Py game (Python) writes its errors to, since none of them
++ * is a *.log: traceback.txt and errors.txt for script errors, log.txt for the
++ * engine log, stderr.txt in older versions. Doki Doki Literature Club's child
++ * process exits right after loading pyexpat.pyd with no message box and no
++ * exception; the reason is only in those files. Never other text files. */
++static int ios_guest_log_wanted( const char *name )
++{
++    static const char *const files[] =
++    {
++        "output_log.txt", "traceback.txt", "errors.txt", "log.txt", "stderr.txt",
++    };
++    const char *ext = strrchr( name, '.' );
++    size_t i;
++
++    if (ext && !strcasecmp( ext, ".log" )) return 1;
++    for (i = 0; i < sizeof(files) / sizeof(files[0]); i++)
++        if (!strcasecmp( name, files[i] )) return 1;
++    return 0;
++}
++
+ /* A BOM can be its own NtWriteFile call. Without one, require several ASCII
+  * code units with the correct zero-byte layout before considering UTF-16.
+  * Validate the whole bounded input, including text beyond the output limit;
+@@ -7509,13 +7530,11 @@ static void ios_guest_log_mirror( int fd, const void *buffer, unsigned int lengt
+         if (m == 1 && !ios_guest_log_keep( (const char *)text + start, len )) continue;
+         if (!have_path)
+         {
+-            const char *name, *ext;
++            const char *name;
+             if (!ios_guest_log_fd_path( fd, path, sizeof(path) )) goto out;
+             name = strrchr( path, '/' );
+             name = name ? name + 1 : path;
+-            ext = strrchr( name, '.' );
+-            /* only *.log and output_log.txt; never arbitrary text files */
+-            if ((!ext || strcasecmp( ext, ".log" )) && strcasecmp( name, "output_log.txt" )) goto out;
++            if (!ios_guest_log_wanted( name )) goto out;
+             have_path = 1;
+             {
+                 unsigned long long ph = 14695981039346656037ULL;

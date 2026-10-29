@@ -3465,6 +3465,9 @@ struct ContentView: View {
             }
             let launchOption = chosen ?? 0
             LogStore.shared.log("[madeira-dock] launch option \(launchOption)\(chosen == nil ? " (none chosen: the default)" : "")")
+            for line in SteamDirectStart.batchLines(options ?? [], key: launchOption, installFolder: installFolder) {
+                LogStore.shared.log(line)
+            }
             await SteamOwnedLibrary.shared.prepareDock()
             do {
                 // The launch state may have changed while the connection closed.

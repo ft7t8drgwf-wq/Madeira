@@ -322,6 +322,47 @@ enum SteamDirectStart {
         return String(first.executable.replacingOccurrences(of: "/", with: "\\").prefix(200))
     }
 
+    /// Log lines for a Dock start whose launch entry is a batch file (.bat or .cmd)
+    /// inside the install folder; none for any other entry. Valve's client runs such
+    /// an entry through cmd.exe, and the session log then shows only cmd's exit code:
+    /// Messiah's "Launch Messiah.bat" ends at once with 255 and nothing says why.
+    /// These lines name the file and show what it runs: the first `maxLines` lines
+    /// of its first 16 KiB, each cut to 160 characters, tabs as spaces and other
+    /// control characters dropped. A file with a zero byte is named, not shown.
+    static func batchLines(_ options: [SteamLaunchOption], key: UInt32, installFolder root: URL,
+                           maxLines: Int = 30) -> [String] {
+        guard let option = options.first(where: { $0.index == key }),
+              let path = relativePath(option.executable), !path.isEmpty,
+              ["bat", "cmd"].contains(URL(fileURLWithPath: path).pathExtension.lowercased()),
+              let program = onDisk(path, in: root, directory: false) else { return [] }
+        func printable(_ text: String, _ limit: Int) -> String {
+            var out = ""
+            for scalar in text.unicodeScalars {
+                if out.count >= limit { break }
+                if scalar == "\t" { out.append(" ") }
+                else if scalar.value >= 0x20, scalar.value != 0x7f { out.unicodeScalars.append(scalar) }
+            }
+            return out
+        }
+        let arguments = printable(option.arguments, 120)
+        var first = "[dock-bat] launch option \(key) runs \(printable(program, 160))"
+            + (arguments.isEmpty ? "" : " with arguments \"\(arguments)\"")
+        guard let handle = FileHandle(forReadingAtPath: root.appendingPathComponent(program).path) else {
+            return [first + " (could not be read)"]
+        }
+        let data = (try? handle.read(upToCount: 16384)) ?? Data()
+        try? handle.close()
+        if data.contains(0) { return [first + " (not a text file)"] }
+        // "\r\n" is one Character in Swift, so a split on "\n" would not cut a CRLF file.
+        var lines = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        let shown = lines.prefix(max(0, maxLines))
+        first += lines.count > shown.count ? " (\(lines.count) lines, the first \(shown.count) below)"
+                                           : " (\(lines.count) line\(lines.count == 1 ? "" : "s"))"
+        return [first] + shown.enumerated().map { "[dock-bat] \($0.offset + 1): " + printable($0.element, 160) }
+    }
+
     /// The install folder's Windows programs for the Program picker: every .exe up to
     /// six folders deep (linked folders are not followed), at most 400, sorted.
     static func programs(in root: URL) -> [String] {
