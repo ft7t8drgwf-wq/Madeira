@@ -63,7 +63,7 @@ check('record state: tables, signatures (which drop the tables), the heap; Reset
       'if (c->u.heaps.srv) l->rec_heap = c->u.heaps.srv;' in pe and
       'l->rec_rs[0] = l->rec_rs[1] = NULL; l->rec_heap = NULL;' in pe)
 check('replay: latches remembered, dropped with the signature',
-      'case MC_CBV_LATCH: mad_scbv_replay(&e, c); break;' in pe and
+      'case MC_CBV_LATCH: mad_scbv_replay(&e, c);' in pe and   # table-reuse bumps its generations on the same line
       'case MC_ROOTSIG: e.rs = c->u.rootsig; memset(e.lat_va[0], 0, sizeof e.lat_va[0]);' in pe and
       'case MC_CROOTSIG: e.crs = c->u.rootsig; memset(e.lat_va[1], 0, sizeof e.lat_va[1]);' in pe)
 slot = block(pe, DEF, '\n}\n')
