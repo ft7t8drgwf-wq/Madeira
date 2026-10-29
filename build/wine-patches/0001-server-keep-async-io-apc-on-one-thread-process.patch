@@ -1,10 +1,10 @@
 diff --git a/server/thread.c b/server/thread.c
-index ea1c2ad..9acb77d 100644
+index 23d8265..a40fbf1 100644
 --- a/server/thread.c
 +++ b/server/thread.c
-@@ -1771,7 +1771,17 @@ static inline int is_in_apc_wait( struct thread *thread )
-  * virtual desktop start, and the taskbar never painted. Only this failure path changes, and only
-  * for APC_ASYNC_IO; other system APCs are unchanged. [apc-requeue] logs the first 16 handovers
+@@ -1773,7 +1773,17 @@ static inline int is_in_apc_wait( struct thread *thread )
+  * desktop start, and the taskbar never painted. Only this failure path changes, and only for
+  * APC_ASYNC_IO; other system APCs are unchanged. [apc-requeue] logs the first 16 handovers
   * (then every 1024th) with the APC's status and thread ids only.
 - * MADEIRA_APC_REQUEUE=0 restores the drop. */
 + * MADEIRA_APC_REQUEUE=0 restores the drop.
@@ -21,11 +21,11 @@ index ea1c2ad..9acb77d 100644
  static int ios_apc_requeue_enabled( void )
  {
      static int enabled = -1;
-@@ -1788,7 +1798,24 @@ static int ios_apc_requeue_enabled( void )
+@@ -1790,7 +1800,24 @@ static int ios_apc_requeue_enabled( void )
      return enabled;
  }
  
--/* the thread to queue an undeliverable async I/O APC on, or NULL to drop it as before */
+-/* A waiting thread, the synchronous request's future waiter, or NULL to drop. */
 +static int ios_apc_keep_enabled( void )
 +{
 +    static int enabled = -1;
@@ -42,21 +42,16 @@ index ea1c2ad..9acb77d 100644
 +    return enabled;
 +}
 +
-+/* the thread to queue an undeliverable async I/O APC on (the busy thread itself when it is kept),
-+ * or NULL to drop it as before */
++/* A waiting thread, the synchronous request's future waiter, the busy thread itself when it is
++ * kept, or NULL to drop. */
  static struct thread *ios_apc_requeue_target( struct thread *thread, const struct thread_apc *apc )
  {
      static unsigned int count;
-@@ -1804,10 +1831,12 @@ static struct thread *ios_apc_requeue_target( struct thread *thread, const struc
-             break;
+@@ -1807,6 +1834,7 @@ static struct thread *ios_apc_requeue_target( struct thread *thread, const struc
          }
      }
+     if (!target && async_can_defer_to_issuer( apc->owner, thread )) target = thread;
 +    if (!target && !thread->alert_sync && ios_apc_keep_enabled()) target = thread;
      count++;
      if (count <= 16 || !(count & 1023))
          fprintf( stderr, "[apc-requeue] #%u async I/O APC status=%08x for busy thread %04x -> %s %04x\n",
-                  count, apc->call.async_io.status, thread->id,
-+                 target == thread ? "kept for its next server wait, no waiting thread" :
-                  target ? "waiting thread" : "dropped, no waiting thread", target ? target->id : 0 );
-     return target;
- }

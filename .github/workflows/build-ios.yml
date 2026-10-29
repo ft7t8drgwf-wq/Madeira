@@ -162,7 +162,7 @@ jobs:
 
       - name: FEXCore for iOS
         run: |
-          build/fex-ios/build.sh || { cmake --build FEX/build-ios --target FEXCore FEXCore_Base JemallocLibs -- -k 2>&1 | grep -E "error:|Error " | head -80; exit 1; }
+          build/fex-ios/build.sh || { cmake --build FEX/build-ios --target FEXCore FEXCore_Base JemallocLibs fmt cephes_128bit softfloat_3e xxhash -- -k 2>&1 | grep -E "error:|Error " | head -80; exit 1; }
 
       - name: Configure Wine host tree (wine/build-macos) and generate headers
         run: |
@@ -300,6 +300,47 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios
           build/rppairing-ios/build.sh
+
+      # ------------------------------------------------- desktop OpenGL (Zink)
+      # app/Madeira/gl/ (docs/BUILDING.md step 6): MoltenVK, then Mesa's OSMesa with Zink.
+      # Without them the app still builds and the GL driver falls back to OpenGL ES, so a
+      # failure here is a warning, not a failed IPA.
+      - name: Cache MoltenVK
+        id: mvk-cache
+        uses: actions/cache@v4
+        with:
+          path: research/MoltenVK
+          key: moltenvk-ios-v1.4.2-v1
+
+      - name: MoltenVK for iOS (desktop OpenGL backend)
+        id: mvk
+        continue-on-error: true
+        run: |
+          set -eu
+          mkdir -p research
+          [ -d research/MoltenVK ] || git clone --depth 1 -b v1.4.2 https://github.com/KhronosGroup/MoltenVK research/MoltenVK
+          build/moltenvk-ios/build.sh
+
+      - name: Mesa OSMesa + Zink for iOS (desktop OpenGL backend)
+        if: ${{ steps.mvk.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -eu
+          if [ ! -f research/mesa-25.0.7/meson.build ]; then
+            curl -fsSL -o /tmp/mesa.tar.xz https://archive.mesa3d.org/mesa-25.0.7.tar.xz
+            echo "592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6  /tmp/mesa.tar.xz" | shasum -a 256 -c -
+            tar -xf /tmp/mesa.tar.xz -C research
+          fi
+          [ -x research/mesa-venv/bin/meson ] || { python3 -m venv research/mesa-venv && research/mesa-venv/bin/pip install meson mako pyyaml packaging ninja; }
+          build/mesa-ios/build.sh
+
+      - name: Report the desktop OpenGL backend
+        run: |
+          if [ -f app/Madeira/gl/libOSMesa.dylib ] && [ -f app/Madeira/gl/libMoltenVK.dylib ]; then
+            ls -l app/Madeira/gl
+          else
+            echo "::warning::app/Madeira/gl has no Zink backend; desktop OpenGL games get OpenGL ES only"
+          fi
 
       - name: Bundle inputs (licences, VC++ runtime)
         run: |

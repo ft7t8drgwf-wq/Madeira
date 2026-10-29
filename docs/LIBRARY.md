@@ -73,7 +73,8 @@ Removing an entry never removes the game's files or saves.
   shown in Settings (Ready to play) and in the developer interface's status row.
 - **Settings**: JIT and memory status, Enable JIT, JIT method and setup
   (StikDebug or the built-in helper), extended logging, pointer
-  mode (Absolute, Relative or Touch) and touch sensitivity, **Display** (hold
+  mode (Absolute, Relative or Touch) and touch sensitivity, **Graphics** (see
+  below), **Display** (hold
   the display at its maximum rate, off by default), **Memory & sync** (swap tier
   Off/1/2/4 GB, off by default; sync engine, Fastsync by default), the interface
   switch and **Credits** (the last section). Display applies from the next session or FPS limit change; Memory &
@@ -91,6 +92,21 @@ Removing an entry never removes the game's files or saves.
   cap, checked when a block is backed).
   Without the key, `swap-mode = 2` in madeira.cfg means broad and the picker
   shows it; choosing large allocations then writes `classic` explicitly.
+- **Graphics** (below Pointer; `GraphicsSettings` in `Library.swift`) puts the
+  graphics routes on the Settings page itself instead of All settings:
+  **Direct3D 9** (DXMT, the default; DXMT's native frontend for 32-bit games,
+  `d3d9 = native`; or Wine's wined3d on OpenGL, `d3d9 = wined3d`,
+  experimental, needs the Zink backend), **Direct3D 12** (madeira-d3d12, the
+  default; or vkd3d-proton on Vulkan, `d3d12 = vkd3d`, experimental, x64
+  only), **Vulkan driver** (Automatic: off, MoltenVK when vkd3d-proton is
+  chosen; `vulkan = moltenvk`; or `vulkan = kosmickrisp`, iOS 26 on an A14 or
+  newer, offered only when the bundle has `gl/libvulkan_kosmickrisp.dylib`). Each control
+  writes its key in `Documents/madeira.cfg` and the default removes it;
+  **Reset to defaults** removes all four. They apply at the next session
+  start. The rows show the global file; a game's **Advanced › This game's
+  config** lines still win for that game. While the section is shown, All
+  settings and the Settings search leave the four keys out;
+  `env.MADEIRA_GRAPHICS_SETTINGS = 0` hides it and puts them back.
 
 ## Game details
 
@@ -185,7 +201,8 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
 
 A switch the game's page exports for a launch (the x87, AVX, CPU core,
 anisotropy and frame generation choices, the fastsync switches, the
-DirectInput controller choice) wins over the same `env.` key in madeira.cfg:
+DirectInput controller choice, and the launch's desktop mode) wins over the same
+`env.` key in madeira.cfg:
 that cfg line is skipped and logged as `[madeira-env] ml1184 KEY=... kept`.
 These keys are unset when the session ends (ml1184). The game's own config
 lines come after both and win.
@@ -204,6 +221,19 @@ and command are Dock's:
   shows. A `.bat`/`.cmd` runs as `cmd.exe /c "<file>"` directly, or
   `cmd /c "<file>"` inside the desktop. For **The game** the program is Steam's
   (or the one chosen under **Program**) with Steam's arguments.
+  Directly exports `MADEIRA_DESKTOP=0`, and the Wine desktop exports `1`, so a
+  global `env.MADEIRA_DESKTOP` cannot undo the choice. The game's own config
+  still wins over both. Desktop mode shows GDI windows; Directly presents
+  DirectX to the game display. A small window stays small inside the desktop:
+  choose fullscreen or a higher resolution in the game itself to enlarge it.
+  Enlarging the desktop alone does not increase the game's rendering resolution.
+  For a direct-mode game which draws in monitor pixels but leaves its original
+  small Windows client unchanged, its own config can set
+  `env.MADEIRA_DIRECT_WINDOW_SIZE = 1`. After creating its Metal view, Madeira
+  asks the window's owner thread to size its client to the selected resolution,
+  preserving its border widths, and repeats this if the engine shrinks it
+  again after startup. This is opt-in: ordinary windowed games keep
+  their requested size and use client-coordinate input mapping.
 - **Working folder** (`workingDirectory`): a `C:\` folder; empty means Steam's
   working folder for **The game**, else the program's own folder. It is
   exported as `MADEIRA_WORKDIR` (the bridge reads and clears it) whenever what
@@ -411,6 +441,7 @@ menu owns input, the game sees a connected pad at rest.
 | `MADEIRA_UI_LOG_IDLE` | on | the log view keeps parsing while hidden |
 | `MADEIRA_LOG_VIA_STDERR` | on | Swift log lines use their own file handle |
 | `MADEIRA_RUNTIME_SETTINGS` | on | no Display and Memory & sync sections in Settings |
+| `MADEIRA_GRAPHICS_SETTINGS` | on | no Graphics section in Settings; `d3d9`, `d3d12`, `vulkan` and `windowed` are back in All settings |
 | `MADEIRA_SESSION_TOOLS` | on | no Aspect & scaling (a session does not save it) and no Diagnostics in the in-game menu |
 | `MADEIRA_SESSION_DIAGNOSTICS` | off | `1` shows the in-game menu's Diagnostics: frame capture (render-target pixels to `Documents/capture`) and GPU sync, for Direct3D 12 games |
 | `MADEIRA_FRONTEND_KEYBOARD` | on | Keyboard opens the game view's own keyboard instead of the key window |
