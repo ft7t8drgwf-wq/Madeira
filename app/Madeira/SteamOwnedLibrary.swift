@@ -1305,6 +1305,11 @@ final class SteamOwnedLibrary: ObservableObject {
             // Owned DLC comes along unless the player turned it off (SteamDLC);
             // with the switch off, none does.
             info.dlcOff = Self.dlcEnabled ? SteamDLC.offApps(appID) : Set(info.knownDLC)
+            // The depots of the DLC apps the account owns count as owned too: a
+            // package often lists the DLC app but not its depots (New Vegas's
+            // Courier's Stash). Steam still refuses a key for anything not owned.
+            let ownedApps = Self.dlcEnabled ? Set((game(appID)?.dlc ?? []).map { UInt32($0.id) }) : []
+            let dlcDepots = Set(info.depots.filter { $0.dlcAppID.map { ownedApps.contains($0) } ?? false }.map(\.depotID))
             let steamApps = try ExternalDrives.nativeURL(library, write: true)
             let common = try ExternalDrives.nativeURL(library + "/common", write: true)
             _ = try ExternalDrives.nativeURL(library + "/common/" + SteamInstallFiles.safeFolderName(info.installDir.isEmpty ? "app_\(appID)" : info.installDir), write: true)
@@ -1312,7 +1317,10 @@ final class SteamOwnedLibrary: ObservableObject {
             try FileManager.default.createDirectory(at: common, withIntermediateDirectories: true)
             SteamLog.event("[steam-depot] install app=\(appID) library=\(library)")
             let folder = try await downloader.install(info, steamApps: steamApps,
-                                                      ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
+                                                      ownedDepots: { [weak self] in
+                let licensed = try? await self?.fetcher.ownedDepotIDs()
+                return licensed.map { $0.union(dlcDepots) } ?? (dlcDepots.isEmpty ? nil : dlcDepots)
+            }) { [weak self] progress in
                 self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)
             }
