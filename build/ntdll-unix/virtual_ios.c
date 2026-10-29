@@ -19772,6 +19772,170 @@ static void *find_reserved_free_area_outside_preloader( void *start, void *end, 
     return find_reserved_free_area( start, end, size, top_down, align_mask );
 }
 
+#ifdef WINE_IOS
+/* Madeira: [va-blocker] 32-bit programs running out of room in their 4 GB window.
+ *
+ * Seen on iOS 18.5 and later (Hotline Miami 2, Metro: Last Light, Terraria,
+ * Left 4 Dead): after a game has loaded and freed DLLs for a while, a later
+ * allocation or DLL load in its 32-bit window fails with STATUS_NO_MEMORY
+ * although the window still has plenty of free room.
+ *
+ * Some ranges a program maps and frees come back from munmap as a kernel
+ * region of MAXIMUM protection none ("0/0" in vm_region) instead of a hole,
+ * and that region stays there. A MAP_FIXED over a range that holds one fails
+ * with ENOMEM, and so does the PROT_NONE re-reservation unmap_area makes when
+ * the view is freed. Wine's free-range table never hears of it, so the search
+ * above hands out the same range again and again, the MAP_FIXED fails each
+ * time, and for a request confined to a guest window nothing else can place
+ * it: map_free_area only probes without overwriting, which our own window
+ * reservation always refuses (EEXIST).
+ *
+ * So, only after the MAP_FIXED of a window request failed with ENOMEM, ask
+ * the kernel which regions of maximum protection none lie in the refused
+ * range, and search again past them: bottom-up from the blocker's end,
+ * top-down below its start. Nothing is lost by the move: any range that
+ * starts closer to the refused one would overlap the same blocker. A
+ * placement that succeeds today never gets here. At most
+ * IOS_VA_BLOCKER_STEPS moves per request; the walk stops at the first
+ * placement, at an error other than ENOMEM, and at a refusal no blocker
+ * explains. env.MADEIRA_VA_BLOCKER_SKIP = 0 turns it off.
+ *
+ * va-blocker-test:begin (tests/host/check-va-blocker-skip.py compiles this) */
+#define IOS_VA_BLOCKER_STEPS 64
+
+/* The kernel region holding addr, or the next one above it: [*start, *end)
+ * and its maximum protection. 0 when there is none. */
+typedef int (*ios_region_query_fn)( ULONG_PTR addr, ULONG_PTR *start, ULONG_PTR *end, int *max_prot );
+
+/* The first run of adjacent regions of maximum protection none that overlaps
+ * [addr, addr + size), with the real bounds of the run (it may begin below
+ * addr, and it is followed past addr + size). 0 when the range holds none. */
+static int ios_va_find_blocker( ULONG_PTR addr, size_t size, ios_region_query_fn query,
+                                ULONG_PTR *blk_start, ULONG_PTR *blk_end )
+{
+    ULONG_PTR pos = addr, end = addr + size, start = 0, stop = 0;
+    unsigned int regions = 0;
+
+    while (regions++ < 4096)
+    {
+        ULONG_PTR r_start, r_end;
+        int max_prot;
+
+        if (!stop && pos >= end) break;
+        if (!query( pos, &r_start, &r_end, &max_prot )) break;
+        if (r_end <= pos) break;   /* a query that does not move on */
+        if (stop ? r_start > stop : r_start >= end) break;   /* a gap after the run, or past the range */
+        if (max_prot)
+        {
+            if (stop) break;   /* the run is over */
+        }
+        else
+        {
+            if (!stop) start = r_start;
+            stop = r_end;
+        }
+        pos = r_end;
+    }
+    if (!stop) return 0;
+    *blk_start = start;
+    *blk_end = stop;
+    return 1;
+}
+
+/* Where the next search goes after a refusal at `refused` that the run
+ * [blk_start, blk_end) explains: the new limits in *low / *high. 0 when no
+ * room is left between the limits for size bytes. */
+static int ios_va_limits_past_blocker( ULONG_PTR refused, size_t size, int top_down,
+                                       ULONG_PTR blk_start, ULONG_PTR blk_end,
+                                       ULONG_PTR *low, ULONG_PTR *high )
+{
+    if (top_down)
+    {
+        if (blk_start >= refused + size || blk_start >= *high) return 0;   /* never moves up */
+        if (blk_start < *low || blk_start - *low < size) return 0;
+        *high = blk_start;
+    }
+    else
+    {
+        if (blk_end <= refused || blk_end <= *low) return 0;   /* never moves down */
+        if (blk_end >= *high || *high - blk_end < size) return 0;
+        *low = blk_end;
+    }
+    return 1;
+}
+/* va-blocker-test:end */
+
+static int ios_va_blocker_skip_enabled(void)
+{
+    static int enabled = -1;
+    int on = __atomic_load_n( &enabled, __ATOMIC_ACQUIRE );
+
+    if (on < 0)
+    {
+        const char *s = getenv( "MADEIRA_VA_BLOCKER_SKIP" );
+        on = !(s && !strcmp( s, "0" ));
+        __atomic_store_n( &enabled, on, __ATOMIC_RELEASE );
+    }
+    return on;
+}
+
+static int ios_va_region_query( ULONG_PTR addr, ULONG_PTR *start, ULONG_PTR *end, int *max_prot )
+{
+    mach_vm_address_t a = addr;
+    mach_vm_size_t sz = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+
+    if (mach_vm_region( mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                        (vm_region_info_t)&info, &count, &obj ) != KERN_SUCCESS)
+        return 0;
+    *start = (ULONG_PTR)a;
+    *end = (ULONG_PTR)(a + sz);
+    *max_prot = info.max_protection;
+    return 1;
+}
+
+static void *find_reserved_area_range( void *limit_low, void *limit_high, size_t size, int top_down,
+                                       size_t align_mask );
+
+/* The MAP_FIXED at `refused` failed with ENOMEM: search again past the
+ * blockers (see above). Returns the mapped range or NULL.
+ * virtual_mutex must be held by caller. */
+static void *ios_va_blocker_skip( void *refused, void *limit_low, void *limit_high, size_t size,
+                                  int top_down, int unix_prot, size_t align_mask )
+{
+    static unsigned long skip_n;
+    ULONG_PTR low = (ULONG_PTR)limit_low, high = (ULONG_PTR)limit_high;
+    ULONG_PTR blk_start = 0, blk_end = 0;
+    void *first = refused, *ptr = NULL;
+    unsigned int steps = 0;
+    int err = ENOMEM;
+
+    while (steps < IOS_VA_BLOCKER_STEPS)
+    {
+        if (!ios_va_find_blocker( (ULONG_PTR)refused, size, ios_va_region_query, &blk_start, &blk_end )) break;
+        if (!ios_va_limits_past_blocker( (ULONG_PTR)refused, size, top_down, blk_start, blk_end, &low, &high )) break;
+        steps++;
+        if (!(ptr = find_reserved_area_range( (void *)low, (void *)high, size, top_down, align_mask ))) break;
+        if (anon_mmap_fixed( ptr, size, unix_prot, 0 ) == ptr) break;
+        err = errno;
+        refused = ptr;
+        ptr = NULL;
+        if (err != ENOMEM) break;
+    }
+    if (++skip_n <= 16 || !(skip_n % 256))
+        dprintf( 2, "[va-blocker] #%lu MAP_FIXED %p+0x%lx refused (ENOMEM), %s: %u step(s) past kernel "
+                    "regions of maximum protection none, the last %p-%p; %s (MADEIRA_VA_BLOCKER_SKIP=0 "
+                    "turns this off)\n",
+                 skip_n, first, (unsigned long)size, top_down ? "top-down" : "bottom-up", steps,
+                 (void *)blk_start, (void *)blk_end,
+                 ptr ? "placed past them" : err != ENOMEM ? "NOT placed (another error)" : "NOT placed" );
+    if (!ptr) errno = err;
+    return ptr;
+}
+#endif /* WINE_IOS */
+
 /***********************************************************************
  *           map_reserved_area
  *
@@ -19805,8 +19969,10 @@ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size, 
     return r;
 }
 
-static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t size, int top_down,
-                                      int unix_prot, size_t align_mask )
+/* The free range map_reserved_area_inner would map, NULL when none fits.
+ * virtual_mutex must be held by caller. */
+static void *find_reserved_area_range( void *limit_low, void *limit_high, size_t size, int top_down,
+                                       size_t align_mask )
 {
     void *ptr = NULL;
     struct reserved_area *area;
@@ -19863,7 +20029,24 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
             if (ptr) break;
         }
     }
-    if (ptr && anon_mmap_fixed( ptr, size, unix_prot, 0 ) != ptr) ptr = NULL;
+    return ptr;
+}
+
+static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t size, int top_down,
+                                      int unix_prot, size_t align_mask )
+{
+    void *ptr = find_reserved_area_range( limit_low, limit_high, size, top_down, align_mask );
+
+    if (ptr && anon_mmap_fixed( ptr, size, unix_prot, 0 ) != ptr)
+    {
+#ifdef WINE_IOS
+        /* Madeira: [va-blocker] -- see ios_va_blocker_skip */
+        if (errno == ENOMEM && ios_wow_limits_in_window( (ULONG_PTR)limit_low, (ULONG_PTR)limit_high - 1 ) &&
+            ios_va_blocker_skip_enabled())
+            return ios_va_blocker_skip( ptr, limit_low, limit_high, size, top_down, unix_prot, align_mask );
+#endif
+        ptr = NULL;
+    }
     return ptr;
 }
 
