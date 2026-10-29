@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <strings.h>   /* strncasecmp, ds3-coop local-write-target */
 #include <fcntl.h>   /* ml1003: O_RDONLY for the escape-hatch read */
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -1134,6 +1135,137 @@ int read_process_memory( struct process *process, client_ptr_t ptr, data_size_t 
     return (ret == KERN_SUCCESS);
 }
 
+#ifdef WINE_IOS
+/* Garry's Mod: Chromium's sandbox broker (in gmod.exe) prepares each sandboxed
+ * child (gmod.exe --type=gpu-process, ...) by writing into it before resuming
+ * it: the shared-section handle and other sandbox variables, at the same
+ * guest addresses as in the broker.  Writes into other pseudo-processes are
+ * denied here (get_process_port() above, and ml1003 in read_process_memory),
+ * so the broker's setup failed and it terminated every child with exit
+ * code 1 ("The GPU process has crashed"), and the HTML menu never loaded.
+ *
+ * Allowed only when gmod.exe, a 32-bit process, writes into a 32-bit child of
+ * its own in this Unix process.  wow64_NtWriteVirtualMemory has already moved
+ * the address into the child's window (target-window rule), so `ptr` is a host
+ * address.  The write is one mach_vm_write on our own task and never takes the
+ * task_suspend() fallback below: suspending our own task would stop this
+ * server.  madeira.cfg `no-child-write = 1` turns it off. */
+static int ios_is_gmod_image( const struct process *process )
+{
+    static const WCHAR name[] = {'\\','g','m','o','d','.','e','x','e'};
+    data_size_t i, n = ARRAY_SIZE(name), len;
+
+    if (!process->image) return 0;
+    len = process->imagelen / sizeof(WCHAR);
+    if (len < n) return 0;
+    for (i = 0; i < n; i++)
+    {
+        WCHAR c = process->image[len - n + i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c == '/') c = '\\';
+        if (c != name[i]) return 0;
+    }
+    return 1;
+}
+
+static int ios_child_write_allowed( const struct process *process )
+{
+    static int off = -1;
+    const struct process *writer = current ? current->process : NULL;
+
+    if (!writer || writer == process || process->unix_pid != getpid()) return 0;
+    if (writer->machine != IMAGE_FILE_MACHINE_I386 || process->machine != IMAGE_FILE_MACHINE_I386) return 0;
+    if (process->parent_id != writer->id || !ios_is_gmod_image( writer )) return 0;
+    if (off < 0)
+    {
+        off = madeira_cfg_bool( "no-child-write", 0 );
+        fprintf( stderr, "[child-write] gmod.exe writes into its own 32-bit children: %s\n",
+                 off ? "DISABLED by no-child-write" : "ENABLED" );
+    }
+    return !off;
+}
+
+/* ds3-coop: opt-in local writes for mod launchers, the write side of ml1003.
+ * A mod launcher (DS3 Seamless Co-op) writes its DLL path into the game it
+ * started, then runs LoadLibraryA there; denied, the game gets
+ * LoadLibraryA(".dll").  Off by default: get_process_port() records that
+ * enabling writes for every caller regressed Steam.  Only a target whose exe
+ * is listed in madeira.cfg "local-write-target" (';'-separated names, e.g.
+ * darksoulsiii.exe) gets them, so Steam, CEF, crashpad and debugger attach
+ * keep the ACCESS_DENIED they were tuned to.  Written through
+ * ios_local_child_write, so it never takes the task_suspend fallback. */
+static int ios_local_write_target( const struct process *process )
+{
+    static char targets[256];
+    static int targets_read;
+    char name[64];
+    int n = 0, k, base = 0, len;
+    const char *t;
+
+    if (!current || process->unix_pid != getpid() || !process->image) return 0;
+    if (!targets_read)
+    {
+        targets_read = 1;
+        if (!madeira_cfg_get( "local-write-target", targets, sizeof(targets) )) targets[0] = 0;
+        fprintf( stderr, "ds3-coop: local pseudo-process writes %s%s\n",
+                 targets[0] ? "ENABLED for " : "denied (local-write-target unset)", targets );
+    }
+    if (!targets[0]) return 0;
+    len = process->imagelen / sizeof(WCHAR);
+    for (k = 0; k < len; k++) if (process->image[k] == '\\' || process->image[k] == '/') base = k + 1;
+    for (k = base; k < len && n < (int)sizeof(name) - 1; k++)
+    {
+        WCHAR c = process->image[k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        name[n++] = c < 128 ? (char)c : '?';
+    }
+    name[n] = 0;
+    if (!n) return 0;
+    for (t = targets; *t; )
+    {
+        const char *e = strchr( t, ';' );
+        int tl = e ? (int)(e - t) : (int)strlen( t );
+        if (tl == n && !strncasecmp( t, name, n )) return 1;
+        if (!e) break;
+        t = e + 1;
+    }
+    return 0;
+}
+
+static int ios_local_child_write( struct process *process, client_ptr_t ptr, data_size_t size,
+                                  const char *src, data_size_t *written )
+{
+    static unsigned int n_log;
+    mach_vm_offset_t data;
+    kern_return_t ret;
+
+    if ((mach_vm_address_t)ptr != ptr)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return 0;
+    }
+    if (!size) return 1;
+    if (posix_memalign( (void **)&data, get_page_size(), size ))
+    {
+        set_error( STATUS_NO_MEMORY );
+        return 0;
+    }
+    memcpy( (void *)data, src, size );
+    ret = mach_vm_write( mach_task_self(), (mach_vm_address_t)ptr, data, (mach_msg_type_number_t)size );
+    free( (void *)data );
+    if (n_log++ < 64)
+        fprintf( stderr, "[child-write] #%u pid=%04x -> pid=%04x addr=%p size=0x%x ret=%d\n",
+                 n_log, current->process->id, process->id, (void *)(uintptr_t)ptr, size, ret );
+    if (ret != KERN_SUCCESS)
+    {
+        mach_set_error( ret );
+        return 0;
+    }
+    if (written) *written = size;
+    return 1;
+}
+#endif
+
 /* write data to a process memory space */
 int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t size, const char *src,
                           data_size_t *written )
@@ -1144,6 +1276,12 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
 
     if (written) *written = 0;
 
+#ifdef WINE_IOS
+    if (!process_port && ios_child_write_allowed( process ))
+        return ios_local_child_write( process, ptr, size, src, written );
+    if (!process_port && ios_local_write_target( process ))
+        return ios_local_child_write( process, ptr, size, src, written );
+#endif
     if (!process_port)
     {
         set_error( STATUS_ACCESS_DENIED );
