@@ -393,6 +393,26 @@ final class SteamOwnedLibrary: ObservableObject {
             .write(to: Self.cacheURL, options: .atomic)
     }
 
+    /// DLC names by app ID, asked of Steam once per DLC while the app runs.
+    private var dlcNames: [Int: String] = [:]
+
+    /// The names of DLC apps (Game details › Steam › Installed DLC): known ones at
+    /// once, the others asked of Steam (signed in, no session running), at most 32.
+    func names(ofDLC ids: [Int]) async -> [Int: String] {
+        var result: [Int: String] = [:]
+        for id in ids {
+            if let name = dlcNames[id] ?? game(id)?.name { result[id] = name }
+        }
+        guard Self.enabled, signedIn, !inSession else { return result }
+        for id in ids.filter({ result[$0] == nil && $0 > 0 && $0 <= Int(UInt32.max) }).prefix(32) {
+            guard let info = try? await fetcher.fetchAppInfo(appID: UInt32(id)), !info.name.isEmpty else { continue }
+            let name = String(info.name.prefix(200))
+            dlcNames[id] = name
+            result[id] = name
+        }
+        return result
+    }
+
     /// Steam's launch configuration for an owned app, for "Start with: The game"
     /// (SteamDirectStart): from the cached library, else asked of Steam once over the
     /// app's own connection (signed in, no session running) and kept in the cache.
