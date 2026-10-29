@@ -442,7 +442,7 @@ struct ExternalDrivesSection: View {
                     Button("Find games on \(folder.name)") { scanning = folder }
                 }
             }
-            Button("Add drive or folder") { picking = true }
+            Button("Add drive or folder") { FolderPickerSigning.willPick(); picking = true }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
@@ -456,6 +456,7 @@ struct ExternalDrivesSection: View {
             Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
         }
         .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
+            FolderPickerSigning.didPick(answered: true)
             do {
                 try drives.add(try result.get()); error = nil
                 SteamGamesModel.shared.refresh()
@@ -463,6 +464,8 @@ struct ExternalDrivesSection: View {
                 scanning = drives.folders.last
             } catch { self.error = error.localizedDescription }
         }
+        // Next turn of the main loop, after the answer if there was one.
+        .onChange(of: picking) { _, open in if !open { DispatchQueue.main.async { FolderPickerSigning.didPick(answered: false) } } }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
             Button("Remove", role: .destructive) { drives.remove(folder.id) }
@@ -472,6 +475,102 @@ struct ExternalDrivesSection: View {
         .sheet(item: $scanning) { folder in
             if let root = drives.mounted[folder.id] { ExternalGamesSheet(folder: folder, root: root.resolvingSymlinksInPath()) }
         }
+    }
+}
+
+/// The folder picker's Open button does nothing when this copy is signed with a
+/// profile whose App ID differs from its bundle ID (KravaSigner and other signers
+/// that keep the bundle ID do this). The picker tells fileproviderd which app gets
+/// the folder by DOCConfiguration's hostIdentifier, which it fills in with the
+/// bundle ID; fileproviderd only grants the folder to the App ID the process is
+/// really signed with, so the grant fails and the pick is dropped without calling
+/// back (Cancel still works). While Madeira's own folder picker is open, the picker
+/// is given the signed App ID instead. Nothing changes on a copy whose bundle ID
+/// already is its App ID, and `external-picker-fix = 0` in madeira.cfg turns it off.
+/// The folder is still opened in place, never copied.
+enum FolderPickerSigning {
+    /// The signed App ID when it differs from the bundle ID, else nil.
+    static let signedAppID: String? = {
+        guard let signed = signedAppIdentifier() ?? SigningProfile.embedded?.appIdentifier,
+              signed != Bundle.main.bundleIdentifier else { return nil }
+        return signed
+    }()
+
+    private static let lock = NSLock()
+    private static var open = false
+    private static var answered = false
+    private static var installed = false
+
+    /// Right before the picker is shown, so it is in effect when iOS builds it.
+    static func willPick() {
+        // Default on. 0: the folder picker is left as iOS builds it, so on a copy signed with a different App ID
+        // its Open button does nothing again. Only matters on such a copy; read each time the picker opens.
+        guard let signedAppID, MadeiraConfig.bool("external-picker-fix", default: true) else { return }
+        lock.lock(); defer { lock.unlock() }
+        if !installed { installed = install(signedAppID) }
+        open = true; answered = false
+        LogStore.shared.log("[external] folder picker opened with the signed App ID (it differs from the bundle ID)")
+    }
+
+    /// When the picker answers, and again when it closes.
+    static func didPick(answered now: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard open else { return }
+        if now { answered = true; return }
+        open = false
+        if !answered { LogStore.shared.log("[external] folder picker closed without a folder") }
+    }
+
+    /// The signed App ID in place of the bundle ID while the picker is open; any
+    /// other value, and every value at other times, is kept.
+    private static func host(_ value: NSString?, signed: String) -> NSString? {
+        lock.lock(); defer { lock.unlock() }
+        guard open, let value, value as String == Bundle.main.bundleIdentifier else { return value }
+        return signed as NSString
+    }
+
+    /// Hooks DOCConfiguration's hostIdentifier setter and getter. Only methods the
+    /// class defines itself are replaced, so nothing it inherits changes. False when
+    /// the class is not loaded yet, to try again at the next pick.
+    private static func install(_ signed: String) -> Bool {
+        if NSClassFromString("DOCConfiguration") == nil {
+            for framework in ["DocumentManager", "DocumentManagerCore"] {
+                _ = dlopen("/System/Library/PrivateFrameworks/\(framework).framework/\(framework)", RTLD_LAZY)
+            }
+        }
+        guard let cls = NSClassFromString("DOCConfiguration") else {
+            LogStore.shared.log("[external] folder picker: DOCConfiguration not found, picker left as it is")
+            return false
+        }
+        var count: UInt32 = 0
+        guard let list = class_copyMethodList(cls, &count) else { return true }
+        defer { free(list) }
+        let methods = (0..<Int(count)).map { list[$0] }
+        func own(_ name: String) -> (Method, Selector)? {
+            let sel = NSSelectorFromString(name)
+            return methods.first { method_getName($0) == sel }.map { ($0, sel) }
+        }
+        var hooked: [String] = []
+        if case let (method, sel)? = own("setHostIdentifier:") {
+            typealias Setter = @convention(c) (AnyObject, Selector, NSString?) -> Void
+            let original = unsafeBitCast(method_getImplementation(method), to: Setter.self)
+            let body: @convention(block) (AnyObject, NSString?) -> Void = { object, value in
+                original(object, sel, host(value, signed: signed))
+            }
+            method_setImplementation(method, imp_implementationWithBlock(body))
+            hooked.append("set")
+        }
+        if case let (method, sel)? = own("hostIdentifier") {
+            typealias Getter = @convention(c) (AnyObject, Selector) -> NSString?
+            let original = unsafeBitCast(method_getImplementation(method), to: Getter.self)
+            let body: @convention(block) (AnyObject) -> NSString? = { object in
+                host(original(object, sel), signed: signed)
+            }
+            method_setImplementation(method, imp_implementationWithBlock(body))
+            hooked.append("get")
+        }
+        LogStore.shared.log("[external] folder picker host hooks: \(hooked.isEmpty ? "none" : hooked.joined(separator: "+"))")
+        return true
     }
 }
 
