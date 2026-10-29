@@ -1,0 +1,95 @@
+Windows/WOW64 iOS: trap and untrap self-modifying-code pages per 16 KB host page
+
+The iOS host page is 16 KB and Wine gives it the union of its four 4 KB
+pages' protections. FEX armed its write trap (PAGE_EXECUTE_READ) on single
+4 KB pages, so a host page with one armed and three writable 4 KB pages
+stayed writable: writes to the armed page never faulted and FEX kept running
+stale translations. The Escapists 2 (32-bit Unity, MADEIRA_WOW_RWX_PLAIN=1)
+rewrote one call site ~40,000 times a second. For the WOW64 module on iOS,
+traps are now armed and released for whole host pages, and a write fault
+invalidates the whole host page.
+
+Applies on top of 0001 and 0002, on willfaust/FEX 35e8f36 (the build line's
+pin). The rebuilt WOW64 module is app/Madeira/aarch64-windows/xtajit.dll,
+built from 35e8f36 + 0001 + 0002 + 0003 with build/fex-wow64/build.sh's
+options. Not for FEX-Emu.
+
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 7f0ed3df1..6d9d14b22 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -27,6 +27,11 @@ extern "C" void ios_fex_mono_arm(uint64_t Base, uint64_t End);
+ extern "C" int IosSubfloorEnum(int Index, uint64_t* Low, uint64_t* Real, uint64_t* Size);  // ml1207, IosJitAlias.cpp
+ #endif
+ 
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++// MADEIRA: iOS host page size; Wine's per-host-page protection is the union of its 4 KB pages.
++static constexpr uint64_t MADEIRA_HOST_PAGE_SIZE = 0x4000;
++#endif
++
+ namespace FEX::Windows {
+ uint64_t InvalidationTracker::OwnedSharedMutex::Self() {
+ #ifdef FEX_IOS_HOST
+@@ -519,6 +524,39 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+   }(FaultAddress);
+ 
+   if (NeedsInvalidate) {
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++    /* MADEIRA wow64 16K: the host page is 16 KB and Wine gives it the union of its four 4 KB
++     * pages' protections, so one 4 KB page can only stay trapped while all four are. Traps are
++     * armed per host page (ProtectRWXIntervalsInternal), so a write fault anywhere in the host
++     * page invalidates and untraps all of it. Untrapping only the faulting 4 KB page left the
++     * host page read-only (siblings still trapped) and the store faulted forever; arming only
++     * one 4 KB page left the host page writable, so writes to it were never seen and stale
++     * translations ran on (The Escapists 2: Mono's call patch looped ~40,000 times a second). */
++    const uint64_t HostPageBase = FaultAddress & ~(MADEIRA_HOST_PAGE_SIZE - 1);
++    {
++      std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
++
++      InvalidateIntervalInternalLocked(HostPageBase, MADEIRA_HOST_PAGE_SIZE);
++
++      for (uint64_t Page = HostPageBase; Page < HostPageBase + MADEIRA_HOST_PAGE_SIZE; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
++        const auto [Enclosed, PageUntrapProt] = [&]() -> std::pair<bool, ULONG> {
++          std::shared_lock Lock(IntervalsLock);
++          if (!RWXIntervals.Query(Page).Enclosed) {
++            return {false, 0};
++          }
++          return {true, GetUntrapProt(Page)};
++        }();
++        if (!Enclosed) {
++          continue;
++        }
++        ULONG TmpProt;
++        void* TmpAddress = reinterpret_cast<void*>(Page);
++        SIZE_T TmpSize = FEXCore::Utils::FEX_PAGE_SIZE;
++        NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PageUntrapProt, &TmpProt);
++      }
++    }
++    (void)UntrapProt;
++#else
+     // IntervalsLock cannot be held during invalidation
+     {
+       std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
+@@ -531,6 +569,7 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+       SIZE_T TmpSize = 1;
+       NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+     }
++#endif
+     DetectMonoBackpatcherBlock(Thread, HostPc);
+     return true;
+   }
+@@ -832,6 +871,14 @@ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uin
+ }
+ 
+ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t Size, bool ForWriteLocked) {
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++  // MADEIRA wow64 16K: trap and untrap whole host pages, see HandleRWXAccessViolation.
++  {
++    const uint64_t RoundedEnd = (Address + Size + MADEIRA_HOST_PAGE_SIZE - 1) & ~(MADEIRA_HOST_PAGE_SIZE - 1);
++    Address &= ~(MADEIRA_HOST_PAGE_SIZE - 1);
++    Size = RoundedEnd - Address;
++  }
++#endif
+   const auto End = Address + Size;
+   std::shared_lock Lock(IntervalsLock);
+ 
