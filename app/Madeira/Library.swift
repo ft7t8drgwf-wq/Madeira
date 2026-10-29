@@ -797,7 +797,6 @@ final class LibraryModel: ObservableObject {
     @Published var dockGameEnded = false
     private var dockGameEndedAt: Date?
     private var quitRequestedAt: Date?
-    private var smallPoolNoted = false
     @Published var launching = false
     @Published var overlayFields = ["FPS", "Frame time", "RAM", "Battery"]
     private var launchPresent: UInt64 = 0

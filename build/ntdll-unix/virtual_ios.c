@@ -26608,25 +26608,6 @@ NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack )
     return ret;
 }
 
-/* ml1353: the host page's maximum protection (VM_PROT_*), or -1 when no region
- * holds addr; *prot gets the current protection. bus_handler uses it to tell a
- * pool page that lost EXECUTE for good. One mach_vm_region call, no locks
- * (signal context). */
-int ios_addr_max_prot( const void *addr, int *prot )
-{
-    mach_vm_address_t a = (mach_vm_address_t)(uintptr_t)addr;
-    mach_vm_size_t rsz = 0;
-    vm_region_basic_info_data_64_t inf;
-    mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t obj = MACH_PORT_NULL;
-
-    if (mach_vm_region( mach_task_self(), &a, &rsz, VM_REGION_BASIC_INFO_64,
-                        (vm_region_info_t)&inf, &cnt, &obj ) != KERN_SUCCESS) return -1;
-    if (a > (mach_vm_address_t)(uintptr_t)addr) return -1;
-    if (prot) *prot = inf.protection;
-    return inf.max_protection;
-}
-
 /* iOS-Madeira ml420 (#69): BUS self-heal support. ml419's fatal chain began
  * with a committed, plain-READ libcef .rdata page whose host protection had
  * been stripped BEHIND wine's back (no guest NtProtectVirtualMemory touched
