@@ -24550,6 +24550,79 @@ done:
 }
 
 
+#ifdef WINE_IOS
+/* madeira-bcd sysx64-image: env.MADEIRA_SYSX64_IMAGE = 1 (opt-in, per game). On
+ * Windows on ARM, system32's DLLs are ARM64X: an x64 program that maps one
+ * itself gets code it can call. Here system32 holds the pure ARM64 builds and
+ * the x64-callable (ARM64EC) builds live in C:\windows\sysx64, where the
+ * loader's mixed-arch fallback finds them -- but a program that maps the file
+ * on its own gets the ARM64 one. Black Ops III (2026-10-19) maps
+ * system32\gdi32.dll that way, without a loader name, and calls its
+ * GdiDllInitialize: ARM64 code decoded as x64, "Invalid instruction in entry
+ * block", c0000005. With the switch, an x64 process's own map of a pure ARM64
+ * system32 image takes the sysx64 file of the same name when there is one.
+ * A map that asks for write access keeps the file it named. Returns a new
+ * image section handle for that file, or 0. */
+static HANDLE ios_sysx64_image_section( const UNICODE_STRING *nt_name, const struct pe_image_info *pi,
+                                         ACCESS_MASK access )
+{
+    static const WCHAR dir[] = {'\\','w','i','n','d','o','w','s','\\','s','y','s','t','e','m','3','2','\\'};
+    static const WCHAR x64[] = {'s','y','s','x','6','4'};
+    static int on = -1, said;
+    const USHORT dlen = ARRAY_SIZE(dir), len = nt_name->Length / sizeof(WCHAR);
+    WCHAR path[MAX_PATH];
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE file = 0, section = 0;
+    USHORT i, j, at = 0;
+    NTSTATUS status;
+
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_SYSX64_IMAGE" );
+        on = e && e[0] == '1' && !e[1];
+    }
+    if (!on || NtCurrentTeb()->Tib.ArbitraryUserPointer || (access & SECTION_MAP_WRITE)) return 0;
+    if (pi->machine != IMAGE_FILE_MACHINE_ARM64 || pi->is_hybrid) return 0;
+    if (ios_cur_image_info_machine() != IMAGE_FILE_MACHINE_AMD64) return 0;
+    if (!nt_name->Buffer || len <= dlen || len + 2 >= ARRAY_SIZE(path)) return 0;
+    for (i = 0; i + dlen < len && !at; i++)
+    {
+        for (j = 0; j < dlen; j++)
+        {
+            WCHAR c = nt_name->Buffer[i + j];
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c != dir[j]) break;
+        }
+        if (j == dlen) at = i + 9;   /* index of "system32", after "\windows\" */
+    }
+    if (!at) return 0;
+    for (i = at + 9; i < len; i++) if (nt_name->Buffer[i] == '\\') return 0;   /* a file right in system32 */
+
+    /* the same path with "system32" replaced by "sysx64" */
+    memcpy( path, nt_name->Buffer, at * sizeof(WCHAR) );
+    memcpy( path + at, x64, sizeof(x64) );
+    memcpy( path + at + ARRAY_SIZE(x64), nt_name->Buffer + at + 8, (len - at - 8) * sizeof(WCHAR) );
+    us.Buffer = path;
+    us.Length = us.MaximumLength = (len - 2) * sizeof(WCHAR);
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtOpenFile( &file, GENERIC_READ | GENERIC_EXECUTE | SYNCHRONIZE, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_SYNCHRONOUS_IO_NONALERT );
+    if (!status)
+    {
+        status = NtCreateSection( &section, SECTION_QUERY | SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+                                  NULL, NULL, PAGE_EXECUTE_READ, SEC_IMAGE, file );
+        NtClose( file );
+        if (status) section = 0;
+    }
+    if (said++ < 16)
+        dprintf( 2, "[sysx64-image] x64 map of ARM64 %s: %s %s (status 0x%x)\n", debugstr_us(nt_name),
+                 section ? "mapping" : "keeping it, no", debugstr_us(&us), (unsigned)status );
+    return section;
+}
+#endif
+
 /***********************************************************************
  *             virtual_map_section
  *
@@ -24618,6 +24691,19 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     {
         SECTION_IMAGE_INFORMATION info;
         ULONG64 prev = 0;
+#ifdef WINE_IOS
+        HANDLE sysx64 = ios_sysx64_image_section( &nt_name, image_info, access );
+
+        if (sysx64)   /* madeira-bcd sysx64-image: map the x64-callable build instead */
+        {
+            if (shared_file) NtClose( shared_file );
+            free( image_info );
+            res = virtual_map_section( sysx64, addr_ptr, limit_low, limit_high, commit_size,
+                                       offset_ptr, size_ptr, alloc_type, protect, machine );
+            NtClose( sysx64 );
+            return res;
+        }
+#endif
 
         if (NtCurrentTeb64())
         {
