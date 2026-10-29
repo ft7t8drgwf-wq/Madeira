@@ -1,0 +1,206 @@
+FEXCore: log the CPU probes a 32-bit program makes ([cpu-probe] lines)
+
+Diagnostic for Steam's CEG step (Black Ops 1). Logs, on the error channel:
+- the guest cycle counter rate (host counter and SmallTSCScale shift), once per process;
+- each distinct cpuid function/leaf once, with the values the guest gets;
+- the first 48 compiled sites of cpuid, rdtsc, rdtscp, sgdt, sidt, smsw, int,
+  and unimplemented, privileged or invalid opcodes, with the guest address.
+
+Applies to willfaust/FEX f59cab9 (the pinned FEX). The rebuilt WOW64 module is
+app/Madeira/aarch64-windows/xtajit.dll (build/fex-wow64/build.sh). Not for FEX-Emu.
+
+diff --git a/FEXCore/Source/Interface/Core/CPUID.cpp b/FEXCore/Source/Interface/Core/CPUID.cpp
+index 9c305e8..5b0ea4a 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.cpp
++++ b/FEXCore/Source/Interface/Core/CPUID.cpp
+@@ -11,6 +11,8 @@ $end_info$
+ #include "Interface/Core/CPUID.h"
+ 
+ #include <FEXCore/Config/Config.h>
++
++#include <atomic>
+ #include <FEXCore/Core/CPUID.h>
+ #include <FEXCore/Core/HostFeatures.h>
+ #include <FEXCore/Utils/FileLoading.h>
+@@ -1377,4 +1379,26 @@ CPUIDEmu::CPUIDEmu(const FEXCore::Context::ContextImpl* ctx)
+                     "subscript the table with the host cpu index; indices are wrapped into range",
+                     PerCPUData.size(), GetCPUID(), SupportsCPUIndexInTPIDRRO ? "TPIDRRO_EL0" : "getcpu");
+ }
++void CPUIDEmu::ProbeLogResult(uint32_t Function, uint32_t Leaf, const FEXCore::CPUID::FunctionResults& Res) {
++  static std::atomic<uint64_t> Seen[128];
++  const uint64_t Key = ((uint64_t(Function) << 32) | Leaf) + 1;
++  for (auto& Slot : Seen) {
++    uint64_t Current = Slot.load(std::memory_order_relaxed);
++    if (Current == Key) {
++      return;
++    }
++    if (Current == 0) {
++      if (!Slot.compare_exchange_strong(Current, Key)) {
++        if (Current == Key) {
++          return;
++        }
++        continue;
++      }
++      LogMan::Msg::EFmt("[cpu-probe] cpuid fn={:#x} leaf={:#x} -> eax={:08x} ebx={:08x} ecx={:08x} edx={:08x}", Function, Leaf, Res.eax,
++                        Res.ebx, Res.ecx, Res.edx);
++      return;
++    }
++  }
++}
++
+ } // namespace FEXCore
+diff --git a/FEXCore/Source/Interface/Core/CPUID.h b/FEXCore/Source/Interface/Core/CPUID.h
+index d51b454..f02f4f9 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.h
++++ b/FEXCore/Source/Interface/Core/CPUID.h
+@@ -37,6 +37,12 @@ public:
+   constexpr static uint64_t CACHELINE_SIZE = 64;
+ 
+   FEXCore::CPUID::FunctionResults RunFunction(uint32_t Function, uint32_t Leaf) const {
++    const auto Res = RunFunctionUnlogged(Function, Leaf);
++    ProbeLogResult(Function, Leaf, Res);
++    return Res;
++  }
++
++  FEXCore::CPUID::FunctionResults RunFunctionUnlogged(uint32_t Function, uint32_t Leaf) const {
+     if (Function < Primary.size()) {
+       const auto Handler = Primary[Function];
+       return (this->*Handler)(Leaf);
+@@ -57,6 +63,11 @@ public:
+     return Function_Reserved(Leaf);
+   }
+ 
++  /* MADEIRA cpu-probe: logs each distinct (function, leaf) pair once with the values the guest
++   * gets, both for leaves the JIT folds at compile time and for ones resolved at run time. Used
++   * to see what Steam's CEG module reads about the CPU. */
++  static void ProbeLogResult(uint32_t Function, uint32_t Leaf, const FEXCore::CPUID::FunctionResults& Res);
++
+   FEXCore::CPUID::FunctionResults RunFunctionName(uint32_t Function, uint32_t Leaf, uint32_t CPU) const {
+     if (Function == 0x8000'0002U) {
+       return Function_8000_0002h(Leaf, WrapCPUIndex(CPU));
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 72bd99e..8924854 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -169,6 +169,8 @@ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
+       ++Config.TSCScale;
+     }
+   }
++  LogMan::Msg::EFmt("[cpu-probe] tsc counter={}Hz scale={} guest={}Hz", FEXCore::GetCycleCounterFrequency(), Config.TSCScale,
++                    FEXCore::GetCycleCounterFrequency() << Config.TSCScale);
+ 
+   // Track atomic TSO emulation configuration.
+   UpdateAtomicTSOEmulationConfig();
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 3c42f47..cd4d308 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -27,10 +27,28 @@ $end_info$
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cstdint>
+ 
+ namespace FEXCore::IR {
+ 
++/* MADEIRA cpu-probe: logs where guest code uses instructions that can tell an emulator from a real
++ * CPU (cpuid, rdtsc, sidt and friends, traps and undefined opcodes), when the JIT compiles them.
++ * Each kind logs its first 48 sites, so a probe from Steam's CEG module shows up as a guest address.
++ * Compiling a block can run more than once, so a site may repeat. */
++enum class ProbeKind : uint8_t { CPUID, RDTSC, RDTSCP, SGDT, SIDT, SMSW, INT, UNIMPLEMENTED, RESTRICTED, INVALID, COUNT };
++
++static void ProbeLogSite(ProbeKind Kind, const X86Tables::DecodedInst* Op) {
++  static constexpr const char* Names[] = {"cpuid",  "rdtsc", "rdtscp",        "sgdt",       "sidt",
++                                          "smsw",   "int",   "unimplemented", "restricted", "invalid"};
++  static std::atomic<uint32_t> Counts[size_t(ProbeKind::COUNT)];
++  const auto N = Counts[size_t(Kind)].fetch_add(1, std::memory_order_relaxed);
++  if (N >= 48) {
++    return;
++  }
++  LogMan::Msg::EFmt("[cpu-probe] site {} #{} rip={:#x} op={:#x} size={}", Names[size_t(Kind)], N + 1, Op->PC, Op->OP, Op->InstSize);
++}
++
+ using X86Tables::OpToIndex;
+ 
+ #define OpcodeArgs [[maybe_unused]] FEXCore::X86Tables::DecodedOp Op
+@@ -1378,6 +1396,7 @@ void OpDispatchBuilder::MOVOffsetOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::CPUIDOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::CPUID, Op);
+   const auto GPRSize = GetGPROpSize();
+ 
+   Ref Src = LoadSourceGPR_WithOpSize(Op, Op->Src[0], GPRSize, Op->Flags);
+@@ -3018,6 +3037,7 @@ void OpDispatchBuilder::EnterOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::SGDTOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::SGDT, Op);
+   auto DestAddress = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
+ 
+   // Store an emulated value in the format of:
+@@ -3041,6 +3061,7 @@ void OpDispatchBuilder::SGDTOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::SIDTOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::SIDT, Op);
+   auto DestAddress = LoadSourceGPR(Op, Op->Dest, Op->Flags, {.LoadData = false});
+ 
+   // See SGDTOp, matches Linux in reported values
+@@ -3057,6 +3078,7 @@ void OpDispatchBuilder::SIDTOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::SMSWOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::SMSW, Op);
+   const bool IsMemDst = DestIsMem(Op);
+ 
+   IR::OpSize DstSize {OpSize::iInvalid};
+@@ -3118,6 +3140,7 @@ OpDispatchBuilder::CycleCounterPair OpDispatchBuilder::CycleCounter(bool SelfSyn
+ }
+ 
+ void OpDispatchBuilder::RDTSCOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::RDTSC, Op);
+   auto Counter = CycleCounter(false);
+   StoreGPRRegister(X86State::REG_RAX, Counter.CounterLow);
+   StoreGPRRegister(X86State::REG_RDX, Counter.CounterHigh);
+@@ -4788,6 +4811,7 @@ void OpDispatchBuilder::LSLOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::INTOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::INT, Op);
+   IR::BreakDefinition Reason;
+   bool SetRIPToNext = false;
+ 
+@@ -5048,6 +5072,7 @@ void OpDispatchBuilder::Prefetch(OpcodeArgs, bool ForStore, bool Stream, uint8_t
+ }
+ 
+ void OpDispatchBuilder::RDTSCPOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::RDTSCP, Op);
+   // RDTSCP is slightly different than RDTSC
+   // IA32_TSC_AUX is returned in RCX
+   // All previous loads are globally visible
+@@ -5135,6 +5160,7 @@ void OpDispatchBuilder::BreakOp(OpcodeArgs, FEXCore::IR::BreakDefinition BreakDe
+ }
+ 
+ void OpDispatchBuilder::UnimplementedOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::UNIMPLEMENTED, Op);
+   BreakOp(Op, FEXCore::IR::BreakDefinition {
+                 .ErrorRegister = 0,
+                 .Signal = SIGILL,
+@@ -5144,6 +5170,7 @@ void OpDispatchBuilder::UnimplementedOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::PermissionRestrictedOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::RESTRICTED, Op);
+   BreakOp(Op, FEXCore::IR::BreakDefinition {
+                 .ErrorRegister = 0,
+                 .Signal = SIGSEGV,
+@@ -5153,6 +5180,7 @@ void OpDispatchBuilder::PermissionRestrictedOp(OpcodeArgs) {
+ }
+ 
+ void OpDispatchBuilder::InvalidOp(OpcodeArgs) {
++  ProbeLogSite(ProbeKind::INVALID, Op);
+   BreakOp(Op, FEXCore::IR::BreakDefinition {
+                 .ErrorRegister = 0,
+                 .Signal = SIGILL,
