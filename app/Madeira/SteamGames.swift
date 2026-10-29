@@ -379,6 +379,8 @@ enum SteamDirectStart {
     @Published private(set) var languages: [Int: String] = [:]
     /// The depots each of those install records holds.
     @Published private(set) var depots: [Int: Set<Int>] = [:]
+    /// The DLC each of those install records names (`dlcappid`), with their bytes.
+    @Published private(set) var installedDLC: [Int: [Int: Int64]] = [:]
     private var scanning = false
     /// A refresh was asked for while a scan ran (an install record was just
     /// written): scan again once it ends.
@@ -406,6 +408,7 @@ enum SteamDirectStart {
         Task.detached(priority: .utility) {
             let found = MadeiraDock.games(drive: drive)
             var builds: [Int: Int] = [:], languages: [Int: String] = [:], depots: [Int: Set<Int>] = [:]
+            var dlc: [Int: [Int: Int64]] = [:]
             for game in found where SteamInstallPaths.isManaged(library: game.library) && game.installed {
                 let steamApps = SteamInstallPaths.steamApps(drive: drive)
                 if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: steamApps) {
@@ -413,8 +416,9 @@ enum SteamDirectStart {
                 }
                 languages[game.id] = SteamInstallFiles.language(appID: game.id, steamApps: steamApps)
                 depots[game.id] = SteamInstallFiles.depots(appID: game.id, steamApps: steamApps)
+                dlc[game.id] = SteamInstallFiles.installedDLC(appID: game.id, steamApps: steamApps)
             }
-            let recorded = builds, recordedLanguages = languages, recordedDepots = depots
+            let recorded = builds, recordedLanguages = languages, recordedDepots = depots, recordedDLC = dlc
             await MainActor.run {
                 self.scanning = false
                 let again = self.rescan
@@ -430,6 +434,7 @@ enum SteamDirectStart {
                 }
                 if self.languages != recordedLanguages { self.languages = recordedLanguages }
                 if self.depots != recordedDepots { self.depots = recordedDepots }
+                if self.installedDLC != recordedDLC { self.installedDLC = recordedDLC }
                 if found.count != self.lastCount {
                     self.lastCount = found.count
                     LogStore.shared.log("[steam-games] installed=\(found.count) ready=\(found.filter(\.installed).count)")
@@ -951,6 +956,8 @@ struct SteamDLCRows: View {
     let appID: Int
     /// The depots the game's install record holds; nil before it is installed.
     var installedDepots: Set<Int>?
+    /// The DLC the install record names (`dlcappid`), with their bytes.
+    var installedDLC: [Int: Int64] = [:]
     @ObservedObject private var steam = SteamOwnedLibrary.shared
     @ObservedObject private var choices = SteamDLCChoices.shared
 
@@ -963,17 +970,23 @@ struct SteamDLCRows: View {
                 Toggle(isOn: Binding(get: { !off.contains(dlc.id) }, set: { choices.set(dlc.id, on: $0, for: appID) })) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(dlc.name)
-                        Text(detail(dlc)).font(.caption).foregroundStyle(.secondary)
+                        let note = detail(dlc)
+                        if !note.isEmpty { Text(note).font(.caption).foregroundStyle(.secondary) }
                     }
                 }
             }
         }
     }
 
+    /// Its size when Steam states one (old games often do not) and, for an
+    /// installed game, whether the install record has it (by its depots or
+    /// by `dlcappid`, with the recorded size).
     private func detail(_ dlc: SteamOwnedDLC) -> String {
-        let size = dlc.downloadBytes > 0 ? "About " + formatBytes(Int64(clamping: dlc.downloadBytes)) : "Size not stated"
-        guard let installedDepots else { return size }
-        return Set(dlc.depots).isSubset(of: installedDepots) ? "Installed" : size + ", not installed"
+        let size = dlc.downloadBytes > 0 ? "About " + formatBytes(Int64(clamping: dlc.downloadBytes)) : nil
+        guard let installedDepots else { return size ?? "" }
+        if let bytes = installedDLC[dlc.id] { return bytes > 0 ? "Installed, " + formatBytes(bytes) : "Installed" }
+        if Set(dlc.depots).isSubset(of: installedDepots) { return "Installed" }
+        return size.map { $0 + ", not installed" } ?? "Not installed"
     }
 }
 
@@ -1427,12 +1440,14 @@ struct SteamEntrySection: View {
             }
             if downloads, SteamOwnedLibrary.dlcEnabled, let owned = steam.game(appID)?.dlc, !owned.isEmpty {
                 let installedDepots = games.depots[appID] ?? []
+                let installedDLC = games.installedDLC[appID] ?? [:]
                 DisclosureGroup("Owned DLC (\(owned.count))") {
-                    SteamDLCRows(appID: appID, installedDepots: installedDepots)
+                    SteamDLCRows(appID: appID, installedDepots: installedDepots, installedDLC: installedDLC)
                     Text("A DLC turned off is left out of the next update or repair; its files stay until you uninstall the game.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if download == nil, let missing = steam.game(appID)?.dlcToDownload(installedDepots: installedDepots), !missing.isEmpty {
+                if download == nil, let missing = steam.game(appID)?.dlcToDownload(installedDepots: installedDepots, installedDLC: Set(installedDLC.keys)),
+                   !missing.isEmpty {
                     Button { steam.repair(appID) } label: {
                         Label(missing.count == 1 ? "Download DLC: \(missing[0].name)" : "Download \(missing.count) DLC",
                               systemImage: "puzzlepiece.extension")

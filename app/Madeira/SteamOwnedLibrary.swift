@@ -78,10 +78,12 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     }
 
     /// The owned DLC left on whose files an installed game lacks (its record
-    /// names none or only some of their depots), for Download DLC on its page.
-    func dlcToDownload(installedDepots: Set<Int>) -> [SteamOwnedDLC] {
+    /// names none of them by `dlcappid`, `installedDLC`, and lacks some of
+    /// their depots), for Download DLC on its page.
+    func dlcToDownload(installedDepots: Set<Int>, installedDLC: Set<Int> = []) -> [SteamOwnedDLC] {
         let off = SteamDLC.off(id)
-        return (dlc ?? []).filter { !off.contains($0.id) && !$0.depots.isEmpty && !Set($0.depots).isSubset(of: installedDepots) }
+        return (dlc ?? []).filter { !off.contains($0.id) && !$0.depots.isEmpty && !installedDLC.contains($0.id) &&
+            !Set($0.depots).isSubset(of: installedDepots) }
     }
 
     /// The language to offer on an installed game's page (Download in ...):
@@ -1240,9 +1242,17 @@ final class SteamOwnedLibrary: ObservableObject {
             // Owned DLC comes along unless the player turned it off (SteamDLC);
             // with the switch off, none does.
             info.dlcOff = Self.dlcEnabled ? SteamDLC.offApps(appID) : Set(info.knownDLC)
+            // The depots of the DLC apps the account owns count as owned too: a
+            // package often lists the DLC app but not its depots (New Vegas's
+            // Courier's Stash). Steam still refuses a key for anything not owned.
+            let ownedApps = Self.dlcEnabled ? Set((game(appID)?.dlc ?? []).map { UInt32($0.id) }) : []
+            let dlcDepots = Set(info.depots.filter { $0.dlcAppID.map { ownedApps.contains($0) } ?? false }.map(\.depotID))
             try FileManager.default.createDirectory(at: SteamInstallPaths.common(drive: Self.drive), withIntermediateDirectories: true)
             let folder = try await downloader.install(info, steamApps: Self.steamApps,
-                                                      ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
+                                                      ownedDepots: { [weak self] in
+                let licensed = try? await self?.fetcher.ownedDepotIDs()
+                return licensed.map { $0.union(dlcDepots) } ?? (dlcDepots.isEmpty ? nil : dlcDepots)
+            }) { [weak self] progress in
                 self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)
             }
