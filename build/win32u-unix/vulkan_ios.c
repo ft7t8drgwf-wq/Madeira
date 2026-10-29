@@ -30,6 +30,15 @@
 #ifdef MADEIRA_MOLTENVK
 extern void *madeira_vulkan_symbol(const char *name);
 #endif
+
+int madeira_vulkan_static_available(void)
+{
+#ifdef MADEIRA_MOLTENVK
+    return 1;
+#else
+    return 0;
+#endif
+}
 static char ios_vulkan_token;
 static void *ios_vulkan_open(const char *name, int flags)
 {
