@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright 2026 125hz
+// Copyright 2026 ft7t8drgwf-wq
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 
 import Foundation

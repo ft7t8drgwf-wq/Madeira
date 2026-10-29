@@ -1,6 +1,6 @@
-//
-//  GameIniFiles.swift
-//  Madeira
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright 2026 ft7t8drgwf-wq
+// Madeira Converter Exception: see LICENSE-EXCEPTION.md
 //
 //  Game details › Settings files: a game's own .ini files (Documents/My Games,
 //  the game's folder), added per game and edited in the app, section by section,

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 ft7t8drgwf-wq
+# Madeira Converter Exception: see LICENSE-EXCEPTION.md
 """Madeira Dock's "Steam starts" (app/Madeira/DockStartProgram.swift).
 
 Madeira can start only one 32-bit program per session, so Fallout: New Vegas's 32-bit

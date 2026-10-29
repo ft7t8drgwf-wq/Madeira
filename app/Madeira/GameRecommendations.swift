@@ -522,12 +522,52 @@ enum GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, fastSync: true, display: "fit")
 
-    /// Fallout: New Vegas (owner's test, 2026-10-26): loading a save crashed at
+    /// Dark Souls: Remastered (tested on an iPhone Air, iOS 27.2, 2026-10).
+    /// The game enumerates XInput only at start and never looks again (no
+    /// device-arrival broadcast reaches it here), so player 1 is published from
+    /// the first frame, and a player without controls of their own gets the Xbox
+    /// layout. Without these the game runs but ignores the touch controller.
+    /// The game's Arxan protection needs no dearxan: start-up also needs the image
+    /// low-alias for steamclient64 (#385).
+    static let darkSoulsRemastered = GameRecommendation(
+        id: "dark-souls-remastered", title: "Dark Souls: Remastered", version: 1,
+        config: """
+        # Madeira's recommended settings for Dark Souls: Remastered.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        # The game looks for a controller only when it starts: player 1 is there from the first frame.
+        env.MADEIRA_PAD_EARLY_SLOT = 1
+        env.MADEIRA_CONTROLS_XBOX_DEFAULT = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
+
+    /// Dark Souls III (Steam; tested on an iPhone Air, iOS 27.2, 2026-10). Its JIT
+    /// pool used to fill with the game's and Steam's image copies (the exe alone is
+    /// 87 MB), so FEX's code buffer reset dozens of times a minute and combat ran at
+    /// 3-11 fps: pool-split takes the pool past the main thread's stack (688 MB
+    /// instead of 384-544) and MADEIRA_X64_IMAGE_NOCOPY runs the pure-x64 images in
+    /// place. The orphan-lock reaper in its default mode released a live
+    /// DynamicBuffer lock with three waiters, and two threads then crashed in DXMT;
+    /// stamped reaps only locks of threads that are gone, as for Horizon Zero Dawn.
+    /// The game looks for a controller only at start, as Dark Souls: Remastered.
+    /// With these, combat holds 16-20 fps.
+    static let darkSoulsIII = GameRecommendation(
+        id: "dark-souls-iii", title: "Dark Souls III", version: 1,
+        config: """
+        # Madeira's recommended settings for Dark Souls III.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-split = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_PAD_EARLY_SLOT = 1
+        env.MADEIRA_CONTROLS_XBOX_DEFAULT = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
+    /// Fallout: New Vegas (tested on an iPhone, 2026-10-26): loading a save crashed at
     /// 00B57AA9 right after the game built a face, on Madeira's own card name and
     /// driver, which give it the basic render path (Shader Package 2). "Older NVIDIA
     /// card (Direct3D 9)" reports the card and driver the game knows (Shader Package
     /// 13), as the d3d9.dll wrapper its players install does. The config is the
-    /// standard list, which the game ran with. Version 1: build 17's test.
+    /// standard list, which the game ran with.
     static let falloutNewVegas = GameRecommendation(
         id: "fallout-new-vegas", title: "Fallout: New Vegas", version: 1,
         config: """
@@ -538,7 +578,7 @@ enum GameRecommendations {
         olderNvidia: true)
 
     /// Fallout 3 and its Game of the Year Edition: New Vegas's engine, which picks
-    /// its render path the same way. Not tested yet (owner's decision, 2026-10-26).
+    /// its render path the same way. Not tested on a device yet.
     static let fallout3 = GameRecommendation(
         id: "fallout-3", title: "Fallout 3", version: 1,
         config: """
@@ -547,6 +587,7 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
         olderNvidia: true)
+
     /// Call of Duty: Black Ops II, campaign (202970) and Zombies (212910), which
     /// share one folder; multiplayer (202990) lives there too. Build 26
     /// (2026-10-26): Zombies' sound crackled with the 60 ms default although the
@@ -562,12 +603,6 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
-    /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
-    /// the owner tried outside these lists closed at start until the [ec-hook]
-    /// reporter was off. It reads code a game's protection rewrites at run time
-    /// (GTA V Enhanced outside Steam on build 451, Ghost of Tsushima on build 515),
-    /// and it only logs, so turning it off costs a game nothing. Version 3: without
-    /// madeira-bcd's defaults (version 2 had them). This list reaches every game, and
     /// Project Zomboid (Build 42, Steam). Its launcher starts Azul Zulu 25 with
     /// -XX:+UseZGC (ProjectZomboid64.json); ZGC reserves its heap 4-8 TB up and the
     /// guest's address space ends at 512 GB, so every reservation fails and Java
@@ -585,6 +620,12 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
+    /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
+    /// the owner tried outside these lists closed at start until the [ec-hook]
+    /// reporter was off. It reads code a game's protection rewrites at run time
+    /// (GTA V Enhanced outside Steam on build 451, Ghost of Tsushima on build 515),
+    /// and it only logs, so turning it off costs a game nothing. Version 3: without
+    /// madeira-bcd's defaults (version 2 had them). This list reaches every game, and
     /// MADEIRA_FREE_DELAY_MS keeps a released block's addresses taken, so an allocator
     /// that reserves, releases and reserves again inside the same range never gets it
     /// back: Madeira Dock spun on "Loading Steam" before Thumper. The game lists that
@@ -598,13 +639,14 @@ enum GameRecommendations {
         """)
 
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
-                      falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]
+                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]
 
     // MARK: Recognising a game
 
     /// Steam App IDs.
     static let rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,
-               horizonZeroDawnAppID = 1151640, projectZomboidAppID = 108600
+               horizonZeroDawnAppID = 1151640, darkSoulsRemasteredAppID = 570940, darkSoulsIIIAppID = 374320,
+               projectZomboidAppID = 108600
     static let falloutNewVegasAppID = 22380, fallout3AppIDs: Set<Int> = [22300, 22370]   // Fallout 3, its GOTY Edition
     /// Black Ops II's campaign, Zombies and multiplayer.
     static let blackOps2AppIDs: Set<Int> = [202970, 212910, 202990]
@@ -629,6 +671,8 @@ enum GameRecommendations {
                 || installFolder == "ghost of tsushima" { return ghostOfTsushima }
             if steamAppID == godOfWarAppID || installFolder == "godofwar" || installFolder == "god of war" { return godOfWar }
             if steamAppID == horizonZeroDawnAppID || installFolder == "horizon zero dawn" { return horizonZeroDawn }
+            if steamAppID == darkSoulsRemasteredAppID || installFolder == "dark souls remastered" { return darkSoulsRemastered }
+            if steamAppID == darkSoulsIIIAppID || installFolder == "dark souls iii" { return darkSoulsIII }
             if steamAppID == falloutNewVegasAppID || installFolder == "fallout new vegas" { return falloutNewVegas }
             if steamAppID.map(fallout3AppIDs.contains) == true || installFolder == "fallout 3"
                 || installFolder == "fallout 3 goty" { return fallout3 }
@@ -654,6 +698,10 @@ enum GameRecommendations {
             return godOfWar
         case "horizonzerodawn.exe":
             return horizonZeroDawn
+        case "darksoulsremastered.exe":
+            return darkSoulsRemastered
+        case "darksoulsiii.exe":
+            return darkSoulsIII
         case "falloutnv.exe":
             return falloutNewVegas
         case "fallout3.exe":

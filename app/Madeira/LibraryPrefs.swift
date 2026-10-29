@@ -40,7 +40,6 @@ enum LibraryPrefs {
     /// "Older NVIDIA card (Direct3D 9)": D3D9 names a GeForce 7900 GS (D3D9Identity).
     static func olderNvidia(_ windowsPath: String) -> Bool { (dict(olderNvidiaKey) as [String: Bool])[windowsPath] ?? false }
     static func setOlderNvidia(_ on: Bool, for windowsPath: String) { store(on ? true : nil, olderNvidiaKey, windowsPath) }
-
     /// "Pause threads fully" (BCDLaunch.realSuspend): nil is Automatic, true On, false Off.
     static func realSuspend(_ windowsPath: String) -> Bool? { (dict(realSuspendKey) as [String: Bool])[windowsPath] }
     static func setRealSuspend(_ on: Bool?, for windowsPath: String) { store(on, realSuspendKey, windowsPath) }

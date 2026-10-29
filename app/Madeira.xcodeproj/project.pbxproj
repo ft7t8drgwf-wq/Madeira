@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1000E07 /* EpicCloudSaves.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E07 /* EpicCloudSaves.swift */; };
+		A1000E06 /* EpicCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E06 /* EpicCloud.swift */; };
 		A1000520 /* MadeiraDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000520 /* MadeiraDock.swift */; };
 		A1000521 /* MadeiraDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000521 /* MadeiraDockView.swift */; };
 		A1000650 /* DockStartScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000650 /* DockStartScreen.swift */; };
@@ -27,8 +29,15 @@
 		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
 		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
 		A1000700 /* SteamCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000700 /* SteamCloud.swift */; };
+		A1000920 /* ExternalDrives.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000920 /* ExternalDrives.swift */; };
+		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
 		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
 		A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711 /* WineMono.swift */; };
+		A1000E01 /* EpicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E01 /* EpicLibrary.swift */; };
+		A1000E02 /* EpicGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E02 /* EpicGames.swift */; };
+		A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E03 /* EpicAPI.swift */; };
+		A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E04 /* EpicFormats.swift */; };
+		A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E05 /* EpicDownloader.swift */; };
 		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
 		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
 		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
@@ -92,6 +101,8 @@
 		B1000002 /* JITBuiltInHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* JITBuiltInHost.swift */; };
 		B1000003 /* JITBuiltInMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* JITBuiltInMessages.swift */; };
 		B1000040 /* JITPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000040 /* JITPairing.swift */; };
+		B1000060 /* SigningRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000060 /* SigningRefresh.swift */; };
+		B1000061 /* AppleSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000061 /* AppleSignIn.swift */; };
 		B1000041 /* libmadeira_rppairing.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000041 /* libmadeira_rppairing.a */; };
 		B1000004 /* madeira-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B2000004 /* madeira-jit.js */; };
 		B1000051 /* Madeira JIT.shortcut in Resources */ = {isa = PBXBuildFile; fileRef = B2000051 /* Madeira JIT.shortcut */; };
@@ -119,7 +130,7 @@
 		A1000060 /* libwin32u_unix.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000060 /* libwin32u_unix.a */; };
 		A1000070 /* Winios/Winios.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000070 /* Winios/Winios.m */; };
 		A1000247 /* PadOutput.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000247 /* PadOutput.m */; };
-		A1000F01 /* PhonePointer.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000F01 /* PhonePointer.m */; };
+		C1000F01 /* PhonePointer.m in Sources */ = {isa = PBXBuildFile; fileRef = C2000F01 /* PhonePointer.m */; };
 		A1000080 /* arm64ec-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000080 /* arm64ec-windows */; };
 		A1000210 /* i386-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000210 /* i386-windows */; };
 		A1000081 /* x86_64-vcruntime in Resources */ = {isa = PBXBuildFile; fileRef = A2000081 /* x86_64-vcruntime */; };
@@ -218,6 +229,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A2000E07 /* EpicCloudSaves.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicCloudSaves.swift"; sourceTree = "<group>"; };
+		A2000E06 /* EpicCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicCloud.swift"; sourceTree = "<group>"; };
 		A2000520 /* MadeiraDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDock.swift"; sourceTree = "<group>"; };
 		A2000521 /* MadeiraDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDockView.swift"; sourceTree = "<group>"; };
 		A2000650 /* DockStartScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartScreen.swift"; sourceTree = "<group>"; };
@@ -238,8 +251,15 @@
 		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
 		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
 		A2000700 /* SteamCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamCloud.swift"; sourceTree = "<group>"; };
+		A2000920 /* ExternalDrives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalDrives.swift"; sourceTree = "<group>"; };
+		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
 		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
 		A2000711 /* WineMono.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineMono.swift"; sourceTree = "<group>"; };
+		A2000E01 /* EpicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicLibrary.swift"; sourceTree = "<group>"; };
+		A2000E02 /* EpicGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicGames.swift"; sourceTree = "<group>"; };
+		A2000E03 /* EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicAPI.swift"; sourceTree = "<group>"; };
+		A2000E04 /* EpicFormats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicFormats.swift"; sourceTree = "<group>"; };
+		A2000E05 /* EpicDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicDownloader.swift"; sourceTree = "<group>"; };
 		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
 		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
 		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
@@ -314,6 +334,8 @@
 		B2000002 /* JITBuiltInHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITBuiltInHost.swift; sourceTree = "<group>"; };
 		B2000003 /* JITBuiltInMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITBuiltInMessages.swift; sourceTree = "<group>"; };
 		B2000040 /* JITPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITPairing.swift; sourceTree = "<group>"; };
+		B2000060 /* SigningRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigningRefresh.swift; sourceTree = "<group>"; };
+		B2000061 /* AppleSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSignIn.swift; sourceTree = "<group>"; };
 		B2000041 /* libmadeira_rppairing.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libmadeira_rppairing.a; sourceTree = "<group>"; };
 		B2000042 /* MadeiraRPPairing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MadeiraRPPairing.h; sourceTree = "<group>"; };
 		B2000004 /* madeira-jit.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "madeira-jit.js"; sourceTree = "<group>"; };
@@ -345,7 +367,7 @@
 		A2000070 /* Winios/Winios.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/Winios.m; sourceTree = "<group>"; };
 		A2000071 /* Winios/Winios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Winios/Winios.h; sourceTree = "<group>"; };
 		A2000247 /* PadOutput.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PadOutput.m; sourceTree = "<group>"; };
-		A2000F01 /* PhonePointer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhonePointer.m; sourceTree = "<group>"; };
+		C2000F01 /* PhonePointer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhonePointer.m; sourceTree = "<group>"; };
 		A2000248 /* PadOutput.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PadOutput.h; sourceTree = "<group>"; };
 		A2000080 /* arm64ec-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "arm64ec-windows"; sourceTree = "<group>"; };
 		A2000210 /* i386-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "i386-windows"; sourceTree = "<group>"; };
@@ -498,8 +520,17 @@
 				A2000904 /* AmbientGlow.metal */,
 				A2000601 /* SteamOwnedLibrary.swift */,
 				A2000700 /* SteamCloud.swift */,
+				A2000920 /* ExternalDrives.swift */,
+				A2000921 /* ExternalStorage.swift */,
 				A2000710 /* SavesAndShortcuts.swift */,
 				A2000711 /* WineMono.swift */,
+				A2000E01 /* EpicLibrary.swift */,
+				A2000E02 /* EpicGames.swift */,
+				A2000E03 /* EpicAPI.swift */,
+				A2000E04 /* EpicFormats.swift */,
+				A2000E05 /* EpicDownloader.swift */,
+				A2000E07 /* EpicCloudSaves.swift */,
+				A2000E06 /* EpicCloud.swift */,
 				A2000602 /* SteamDownloadBackground.swift */,
 				A2000600 /* SteamInstall.swift */,
 				A2000609 /* ContentDecryptor.swift */,
@@ -596,6 +627,8 @@
 				B2000002 /* JITBuiltInHost.swift */,
 				B2000003 /* JITBuiltInMessages.swift */,
 				B2000040 /* JITPairing.swift */,
+				B2000060 /* SigningRefresh.swift */,
+				B2000061 /* AppleSignIn.swift */,
 				B2000042 /* MadeiraRPPairing.h */,
 				B2000004 /* madeira-jit.js */,
 				B2000051 /* Madeira JIT.shortcut */,
@@ -621,7 +654,7 @@
 				A2000701 /* Winios/WiniosGL.m */,
 				A2000071 /* Winios/Winios.h */,
 				A2000247 /* PadOutput.m */,
-				A2000F01 /* PhonePointer.m */,
+				C2000F01 /* PhonePointer.m */,
 				A2000248 /* PadOutput.h */,
 				A2000034 /* wine_stubs.c */,
 				A2000006 /* Madeira-Bridging-Header.h */,
@@ -873,8 +906,17 @@
 				A1000904 /* AmbientGlow.metal in Sources */,
 				A1000601 /* SteamOwnedLibrary.swift in Sources */,
 				A1000700 /* SteamCloud.swift in Sources */,
+				A1000920 /* ExternalDrives.swift in Sources */,
+				A1000921 /* ExternalStorage.swift in Sources */,
 				A1000710 /* SavesAndShortcuts.swift in Sources */,
 				A1000711 /* WineMono.swift in Sources */,
+				A1000E01 /* EpicLibrary.swift in Sources */,
+				A1000E02 /* EpicGames.swift in Sources */,
+				A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */,
+				A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */,
+				A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */,
+				A1000E07 /* EpicCloudSaves.swift in Sources */,
+				A1000E06 /* EpicCloud.swift in Sources */,
 				A1000602 /* SteamDownloadBackground.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
 				A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */,
@@ -962,7 +1004,7 @@
 				A1000070 /* Winios/Winios.m in Sources */,
 				A1000701 /* Winios/WiniosGL.m in Sources */,
 				A1000247 /* PadOutput.m in Sources */,
-				A1000F01 /* PhonePointer.m in Sources */,
+				C1000F01 /* PhonePointer.m in Sources */,
 				A1000035 /* StikJITHelper.swift in Sources */,
 				A1000980 /* JITPoolMeter.swift in Sources */,
 				A1000993 /* SteamFilesFlag.swift in Sources */,
@@ -971,6 +1013,8 @@
 				B1000002 /* JITBuiltInHost.swift in Sources */,
 				B1000003 /* JITBuiltInMessages.swift in Sources */,
 				B1000040 /* JITPairing.swift in Sources */,
+				B1000060 /* SigningRefresh.swift in Sources */,
+				B1000061 /* AppleSignIn.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 ft7t8drgwf-wq
 # Madeira Converter Exception: see LICENSE-EXCEPTION.md
 """Known-harmless warnings in the live log (app/Madeira/LogPattern.swift).
 
@@ -8,7 +9,7 @@ probe and the WoW64 CPU fallback read as harmless; out of memory and other
 missing DLLs stay errors. Synthetic only.
 """
 from pathlib import Path
-import os, shutil, subprocess, tempfile
+import os, shutil, subprocess, sys, tempfile
 root = Path(__file__).resolve().parents[2]
 SWIFTC = os.environ.get('SWIFTC') or shutil.which('swiftc') or str(Path.home() / '.local/share/swiftly/bin/swiftc')
 checks = r'''
@@ -37,6 +38,9 @@ for line in errors {
 }
 print("PASS: harmless warnings marked (display drivers, sign-in packages, Steam's optional modules, WoW64 CPU fallback); out of memory and other DLLs stay errors")
 '''
+if not Path(SWIFTC).exists():
+    if '--require-swift' in sys.argv: sys.exit('FAIL: Swift compiler unavailable')
+    print('SKIP: Swift compiler unavailable locally'); sys.exit(0)
 with tempfile.TemporaryDirectory(prefix='madeira-harmless-') as directory:
     source = Path(directory) / 'main.swift'; binary = Path(directory) / 'check'
     stub = 'enum LogStore { struct LogEntry { enum Level: String { case info = "INFO", success = "OK", error = "ERR", debug = "DBG" } } }\n'

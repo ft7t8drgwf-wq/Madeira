@@ -168,6 +168,21 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
   choice exports `MADEIRA_FEX_AVX=1`, which makes the ARM64EC FEX module report
   and emulate AVX/AVX2 for a game built for AVX processors (64-bit games; WOW64
   has no AVX);
+- **Large memory reservations**: off by default; turned on, it adds
+  `oversize-reserve = 1` to the game's config lines (see **This game's config**
+  below), and ntdll serves a reservation of 64 GB or more that the app's
+  address map cannot hold with a real part (`oversize-reserve-mb`, 16 GB) and
+  reports the size that was asked for. It is for a game that quits at start
+  because such a reservation fails (Final Fantasy Tactics - The Ivalice
+  Chronicles reserves 256 GB); a program that falls back to a smaller
+  reservation when a huge one fails is better off without it;
+- **Pause threads fully** (Automatic, On or Off): `MADEIRA_REAL_SUSPEND` for
+  the session (ml730: a Wine SuspendThread really stops the thread instead of
+  only snapshotting it). Automatic follows madeira.cfg's `real-suspend` when
+  set, otherwise turns it on when `GameAssembly.dll` is in the game's folder
+  (Unity IL2CPP, whose garbage collector scans suspended threads' stacks:
+  Megabonk crashed while loading without it). The launch unsets it when
+  nothing chooses it, and wineserver reads it on every call;
 - **CPU cores reported** (Automatic, 1, 2, 4 or 6) and **D3D9 anisotropic
   filtering** (Application default, up to 1×, 2×, 4× or 8×): only a choice
   other than the default exports `MADEIRA_CPU_COUNT` (wine) or
@@ -189,6 +204,16 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
 - performance overlay, live logs and touch controls for the session, with the
   controls' **opacity** and overall **size**. The touch layout itself is saved
   per game from the in-game editor;
+- **Settings files** (games only; the Desktop has no folder of its own): the
+  game's own .ini files, edited in the app instead of the Files app. **Add
+  .ini file** lists the .ini files in the game's folder and in
+  `Documents/My Games`; the editor shows each section's settings as switches,
+  numbers and text, with an ⓘ that says what a setting does (a sentence for
+  well-known Bethesda settings, otherwise what its name's type letter means).
+  Saving rewrites only the changed values and keeps line endings, encoding,
+  comments and order; a file the game rewrote since it was saved here is
+  noted when it opens. Close the game before saving, or it may write over the
+  change. `tests/host/check-ini-editor.py` covers the parser and the save.
 - **Advanced › This game's config**: lines in madeira.cfg's syntax for this
   game only. Each launch writes them to `Application Support/madeira-game.cfg`
   and exports `MADEIRA_CFG_GAME` (unset when there are none): a key set there
@@ -274,6 +299,11 @@ frames arrive (Metal presents or a desktop surface); after 30 seconds it offers
 until the game's own window is shown, and adds **Show desktop**
 (`docs/MADEIRA_DOCK.md`, "Starting screen"). A row of round glyph-only buttons (their words are
 VoiceOver labels) holds **Show live log**, which shows the most recent log lines.
+Lines known to be harmless in a normal session (Wine's other display drivers,
+Windows' sign-in packages, Steam's optional modules such as SDL3 and
+steamservice, the WoW64 CPU fallback, FEX's code-buffer mprotect note) show in
+grey as "harmless: …" instead of as errors; out of memory (c0000017) never does
+(`tests/host/check-harmless-warnings.py`).
 
 The small menu button (drag to move; it fades after three seconds) opens the
 in-game menu:
@@ -288,7 +318,10 @@ in-game menu:
    pointer settings;
 3. the performance overlay and its fields (FPS, average frame time, CPU load
    with the busiest thread, GPU load with GPU time per frame, memory
-   footprint, battery, and the thermal state: Cool, Warm, Hot or Critical; a
+   footprint, JIT memory (the JIT pool's use from its own log lines, such as
+   "JIT 374/560 MB", "(small)" when iPadOS gave the pool less room at launch,
+   "FULL" once a DLL did not fit; counted with Live logs off too), battery,
+   and the thermal state: Cool, Warm, Hot or Critical; a
    change is logged as `[thermal]` while the overlay is shown), then
    **Diagnostics**: **Capture the next frame** and **GPU sync** F1/F6/F5/F0,
    the developer overlay's CAP and F pills, for Direct3D 12 games (shown only with
@@ -461,6 +494,17 @@ Log tags: `[frontend]`, `[library]` (ml1163: each game's start mode, batch, serv
 `[session-once]`, `[library-surface]`, `[library-metadata]`, `[onboarding]`,
 `[frontend-controller]`, `[frontend-keyboard]`, `[device-load]`, `[promote]`, `[thermal-cap]`.
 
+**Session summary.** When a session returns to the library (or when Madeira
+goes to the background), `LogSummary` reads the log once and writes
+`Documents/madeira-summary.txt`: the program, the programs started and how
+each ended (exit code, or the Windows error in plain words and where it
+crashed), the JIT pool's size and use and whether it ran out, out-of-memory
+and wrong-architecture DLLs, other missing DLLs minus a known-harmless list,
+Quit game and force close, iPadOS refusing a second 32-bit program, and Madeira
+Dock's result in words. A session that never got back is summarised at the
+next launch from `madeira-log.prev.txt`. `tests/host/check-log-summary.py`
+covers it on synthetic logs.
+
 ## Tests
 
 `tests/host/check-frontend.py` (profiles incl. resolution and scaling,
@@ -471,6 +515,8 @@ math, controller commands, the exit hook, and the presence of the details and
 in-game menu options), `tests/host/check-runtime-settings.py`
 (`MadeiraConfig.set` and the Settings defaults) and
 `tests/host/check-library-api.py` (renderer detection and the badge).
+`tests/host/check-jit-pool-meter.py` covers the JIT memory field's parsing
+(split pools, the small-pool note) and that it counts with Live logs off.
 `tests/host/check-onboarding.py` covers first-run setup: the JIT choices,
 pairing import, pages with and without Dock, the done key, the
 `MADEIRA_ONBOARDING` switch, and the wiring (no Wine session, no pool or

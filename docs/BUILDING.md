@@ -58,8 +58,12 @@ git-ignored and consumed by the app project.
      expose the member keep the measured delta. This does not remove other
      SDK/toolchain requirements. Run `python3 tests/host/check-rusage-sdk.py`
      to check both header layouts and, on macOS, the installed iPhoneOS SDK.
-   - PE side: `build/wine-pe/build-ntdll.sh` (configures `wine/build-arm64ec` with `--enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer` on first run, builds `dlls/ntdll`, strips, pads to SizeOfImage + 0x50000, copies to the app). Other PE modules: `build/wine-pe/build-modules.sh <name>...` (same tree; it builds each module's DLL target `dlls/<name>/arm64ec-windows/<name>.dll`, strips it with `--strip-debug` like every shipped builtin and installs it into `app/Madeira/arm64ec-windows/`, or into `$DEST`). Building the DLL target rather than `make -C dlls/<name>` is also what winegstreamer needs (enabled by `--enable-winegstreamer` although GStreamer is absent, since its unix side is `build/ntdll-unix/winegstreamer_unixlib_ios.c`). Without arguments the script rebuilds the stock builtins added for games: `cryptsp`, `d3dx11_43`, `msvcp110`, `msvcr110` and `xaudio2_7`, and the builtins games and their installers import that the farm did not have (`GAME_MODULES` in the script: older VC++ runtimes, D3DX and d3dcompiler versions, XAudio2/X3DAudio/XAPOFX, `d3d10`, `avifil32`, `d2d1`, `wmvcore` with `winegstreamer`, `netprofm`, `wintypes`), all committed in `app/Madeira/arm64ec-windows/` like every other builtin. Every module the script builds links its delay imports as plain imports (`UNDELAY=0` keeps them; the script says why), and `tools/check-wine-media-dlls.py` then checks the Windows Media Format reader's exports and imports in the farm. It needs bison 3 for `tools/wrc` (macOS ships 2.3; Homebrew's is used when installed). The strip/pad step was verified this session; the configure step is UNVERIFIED from clean; build-modules.sh reproduced the five default DLLs at their shipped sizes on the development machine (2026-10-03).
+   - PE side: `build/wine-pe/build-ntdll.sh` (configures `wine/build-arm64ec` with `--enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer` on first run, builds `dlls/ntdll`, strips, pads to SizeOfImage + 0x50000, copies to the app). Other PE modules: `build/wine-pe/build-modules.sh <name>...` (same tree; it builds each module's DLL target `dlls/<name>/arm64ec-windows/<name>.dll`, strips it with `--strip-debug` like every shipped builtin and installs it into `app/Madeira/arm64ec-windows/`, or into `$DEST`). Building the DLL target rather than `make -C dlls/<name>` is also what winegstreamer needs (enabled by `--enable-winegstreamer` although GStreamer is absent, since its unix side is `build/ntdll-unix/winegstreamer_unixlib_ios.c`). Without arguments the script rebuilds the stock builtins added for games: `cryptsp`, `d3dx11_43`, `faultrep`, `msvcp110`, `msvcr110` and `xaudio2_7`, and the builtins games and their installers import that the farm did not have (`GAME_MODULES` in the script: older VC++ runtimes, D3DX and d3dcompiler versions, XAudio2/X3DAudio/XAPOFX, `d3d10`, `avifil32`, `d2d1`, `wmvcore` with `winegstreamer`, `netprofm`), all committed in `app/Madeira/arm64ec-windows/` like every other builtin. Every module the script builds links its delay imports as plain imports (`UNDELAY=0` keeps them; the script says why), and `tools/check-wine-media-dlls.py` then checks the Windows Media Format reader's exports and imports in the farm. It needs bison 3 for `tools/wrc` (macOS ships 2.3; Homebrew's is used when installed). The strip/pad step was verified this session; the configure step is UNVERIFIED from clean; build-modules.sh reproduced the five default DLLs at their shipped sizes on the development machine (2026-10-03).
    - `app/Madeira/arm64ec-windows/` is the DLL farm: every file in it is linked into the prefix (`system32` for x64 sessions, and `sysx64`), so a Wine module is only available if it was built and copied there. The native D3D12 path needs two stock modules in addition to the existing ones: `dcomp.dll` (`make -C dlls/dcomp`; a 64-bit Godot 4 engine loads it before it creates its D3D12 device, and gives up on D3D12 without it) and `ktmw32.dll` (`make -C dlls/ktmw32`; an optional import the same engine probes).
+   - TaskbarList COM: the prefix registers `explorerframe.dll`, which must be in
+     the ARM64EC farm. It is in the default module list; rebuild it explicitly
+     with `bash build/wine-pe/build-modules.sh explorerframe`. See
+     `docs/TASKBARLIST.md` for the package check and Windows x64 COM fixture.
    - Stand-ins for DLLs Wine cannot provide here but games import: `python3 tools/build-stub-dlls.py wine build/stub-dlls toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/arm64ec-w64-mingw32-clang toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/llvm-readobj app/Madeira/arm64ec-windows` builds `vulkan-1.dll` (answers like a PC without a Vulkan driver, so a game falls back to D3D) and, when the farm has no Wine build of them, `d3d10.dll` and `avifil32.dll`; each exports exactly its Wine `.spec`. Crysis Remastered imports all three.
 4. DXMT (submodule, branch ios-port):
    - unix side: `build/dxmt-ios/build.sh` (needs `toolchains/llvm-ios-build`) -> `app/Madeira/libdxmt_combined.a` (ignored; the app links it). Verified this session.
@@ -191,3 +195,21 @@ default. `env.MADEIRA_OPENGL = 1` selects the separate Mesa-on-D3D12 Windows
 overlay when its DLLs are built. `vulkan = static` selects the optional static
 MoltenVK backend; the app requires that backend to be linked. The dynamic
 MoltenVK and KosmicKrisp choices share the same retained-layer surface adapter.
+
+### Complete IPA runtime checks
+
+`tools/build-ipa.sh` builds Dock, the 64-bit Windows runtime, and the optional
+OpenGL/Vulkan backends before packaging. Wine Mono still downloads on first use.
+The default graphics settings remain unchanged.
+
+CI keeps seven separate runtime caches. Each cache uses its own source recipes,
+submodule pins, and the actual SDK/compiler identity. An app-only or validation-only
+change reuses those binaries. A failed or missing transfer rebuilds the affected
+component. Successful components remain cached if another component fails.
+
+`tools/build/runtime-components.py verify all` checks the staged files before
+Xcode builds the app. Packaging then writes `runtime-build.json` with the source
+keys and final bundle hashes. `tools/build/runtime-components.py ipa dist/Madeira.ipa`
+checks a completed IPA, including Dock, the graphics drivers, and their notices.
+Run this command from the matching checkout and build environment. CI calls the
+same check before it uploads a fresh or cached IPA.

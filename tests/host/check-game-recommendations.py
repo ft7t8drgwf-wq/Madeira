@@ -65,21 +65,23 @@ for m in re.finditer(r'static let (\w+) = GameRecommendation\(\n\s*id: "([^"]+)"
     lines = [line[len(indent):] if line.startswith(indent) else line for line in body.split('\n')]
     presets[ident] = dict(name=name, title=title, version=int(version), lines=lines, switches=' '.join((switches or '').split()))
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'ghost-of-tsushima', 'god-of-war',
-                        'horizon-zero-dawn', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'standard'}, sorted(presets)
+                        'horizon-zero-dawn', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'standard'}, sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,\n'
-        '                      falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]') in lists_src
+        '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]') in lists_src
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
 # so every game's own list ends with them. The standard list reaches every other game
 # and the Desktop, and has none of them; nor has Black Ops II's, which ran without them.
-NO_FORK_DEFAULTS = ('standard', 'black-ops-2')
 FORK_DEFAULTS = ["# madeira-bcd's defaults, which this list was tested with (upstream's differ).",
                  'env.MADEIRA_FREE_DELAY_MS = 2000', 'env.MADEIRA_CTX_CPU_AREA = 2', 'env.MADEIRA_WAIT_CHILDREN = 1',
                  'env.MADEIRA_JIT_DUMP = 0']
 for ident, p in presets.items():
+    if ident in ('dark-souls-remastered', 'dark-souls-iii'):
+        p['tested'], p['fork'] = [line for line in p['lines'][2:] if not line.startswith('#')], []
+        continue
     # The Fallout lists are the standard one plus a switch: the games ran with it. Project Zomboid
     # was tested through Madeira Dock with the standard list's lines.
-    if ident in NO_FORK_DEFAULTS + ('fallout-new-vegas', 'fallout-3', 'project-zomboid'):
+    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -110,7 +112,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: twelve lists, two comment lines each, every game list ends with the four fork defaults and the standard, Fallout, Black Ops II and Project Zomboid ones have none, no key twice, '
+print('PASS: fourteen lists, recorded fork defaults retained, Dark Souls and Fallout lists kept separate, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -279,7 +281,7 @@ print('PASS: RDR2 (Steam) is the owner\'s 463 list plus the 466, 467, 470, 472, 
 
 # Recognition: Steam by App ID or steamapps\common folder; everything else by the program's name.
 match = block(lists_src, 'static func match(', '\n    }\n')
-assert 'rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,\n               horizonZeroDawnAppID = 1151640, projectZomboidAppID = 108600' in lists_src
+assert 'rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,\n               horizonZeroDawnAppID = 1151640, darkSoulsRemasteredAppID = 570940, darkSoulsIIIAppID = 374320,\n               projectZomboidAppID = 108600' in lists_src
 assert 'if steamAppID == projectZomboidAppID || installFolder == "projectzomboid" { return projectZomboid }' in match
 assert 'case "projectzomboid64.exe":\n            return projectZomboid' in match
 assert 'let installFolder = last == steamFolder ? steamFolder : nil' in match
@@ -323,7 +325,8 @@ assert reset_section.index('Button("Reset", role: .destructive) { resetToRecomme
 assert 'GameRecommendations.question(recommended, desktop: entry.desktop == true)' in reset_section
 # For every entry, the Desktop too: the section is not gated off.
 assert ('// madeira-bcd: always last, for every entry, the Desktop too (GameRecommendationsApply.swift).\n'
-        '                Section {\n                    Button("Reset to Recommended"') in detail
+        '                Section {\n') in detail
+assert detail.index('// madeira-bcd: always last,') < detail.index('Button("Reset to Recommended"')
 # Last in the form, after the Executable section and Remove from library (the error line is
 # shown with the page's other sections since the Game details pages).
 assert detail.index('Button("Remove from library"') < detail.index('Button("Reset to Recommended"')
@@ -503,6 +506,10 @@ check(R.gta5EnhancedSteam.switchSummary == "AVX off, NVIDIA on, Wine's C++ runti
 check(R.note(R.ghostOfTsushima).contains("1280x720") && R.note(R.ghostOfTsushima).contains("fast semaphore waits off"),
       R.note(R.ghostOfTsushima))
 check(R.note(R.rdr2Steam).contains("@RDR2_CONFIG_LINES@ config lines") && R.note(R.rdr2Steam).contains("this screen's shape at 720 lines") && R.note(nil).contains("no recommended settings"), R.note(R.rdr2Steam))
+check(id(steam + #"\Dark Souls Remastered"#, 570940) == "dark-souls-remastered", "Dark Souls Remastered by App ID")
+check(id(steam + #"\DARK SOULS III"#) == "dark-souls-iii", "Dark Souls III by folder")
+check(id(#"C:\Games\DarkSoulsRemastered.exe"#) == "dark-souls-remastered", "Dark Souls Remastered by executable")
+check(id(#"C:\Games\DarkSoulsIII.exe"#) == "dark-souls-iii", "Dark Souls III by executable")
 // Every other game: the standard list; a path that names nothing: none.
 check(R.recommendation(windowsPath: #"C:\Games\Foo\foo.exe"#, steamAppID: nil)?.id == "standard"
       && R.recommendation(windowsPath: steam + #"\Portal 2"#, steamAppID: 620)?.id == "standard", "every other game: the standard list")

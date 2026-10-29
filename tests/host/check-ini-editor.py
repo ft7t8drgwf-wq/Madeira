@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 ft7t8drgwf-wq
+# Madeira Converter Exception: see LICENSE-EXCEPTION.md
 """Game details > Settings files (app/Madeira/GameIniFiles.swift).
 
 A game's own .ini files, added per game ("Add .ini file") from its folder and

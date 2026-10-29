@@ -54,8 +54,10 @@ enum NextSteamApp {
     static func take() -> Int? {
         guard let saved = UserDefaults.standard.dictionary(forKey: key) else { return nil }
         UserDefaults.standard.removeObject(forKey: key)
-        guard let app = saved["app"] as? Int, let at = saved["at"] as? Double,
-              Date().timeIntervalSince1970 - at < 30 * 60 else { return nil }
+        guard let app = saved["app"] as? Int, app > 0, app <= Int(UInt32.max),
+              let at = saved["at"] as? Double else { return nil }
+        let age = Date().timeIntervalSince1970 - at
+        guard age >= 0, age < 30 * 60 else { return nil }
         return app
     }
 }

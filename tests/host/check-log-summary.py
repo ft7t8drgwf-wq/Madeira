@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 ft7t8drgwf-wq
 # Madeira Converter Exception: see LICENSE-EXCEPTION.md
 """Compile LogSummary with Madeira Dock's report parser; synthetic logs only.
 
@@ -8,7 +9,7 @@ shrunk to 560 MB at launch, v8.dll failed to load once the pool ran out, and
 cs2.exe ended itself with exit code 1 while the Valve logo stayed on screen.
 """
 from pathlib import Path
-import os, shutil, subprocess, tempfile
+import os, shutil, subprocess, sys, tempfile
 root = Path(__file__).resolve().parents[2]
 SWIFTC = os.environ.get('SWIFTC') or shutil.which('swiftc') or str(Path.home() / '.local/share/swiftly/bin/swiftc')
 dock = (root / 'app/Madeira/MadeiraDock.swift').read_text()
@@ -39,6 +40,7 @@ let cs2 = #"""
 [22:03:05.120] [INFO] [frontend] graceful close requested
 [22:03:10.898] [INFO] [dock-report] probe-result=0
 """#
+assert(LogSummary.mb(UInt64.max) == 17592186044416)
 let f = LogSummary.facts(lines: cs2.split(separator: "\n", omittingEmptySubsequences: false))
 assert(f.sawSession && f.game == "cs2.exe" && f.steamGame == "cs2.exe")
 assert(f.smallPool && f.poolWantedMB == 896 && f.poolMB == 560)
@@ -127,6 +129,9 @@ let written = try! String(contentsOf: dir.appendingPathComponent(LogSummary.file
 assert(written.hasPrefix("=== Madeira session summary ===") && written.contains("v8.dll could not be loaded"))
 print("PASS: log summary finds the small JIT pool, the pool running out, out-of-memory and wrong-architecture DLLs, exit codes per program, Quit and Force close, and Madeira Dock's result")
 '''
+if not Path(SWIFTC).exists():
+    if '--require-swift' in sys.argv: sys.exit('FAIL: Swift compiler unavailable')
+    print('SKIP: Swift compiler unavailable locally'); sys.exit(0)
 with tempfile.TemporaryDirectory(prefix='madeira-log-summary-') as directory:
     source = Path(directory) / 'main.swift'; binary = Path(directory) / 'check'
     source.write_text('import Foundation\nenum MadeiraDock {\n' + report + '\n}\n'

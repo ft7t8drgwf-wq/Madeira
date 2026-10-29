@@ -1445,6 +1445,7 @@ struct ContentView: View {
         .ignoresSafeArea()
         .background(Color.black)
         .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
     }
 
     /// Portrait: classic tooling layout — header, badges, 240pt game strip,
@@ -2190,6 +2191,7 @@ struct ContentView: View {
             switch sheet {
             case .steamSignIn: SteamSignInView()
             case .gogSignIn: GOGSignInView()
+            case .epicSignIn: EpicSignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
             case .allSettings: AllSettingsView()
             case .registry: RegistryEditorView()
@@ -2529,6 +2531,7 @@ struct ContentView: View {
         guard library.enabled, library.current == nil else { return }
         if let exe = ShortcutRouter.shared.pendingExe {
             ShortcutRouter.shared.pendingExe = nil
+            _ = NextSteamApp.take()
             launchShortcut(exe); return
         }
         guard LibraryModel.sessionsThisRun == 0, let appID = NextSteamApp.take() else { return }
@@ -2598,9 +2601,29 @@ struct ContentView: View {
     }
 
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
-    private func startLibraryEntry(_ entry: LibraryEntry) {
+    /// An Epic game first gets Epic's sign-in arguments with a fresh one-use code
+    /// (EpicLibrary.launchArguments), for this launch only.
+    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false) {
+        guard !EpicCloud.shared.isBusy else {
+            library.error = "Wait for Epic Cloud save sync to finish before starting a game."
+            return
+        }
+        if let app = entry.epicAppName, !epicReady {
+            Task { @MainActor in
+                do {
+                    let arguments = try await EpicLibrary.shared.launchArguments(appName: app)
+                    LibraryEntry.setTransientArguments(arguments, for: entry.id)
+                    startLibraryEntry(entry, epicReady: true)
+                } catch {
+                    LogStore.shared.log("[epic-launch] app=\(app) not started: no sign-in arguments", level: .error)
+                    library.error = "This Epic game could not get its sign-in from Epic: \(error.localizedDescription)"
+                }
+            }
+            return
+        }
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
+            LibraryEntry.setTransientArguments(nil, for: entry.id)
             library.error = error.localizedDescription
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
             return
@@ -2608,6 +2631,7 @@ struct ContentView: View {
         // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
         // program, its arguments); validate() and the bridge's tokenizer take 4 KB.
         guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 4096 else {
+            LibraryEntry.setTransientArguments(nil, for: entry.id)
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
@@ -2667,6 +2691,7 @@ struct ContentView: View {
         // before Valve's client signs in with the same account (SteamOwnedLibrary).
         SteamOwnedLibrary.shared.sessionChanged(active: true)
         GOGLibrary.shared.sessionChanged(active: true)
+        EpicLibrary.shared.sessionChanged(active: true)
         /* ml1095: one config file. Written once from any legacy madeira-*.txt. */
         MadeiraConfig.migrateLegacy { self.logStore.log($0) }
         MadeiraConfig.deleteLegacyFiles { self.logStore.log($0) }   /* ml1096: the old files go once the cfg exists */
@@ -3477,7 +3502,7 @@ struct ContentView: View {
                 }
                 try MadeiraDock.writeHandoff(account: signIn.accountName, token: signIn.refreshToken, appID: game.id)
             } catch { fail(error); return }
-            MadeiraDock.configure(game, launchOption: launchOption, arguments: profile?.arguments ?? "")
+            MadeiraDock.configure(game, launchOption: launchOption, arguments: LaunchArgumentText.plain(profile?.arguments ?? ""))
             // "Steam starts" (DockStartProgram): the chosen program takes the place of the
             // one Steam's launch entry names, or the kept launcher goes back. No session runs.
             let program = DockStartProgram.chosen(game.id)
@@ -3662,6 +3687,8 @@ struct ContentView: View {
 
         logStore.log("Wine prefix: \(winePrefixPath)")
 
+        // Link external drives before the server lists dosdevices.
+        ExternalDrives.shared.mountAll()
         let result = wineserver_start(winePrefixPath)
         if result == 0 {
             logStore.log("Wineserver thread launched successfully", level: .success)
@@ -4195,6 +4222,8 @@ struct TouchControlsOverlay: View {
             .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
         }
         .ignoresSafeArea()
+        .statusBarHidden(library.current != nil)
+        .persistentSystemOverlays(library.current != nil ? .hidden : .automatic)
     }
 
     /// Every control in ONE GlassEffectContainer: on iOS 26 the system merges

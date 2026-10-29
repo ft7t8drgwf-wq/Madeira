@@ -121,7 +121,7 @@ enum BCDLaunch {
 /// crashes loading a save at 00B57AA9 right after building faces; the
 /// wrapper's identity gives NVIDIA's (Shader Package 13). The ids alone did not
 /// help (2026-10-26 logs): the driver name is the part that counts
-/// (build/dxmt-patches/0001-d3d9-custom-driver.patch).
+/// (d3d9.customDriver, willfaust/dxmt d3d9_interface.cpp).
 enum D3D9Identity {
     static let olderNvidiaName = "NVIDIA GeForce 7900 GS"
 

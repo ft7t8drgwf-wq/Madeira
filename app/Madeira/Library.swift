@@ -190,8 +190,8 @@ struct LibraryEntry: Codable, Identifiable {
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
     var fpsMode = 1
-    /// FEX's X87ReducedPrecision for this game. Off by default, as in FEX; only
-    /// an explicit choice exports FEX_X87REDUCEDPRECISION=1.
+    /// FEX's X87ReducedPrecision for this game. Export both states explicitly:
+    /// FEX defaults to reduced precision when no override is set.
     var reducedX87 = false
     var liveLogs = false
     var performance = false
@@ -283,6 +283,21 @@ struct LibraryEntry: Codable, Identifiable {
     /// A GOG game (GOGLibrary.swift): its product id. `relativePath` is then its
     /// program inside C:\GOG Games, from the build's goggame-<id>.info.
     var gogProductID: String?
+    /// An Epic Games game (EpicLibrary.swift): its app name. `relativePath` is then
+    /// its program inside C:\Program Files\Epic Games, and each start adds Epic's
+    /// sign-in arguments (EpicLibrary.launchArguments) for that launch only.
+    var epicAppName: String?
+    /// An Epic game with an official way to start without anti-cheat
+    /// (epicAntiCheatOffProgram): nil or true starts that program.
+    /// The anti-cheat cannot run in Wine on iOS, so on is the default.
+    var epicAntiCheatOff: Bool?
+    /// Games with an official way to start without Easy Anti-Cheat (offline modes
+    /// only), as the program to start instead of the one Epic names. Rocket League:
+    /// its Launcher.exe with -noeac ("No Easy Anti Cheat") starts RocketLeague.exe
+    /// with Epic's arguments and nothing else. Madeira starts that program itself,
+    /// which leaves out the launcher's .NET runtime: it crashed in Wine Mono once
+    /// the game had quit, so the session never ended cleanly.
+    static let epicAntiCheatOffProgram: [String: String] = ["Sugar": "RocketLeague.exe"]
     /// Fastsync's per-game switches, used only while Settings › Sync engine is
     /// Fastsync: "Fast synchronization" (nil = on; off gives this game Wine's
     /// standard sync) and "Fast semaphore waits" (nil = off). Optional, so older
@@ -303,12 +318,17 @@ struct LibraryEntry: Codable, Identifiable {
     /// MetalFX spatial upscaling factor (Display › MetalFX upscaling: 1.5 or 2;
     /// nil = off), passed on as this game's `metalfx-upscale` line.
     var metalFXUpscale: Double?
+    /// ml1298: a reservation of 64 GB or more that the address space cannot hold
+    /// is served with a real 16 GB part (ntdll's ios_oversize_reserve), passed on
+    /// as this game's `oversize-reserve` line; nil = off, such a reservation fails.
+    var largeReservations: Bool?
 
     /// What MadeiraConfig.applyGame writes for this game: the lines its pickers
     /// stand for, then its own config, which wins where both set a key.
     var gameConfigText: String? {
         var lines: [String] = []
         if let metalFXUpscale { lines.append("metalfx-upscale = \(metalFXUpscale)") }
+        if largeReservations == true { lines.append("oversize-reserve = 1") }
         if let config, !config.isEmpty { lines.append(config) }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
@@ -334,11 +354,31 @@ struct LibraryEntry: Codable, Identifiable {
     var runsInDesktop: Bool { usesLaunchOptions && launchMode == "desktop" }
     /// The program's own arguments: Steam's launch configuration for "The game"
     /// followed by the entry's Launch arguments (Steam's own launch options, such as
-    /// Garry's Mod's -nochromium), else the entry's Launch arguments.
+    /// Garry's Mod's -nochromium), else the entry's Launch arguments; an Epic game's
+    /// sign-in arguments come first while its launch is being prepared.
     var programArguments: String {
-        guard startsSteamGameDirectly else { return arguments }
-        let extra = arguments.trimmingCharacters(in: .whitespaces)
-        return [steamProgramArguments ?? "", extra].filter { !$0.isEmpty }.joined(separator: " ")
+        let own: String
+        if startsSteamGameDirectly {
+            let extra = arguments.trimmingCharacters(in: .whitespaces)
+            own = [steamProgramArguments ?? "", extra].filter { !$0.isEmpty }.joined(separator: " ")
+        } else {
+            own = arguments
+        }
+        guard epicAppName != nil, let transient = Self.transientArguments(for: id), !transient.isEmpty else { return own }
+        return own.isEmpty ? transient : transient + " " + own
+    }
+    /// Arguments for the launch being prepared only (an Epic game's one-use sign-in
+    /// code): never part of the saved entry. ContentView sets them before the launch;
+    /// applyEnvironment clears them once the bridge's command is exported.
+    private static let transientLock = NSLock()
+    private static var transient: [UUID: String] = [:]
+    static func setTransientArguments(_ arguments: String?, for id: UUID) {
+        transientLock.lock(); defer { transientLock.unlock() }
+        transient[id] = arguments
+    }
+    static func transientArguments(for id: UUID) -> String? {
+        transientLock.lock(); defer { transientLock.unlock() }
+        return transient[id]
     }
     /// ml1163: the directory the program starts in (MADEIRA_WORKDIR): the chosen
     /// working folder, else Steam's for "The game", else the program's own folder.
@@ -442,6 +482,11 @@ struct LibraryEntry: Codable, Identifiable {
     /// What a launch starts, relative to drive_c: "The game"'s program inside the
     /// install folder, else `relativePath`.
     var launchRelativePath: String {
+        if let app = epicAppName, epicAntiCheatOff != false, let program = Self.epicAntiCheatOffProgram[app] {
+            // The program next to the one Epic names (Rocket League: Launcher.exe -> RocketLeague.exe).
+            let folder = relativePath.split(separator: "/").dropLast().joined(separator: "/")
+            return folder.isEmpty ? program : folder + "/" + program
+        }
         guard startsSteamGameDirectly, let program = steamProgram, !program.isEmpty else { return relativePath }
         return relativePath + "/" + program
     }
@@ -473,15 +518,9 @@ struct LibraryEntry: Codable, Identifiable {
               launchWindowsPath.utf8.count < 1024, (steamWorkingWindowsPath?.utf8.count ?? 0) < 512 else {
             throw LibraryError.message("The saved launch profile contains invalid display or argument values.")
         }
-        var quoted = false, inToken = false, tokens = 0
-        for character in launchArguments {
-            if character == "\"" { quoted.toggle() }
-            if !quoted && (character == " " || character == "\t") { inToken = false }
-            else if !inToken { tokens += 1; inToken = true }
+        guard LaunchArgumentText.valid(launchArguments) else {
+            throw LibraryError.message("Use balanced double quotes, no control characters, and at most 64 launch arguments in 4 KB.")
         }
-        // WineProcessBridge takes at most 64 arguments in 4 KB.
-        guard launchArguments.utf8.count < 4096 else { throw LibraryError.message("The complete launch command is too long.") }
-        guard !quoted, tokens <= 64 else { throw LibraryError.message("Use balanced double quotes and at most 64 launch arguments in total.") }
         // build/madeira_cfg.h reads at most 64 KB of a file.
         guard (config?.utf8.count ?? 0) < 60_000, config?.contains("\0") != true else {
             throw LibraryError.message("This game's config is too long.")
@@ -518,8 +557,9 @@ struct LibraryEntry: Codable, Identifiable {
     /// Runs on the launch worker, before the JIT pool is taken.
     func applyEnvironment() {
         configureLaunch()
-        // Unset unless chosen: FEX's own default then applies, as for any other launch.
-        if reducedX87 { setenv("FEX_X87REDUCEDPRECISION", "1", 1) } else { unsetenv("FEX_X87REDUCEDPRECISION") }
+        // MADEIRA_ARGS now holds an Epic game's sign-in code; nothing else needs it.
+        Self.setTransientArguments(nil, for: id)
+        setenv("FEX_X87REDUCEDPRECISION", reducedX87 ? "1" : "0", 1)
         // Exported only when chosen: unset keeps the engine's own default (and any
         // madeira.cfg setting), as before these choices existed.
         // Unset otherwise, so a previous game's choice (a launch that died before the
@@ -596,7 +636,7 @@ struct LibraryEntry: Codable, Identifiable {
         }
         let command = desktop == true ? (exe: "explorer.exe", args: launchArguments) : launchCommand
         setenv("MADEIRA_EXE", command.exe, 1)
-        setenv("MADEIRA_ARGS", command.args, 1)
+        setenv("MADEIRA_ARGS", LaunchArgumentText.plain(command.args), 1)
         // Export both choices: unsetting Directly lets a global env.MADEIRA_DESKTOP=1
         // turn the desktop back on when the bridge applies madeira.cfg.
         setenv("MADEIRA_DESKTOP", desktop == true || runsInDesktop ? "1" : "0", 1)
@@ -746,6 +786,7 @@ final class LibraryModel: ObservableObject {
     }
     @Published var error: String? { didSet { if error != nil { preparing = nil } } }
     @Published var sessionMessage = ""
+    private var smallPoolNoted = false
     /// Quit game was asked for and the program is still running after `forceCloseAfter`
     /// seconds: a frozen program never handles Alt+F4, so the menu offers to close Madeira.
     @Published var forceCloseOffered = false
@@ -884,7 +925,8 @@ final class LibraryModel: ObservableObject {
         // one (refreshSteamMetadata) updates that entry.
         if let i = next.firstIndex(where: { $0.id == entry.id }) ??
             next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) ??
-            next.firstIndex(where: { entry.gogProductID != nil && $0.gogProductID == entry.gogProductID }) {
+            next.firstIndex(where: { entry.gogProductID != nil && $0.gogProductID == entry.gogProductID }) ??
+            next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) {
             // A details sheet may predate an asynchronous metadata refresh.
             if (next[i].metadataChecked ?? .distantPast) > (entry.metadataChecked ?? .distantPast) {
                 entry.folderBytes = next[i].folderBytes; entry.graphicsAPI = next[i].graphicsAPI
@@ -973,6 +1015,48 @@ final class LibraryModel: ObservableObject {
     func removeGOG(productID: String) {
         guard entries.contains(where: { $0.gogProductID == productID }) else { return }
         persist(entries.filter { $0.gogProductID != productID })
+    }
+    /// An Epic download finished (EpicLibrary): the game gets its library entry, or an
+    /// existing one follows the new build's program and keeps its title, artwork and
+    /// settings. A new entry gets Epic's cover art as its cover image.
+    @MainActor
+    func upsertEpic(_ game: EpicInstalledGame, cover: URL?) async {
+        guard !readOnly else { return }
+        var entry = entries.first { $0.epicAppName == game.appName } ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        entry.epicAppName = game.appName
+        entry.relativePath = game.programPath
+        entry.folderBytes = game.installBytes
+        let program = Self.drive.appendingPathComponent(game.programPath)
+        if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI ?? entry.graphicsAPI
+        }
+        if entry.coverFile == nil, let cover, let jpeg = await Self.epicCover(cover) {
+            let dir = Self.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let name = entry.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                entry.coverFile = name
+            }
+        }
+        entry.metadataChecked = nil
+        save(entry)
+    }
+    /// Epic's cover art as a JPEG of at most 1200 pixels, or nil.
+    private static func epicCover(_ url: URL) async -> Data? {
+        guard url.scheme == "https", let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200, data.count < 20_000_000,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                                             kCGImageSourceThumbnailMaxPixelSize: 1200,
+                                                                             kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85)
+    }
+    /// An Epic game was uninstalled: its entry goes with its files.
+    func removeEpic(appName: String) {
+        guard entries.contains(where: { $0.epicAppName == appName }) else { return }
+        persist(entries.filter { $0.epicAppName != appName })
     }
     /// Publishes `next` and writes it. The write (encoding the whole library and replacing the file) happens off the
     /// main thread, newest snapshot wins; `wait` writes before returning and reports whether it worked (start-up).
@@ -1129,23 +1213,33 @@ final class LibraryModel: ObservableObject {
 
     /// What an entry can start: an executable, or (ml1163) a batch file run through cmd.exe.
     static let programExtensions: Set<String> = ["exe", "bat", "cmd"]
+    /// The path relative to drive_c that reaches `url`, or nil when it is
+    /// outside drive_c. Files on an external drive are reached through
+    /// drive_c/External/<name> (ExternalDrives.swift).
+    static func relativeToDrive(_ url: URL) -> String? {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        if path.hasPrefix(drive.path + "/") { return String(path.dropFirst(drive.path.count + 1)) }
+        for root in ExternalDrives.shared.roots where path.hasPrefix(root.path + "/") {
+            return "External/" + root.name + "/" + path.dropFirst(root.path.count + 1)
+        }
+        return nil
+    }
     static func executable(_ relative: String) throws -> URL {
         let url = drive.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
-        guard url.path.hasPrefix(drive.path + "/"), programExtensions.contains(url.pathExtension.lowercased()),
+        guard relativeToDrive(url) != nil, programExtensions.contains(url.pathExtension.lowercased()),
               FileManager.default.fileExists(atPath: url.path) else {
             throw LibraryError.message("Choose an executable (.exe, .bat or .cmd) inside drive_c.")
         }
         return url
     }
     static func inspect(_ url: URL) throws -> LibraryEntry {
-        guard url.resolvingSymlinksInPath().path.hasPrefix(drive.path + "/") else {
-            throw LibraryError.message("The executable must be inside drive_c.")
+        guard let relative = relativeToDrive(url) else {
+            throw LibraryError.message("The executable must be inside drive_c or an external drive.")
         }
         if ["bat", "cmd"].contains(url.pathExtension.lowercased()) {
             // ml1163: a batch file has no PE header. Like every entry it starts
             // directly by default, as upstream starts every game; the details page
             // warns that Wine then stops when cmd.exe, its first process, exits.
-            let relative = String(url.resolvingSymlinksInPath().path.dropFirst(drive.path.count + 1))
             return LibraryEntry(title: url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_", with: " "),
                                 relativePath: relative, bits: 0)
         }
@@ -1159,7 +1253,6 @@ final class LibraryModel: ObservableObject {
         guard pe.count == 6, Array(pe.prefix(4)) == [0x50, 0x45, 0, 0] else { throw LibraryError.message("Missing PE header.") }
         let machine = Int(pe[4]) | Int(pe[5]) << 8
         guard machine == 0x14c || machine == 0x8664 else { throw LibraryError.message("Only x86 and x64 executables are supported.") }
-        let relative = String(url.resolvingSymlinksInPath().path.dropFirst(drive.path.count + 1))
         let name = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_", with: " ")
         var entry = LibraryEntry(title: name, relativePath: relative, bits: machine == 0x14c ? 32 : 64)
         entry.graphicsAPI = graphicsImports(url)
@@ -2844,7 +2937,7 @@ struct LibraryView: View {
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
-        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.gogProductID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
+        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
         if sort == "added" { return visible.reversed() }
         return visible.sorted {
             if sort == "played", $0.lastPlayed != $1.lastPlayed { return ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
@@ -2907,6 +3000,8 @@ struct LibraryView: View {
             if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) { model.error = nil } }
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
+        // Signing that runs out: the refresh, and the offer when it could not run (SigningRefresh.swift).
+        .modifier(SigningRefreshOffer())
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
         .onAppear {
             // An ended desktop session's surface never stays over the library.
@@ -2965,6 +3060,7 @@ struct LibraryView: View {
             if settingsShow("JIT", "StikDebug", "built-in", "pairing", "LocalDevVPN") {
                 JITSettingsSection()
             }
+            if settingsShow("signing", "expires", "refresh", "Apple", "sign-in", "7 days") { SigningSettingsSection() }
             if settingsShow("diagnostics", "extended logging", "logging", "log") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
@@ -2989,6 +3085,9 @@ struct LibraryView: View {
             if GOGLibrary.enabled, settingsShow("GOG", "GOG Galaxy", "sign in", "account") {
                 GOGSettingsSection(open: { settingsSheet = $0 })
             }
+            if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
+                EpicSettingsSection(open: { settingsSheet = $0 })
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
                 Section {
@@ -3003,6 +3102,7 @@ struct LibraryView: View {
                 }
             }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
+            if settingsShow("external", "drive", "USB", "SSD", "storage") { ExternalDrivesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
                     Toggle("Liquid metal", isOn: $liquidMetal.on)
@@ -3063,6 +3163,7 @@ struct LibraryView: View {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
             case .gogSignIn: GOGSignInView()
+            case .epicSignIn: EpicSignInView()
             case .dock: MadeiraDockView(start: startDock)
             case .registry: RegistryEditorView()
             }
@@ -3115,7 +3216,7 @@ struct LibraryView: View {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
-                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.gogProductID == nil }).isEmpty {
+                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
@@ -3124,6 +3225,11 @@ struct LibraryView: View {
                 // Game details page, the others their download sheet.
                 if GOGLibrary.enabled {
                     GOGGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
+                }
+                // The account's Epic Games games (EpicGames.swift): installed ones open their
+                // Game details page, the others their download sheet.
+                if EpicLibrary.enabled {
+                    EpicGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 }
             }
@@ -3324,7 +3430,12 @@ struct ExecutableBrowser: View {
             do {
                 // ml1163: .bat and .cmd files are listed too (they run through cmd.exe).
                 files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)
-                    .filter { ($0.hasDirectoryPath || LibraryModel.programExtensions.contains($0.pathExtension.lowercased())) && $0.resolvingSymlinksInPath().path.hasPrefix(LibraryModel.drive.path + "/") }
+                    // External drives are linked in as symlinks: list them as folders.
+                    .map { url in
+                        let isDir = (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                        return URL(fileURLWithPath: url.path, isDirectory: isDir == true)
+                    }
+                    .filter { ($0.hasDirectoryPath || LibraryModel.programExtensions.contains($0.pathExtension.lowercased())) && LibraryModel.relativeToDrive($0) != nil }
                     .sorted { if $0.hasDirectoryPath != $1.hasDirectoryPath { return $0.hasDirectoryPath }; return $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             } catch { self.error = error.localizedDescription }
         }
@@ -3344,7 +3455,7 @@ private struct LibraryPlayStyle: ButtonStyle {
 }
 
 struct LibraryDetail: View {
-    @State var entry: LibraryEntry
+    @State internal var entry: LibraryEntry
     var play: (LibraryEntry) -> Void
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
@@ -3425,6 +3536,15 @@ struct LibraryDetail: View {
                 error = "This GOG game is no longer installed. Install it again from the GOG section."; return
             }
         }
+        // An Epic game starts once its files are complete (EpicLibrary).
+        if let app = entry.epicAppName {
+            if EpicLibrary.shared.downloads[app] != nil {
+                error = "This game's download has not finished. Resume it and wait for it to complete before playing."; return
+            }
+            if EpicLibrary.shared.installed[app] == nil {
+                error = "Epic Games no longer lists this game as installed. Install it again from the Epic Games section."; return
+            }
+        }
         if let appID = entry.steamAppID {
             if SteamOwnedLibrary.shared.downloads[appID] != nil {
                 error = "This game's update has not finished. Resume it and wait for it to complete before playing."; return
@@ -3494,7 +3614,7 @@ struct LibraryDetail: View {
     /// The rows of the details page, in groups. The Desktop entry has no launch options
     /// or library details; a Steam game has its Steam pages.
     private var pageGroups: [[Page]] {
-        let launch = entry.usesLaunchOptions || (entry.desktop != true && entry.steamAppID == nil)
+        let launch = entry.usesLaunchOptions || entry.desktop != true
         let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID == nil ? [] : [.gog])
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
@@ -3645,20 +3765,19 @@ struct LibraryDetail: View {
                 }
             }
         }
-        // A Steam game started through Madeira Dock has them on its Steam page;
-        // "The game" adds these after Steam's arguments (programArguments).
-        if entry.desktop != true && (entry.steamAppID == nil || entry.startsSteamGameDirectly) {
+        // A Steam game starts with Steam's own launch option through Madeira Dock.
+        if entry.desktop != true {
             Section {
-                TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
+                TextField("Launch arguments", text: $entry.arguments.plainLaunchArguments, axis: .vertical)
                     .font(.body.monospaced()).lineLimit(1...4)
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    .autocorrectionDisabled().textInputAutocapitalization(.never).smartPunctuationOff()
                 LaunchFlagChips(arguments: $entry.arguments)
                 // What the next start runs (ml1163: in the Wine desktop, a batch file or
                 // the services batch, what starts the program).
                 Text(entry.commandPreview)
                     .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             } header: { Text("Launch arguments") } footer: {
-                Text("Passed on every start. Above: the full command.")
+                Text(entry.steamAppID == nil ? "Passed on every start. Above: the full command." : "Steam adds these to the selected launch option on every start.")
             }
         }
     }
@@ -3666,6 +3785,9 @@ struct LibraryDetail: View {
     @ViewBuilder private var compatibilityPage: some View {
         Section {
             Toggle(isOn: $entry.reducedX87) { compatLabel("Reduced-precision x87", "Faster, less accurate") }
+            Toggle(isOn: Binding(get: { entry.largeReservations ?? false }, set: { entry.largeReservations = $0 ? true : nil })) {
+                compatLabel("Large memory reservations", "For requests of 64 GB or more. Backs up to 16 GB by default.")
+            }
             // madeira-bcd: AVX, NVIDIA and Wine's C++ runtime are LibraryPrefs, which
             // BCDLaunch exports at every launch (reloadBCD / migrateEntryOptions).
             Toggle(isOn: Binding(get: { bcd.avx }, set: { on in bcd.avx = on; LibraryPrefs.setAVX(on, for: entry.windowsPath) })) {
@@ -3682,6 +3804,9 @@ struct LibraryDetail: View {
             }
             Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
                 compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors and GPU-check crashes")
+            }
+            Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
+                compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
             }
             Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
                 compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
@@ -3731,17 +3856,7 @@ struct LibraryDetail: View {
                     Text(entry.launchArguments).font(.caption.monospaced()).textSelection(.enabled)
                 }
             } header: { Text("Executable") }
-            // Madeira Dock: Valve's client adds these after the launch option's own
-            // arguments, as Steam's "Set launch options" does (MadeiraDock.configure).
-            if !entry.startsSteamGameDirectly {
-                Section {
-                    TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
-                        .font(.body.monospaced()).lineLimit(1...4)
-                        .autocorrectionDisabled().textInputAutocapitalization(.never)
-                } header: { Text("Launch arguments") } footer: {
-                    Text("Steam's launch options for this game, such as -nochromium. Passed on every start.")
-                }
-            }
+            if model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
         }
     }
 
@@ -3768,6 +3883,7 @@ struct LibraryDetail: View {
         }
         if entry.steamAppID == nil && entry.desktop != true {
             Section("Executable") { Text(entry.windowsPath).font(.caption.monospaced()).textSelection(.enabled) }
+            if model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
             Section { Button("Remove from library", role: .destructive) { remove = true } }
         }
         if let error { Section { Text(error).foregroundStyle(.red) } }
@@ -3856,6 +3972,10 @@ struct LibraryDetail: View {
                 if let appID = entry.steamAppID, let download = SteamOwnedLibrary.shared.downloads[appID] {
                     Section { SteamDownloadStatus(download: download) }
                 }
+                if let appName = entry.epicAppName {
+                    EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
+                    EpicCloudSection(appName: appName)
+                }
                 Section {
                     FPSChoice(mode: $entry.fpsMode)
                     Toggle("Performance overlay", isOn: $entry.performance)
@@ -3876,6 +3996,10 @@ struct LibraryDetail: View {
                 }
                 // madeira-bcd: always last, for every entry, the Desktop too (GameRecommendationsApply.swift).
                 Section {
+                    Button("Copy Settings", systemImage: "doc.on.doc") {
+                        let configText = entry.config ?? ""
+                        UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
+                    }
                     Button("Reset to Recommended", systemImage: "arrow.counterclockwise") { confirmReset = true }
                         .confirmationDialog(GameRecommendations.question(recommended, desktop: entry.desktop == true),
                                             isPresented: $confirmReset, titleVisibility: .visible) {
@@ -3973,7 +4097,7 @@ struct LibraryGameConfigEditor: View {
 /// Game details › Find on Steam: searches the public store by title; choosing
 /// a result gives the entry that app's name and store artwork.
 struct SteamSearchView: View {
-    @State var query: String
+    @State internal var query: String
     var select: (SteamMatch) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var results: [SteamMatch] = []
@@ -4346,7 +4470,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, gogSignIn, dock, registry
+    case allSettings, steamSignIn, gogSignIn, epicSignIn, dock, registry
     var id: String { rawValue }
 }
 
@@ -5867,5 +5991,80 @@ private struct LibraryOptionsMenu: View {
                 Label("Folder size", systemImage: "internaldrive").tag("size")
             }
         } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
+    }
+}
+
+// MARK: - Launch arguments are command lines, not prose
+
+/// iOS Smart Punctuation turns `--` into an em dash and straight quotes into
+/// curly ones, which breaks flags such as `--rendering-driver opengl3` and
+/// quoted paths.
+enum LaunchArgumentText {
+    static func valid(_ text: String) -> Bool {
+        guard text.utf8.count < 4096 else { return false }
+        var quoted = false, inToken = false, tokens = 0, slashes = 0
+        for byte in text.utf8 {
+            if (byte < 32 && byte != 9) || byte == 127 { return false }
+            if byte == 34 && slashes % 2 == 0 { quoted.toggle() }
+            if !quoted && (byte == 32 || byte == 9) { inToken = false }
+            else if !inToken { tokens += 1; inToken = true }
+            slashes = byte == 92 ? slashes + 1 : 0
+        }
+        return !quoted && tokens <= 64
+    }
+
+    static func plain(_ s: String) -> String {
+        var out = s
+        for (from, to) in [("\u{2014}", "--"), ("\u{2013}", "--"), ("\u{2212}", "-"),
+                           ("\u{201C}", "\""), ("\u{201D}", "\""), ("\u{201E}", "\""),
+                           ("\u{2018}", "'"), ("\u{2019}", "'")] {
+            out = out.replacingOccurrences(of: from, with: to)
+        }
+        return out
+    }
+}
+
+extension Binding where Value == String {
+    var plainLaunchArguments: Binding<String> {
+        Binding(get: { LaunchArgumentText.plain(wrappedValue) },
+                set: { wrappedValue = LaunchArgumentText.plain($0) })
+    }
+}
+
+/// Finds the UIKit text view behind a SwiftUI TextField and turns off smart
+/// dashes and quotes on it (SwiftUI has no modifier for these traits).
+private struct SmartPunctuationOff: UIViewRepresentable {
+    final class Probe: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
+        func apply() {
+            var node: UIView? = superview
+            for _ in 0..<4 {
+                guard let n = node else { break }
+                if Self.disable(in: n) { return }
+                node = n.superview
+            }
+        }
+        static func disable(in view: UIView) -> Bool {
+            if let t = view as? UITextView {
+                t.smartDashesType = .no; t.smartQuotesType = .no; t.smartInsertDeleteType = .no
+                return true
+            }
+            if let t = view as? UITextField {
+                t.smartDashesType = .no; t.smartQuotesType = .no; t.smartInsertDeleteType = .no
+                return true
+            }
+            return view.subviews.contains { disable(in: $0) }
+        }
+    }
+    func makeUIView(context: Context) -> Probe { let p = Probe(); p.isUserInteractionEnabled = false; return p }
+    func updateUIView(_ uiView: Probe, context: Context) { DispatchQueue.main.async { uiView.apply() } }
+}
+
+extension View {
+    func smartPunctuationOff() -> some View {
+        background(SmartPunctuationOff().frame(width: 0, height: 0))
     }
 }

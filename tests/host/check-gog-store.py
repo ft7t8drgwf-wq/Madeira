@@ -52,7 +52,7 @@ for path in sources:
 
 library = (app / 'Library.swift').read_text()
 require('var gogProductID: String?' in library, 'library entries record their GOG product')
-require(library.count('$0.steamAppID == nil && $0.gogProductID == nil') >= 2,
+require(library.count('$0.epicAppName == nil && $0.gogProductID == nil') >= 2,
         'Other games: no GOG game (it is listed in the GOG section)')
 require('case .gogSignIn: GOGSignInView()' in library and 'gogSignIn' in library[library.index('enum SettingsSheet'):],
         'Settings: the GOG sign-in sheet')

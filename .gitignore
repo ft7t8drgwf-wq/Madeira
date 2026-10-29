@@ -212,7 +212,17 @@ app/Madeira/arm64ec-windows/dock-notices.txt
 build/faultrep/out/
 
 .worktree/
+build/dcomp/out/
+
+# Python host-check caches
+__pycache__/
 # Optional Vulkan native build outputs
 /app/Madeira/libmadeira_vulkan.a
 /app/Madeira/arm64ec-windows/winevulkan.dll
 /app/Madeira/legal/LICENSE-MoltenVK.txt
+
+# Python host-check caches
+__pycache__/
+
+# Verified runtime component caches
+.runtime-cache/

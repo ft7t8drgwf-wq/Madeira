@@ -3,13 +3,13 @@
 
 Fallout 3 and New Vegas pick their render path from the card's name and the driver
 file. The switch makes DXMT's Direct3D 9 report a GeForce 7900 GS on nv4_disp.dll,
-as the d3d9.dll wrapper New Vegas players install does. d3d9.customDriver is ours:
-build/dxmt-patches/0001-d3d9-custom-driver.patch, applied by both DXMT builds.
+as the d3d9.dll wrapper New Vegas players install does. d3d9.customDriver is
+DXMT's (dxmt/src/d3d9/d3d9_interface.cpp).
 The game keeps the card's name in its prefs (sD3DDevice) and opens its launcher
 when it changes, so the switch keeps that line on the card the game will see.
 """
 from pathlib import Path
-import re, subprocess, sys
+import re, sys
 
 root = Path(__file__).resolve().parents[2]
 bcd = (root / 'app/Madeira/LibraryBCD.swift').read_text(encoding='utf-8')
@@ -75,19 +75,11 @@ for rule in ['line.lowercased().hasPrefix("sd3ddevice=")', 'current == olderNvid
              'current == olderNvidiaName ? metalName : nil', '(cr ? "\\r" : "")']:
     check(rule in bcd, f'Swift has the same rule: {rule}')
 
-# The patch.
-patch = root / 'build/dxmt-patches/0001-d3d9-custom-driver.patch'
-check('o.driver = cfg.getOption<std::string>("d3d9.customDriver", "");' in patch.read_text(encoding='utf-8'),
-      'the patch reads d3d9.customDriver')
-for script in ['build/wine-i386/build.sh', 'build/dxmt-ios/build.sh']:
-    check('build/dxmt-patches/apply.sh"' in (root / script).read_text(encoding='utf-8'), f'{script} applies the patches')
+# DXMT reads d3d9.customDriver.
 d3d9 = root / 'dxmt/src/d3d9/d3d9_interface.cpp'
 if d3d9.exists():
-    if 'd3d9.customDriver' in d3d9.read_text(encoding='utf-8'):
-        r = subprocess.run(['git', '-C', str(root / 'dxmt'), 'apply', '--reverse', '--check', str(patch)], capture_output=True)
-    else:
-        r = subprocess.run(['git', '-C', str(root / 'dxmt'), 'apply', '--check', str(patch)], capture_output=True)
-    check(r.returncode == 0, 'the patch fits the dxmt submodule')
+    check('cfg.getOption<std::string>("d3d9.customDriver", "")' in d3d9.read_text(encoding='utf-8'),
+          'the dxmt submodule reads d3d9.customDriver')
 else:
     print('SKIP: dxmt submodule not checked out')
 

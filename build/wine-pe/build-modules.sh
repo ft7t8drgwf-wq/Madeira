@@ -21,6 +21,8 @@
 #                                  delay-loads SystemFunction032 from it
 #   xaudio2_7                      the prefix registers CLSID_XAudio2 (2.7) at
 #                                  system32\xaudio2_7.dll
+#   faultrep                       Rocket League stopped at load with c0000135
+#                                  without it (RocketLeague.exe imports it)
 # and GAME_MODULES below: builtins games or their installers import that the
 # farm does not have (without one the loader stops with STATUS_DLL_NOT_FOUND
 # before the program runs). Every module built here links its delay imports
@@ -66,6 +68,9 @@ esac
 #       the Windows Media Format reader (WMCreateReader, WMCreateSyncReader) and
 #       its winegstreamer frontend; tools/check-wine-media-dlls.py checks both in
 #       the farm after they are built
+#   explorerframe
+#       the prefix registers TaskbarList here; packaging the COM server lets
+#       ordinary ITaskbarList callers activate it (Madeira #450)
 #   netprofm
 #       the Network List Manager, for services a launcher starts in a game
 #       session
@@ -86,9 +91,15 @@ GAME_MODULES="msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcrt20 msvcrt40 msvcirt
     xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_8 xaudio2_9
     x3daudio1_0 x3daudio1_1 x3daudio1_2 x3daudio1_3 x3daudio1_4 x3daudio1_5 x3daudio1_6
     xapofx1_1 xapofx1_2 xapofx1_3 xapofx1_4
-    d2d1 wmvcore winegstreamer netprofm wintypes"
+    d2d1 wmvcore winegstreamer netprofm explorerframe"
 # shellcheck disable=SC2086 # the list is split on purpose
-[ $# -gt 0 ] || set -- cryptsp d3dx11_43 msvcp110 msvcr110 xaudio2_7 $GAME_MODULES
+#   tbs                     Unreal Engine shipping executables import it statically
+#   wintypes                Unity IL2CPP GameAssembly.dll imports api-ms-win-core-winrt-robuffer-l1-1-0
+#   wmadmod                 XAudio2's xWMA voices decode through the WMA decoder DMO (docs/MEDIA.md)
+#   build/wine-pe/farm-modules.txt   other stock modules the farm ships for programs that import them
+# shellcheck disable=SC2086,SC2046 # the lists are split on purpose
+[ $# -gt 0 ] || set -- cryptsp d3dx11_43 msvcp110 msvcr110 xaudio2_7 tbs wintypes wmadmod $GAME_MODULES \
+    $(grep -v '^#' "$R/build/wine-pe/farm-modules.txt")
 [ -x "$STRIP" ] || { echo "llvm-mingw not found at $TC (docs/BUILDING.md)" >&2; exit 1; }
 
 targets=()
@@ -113,7 +124,7 @@ for m in "$@"; do
 done
 
 if [ ! -f "$B/config.status" ]; then
-    mkdir -p "$B" && (cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer)
+    mkdir -p "$B" && (cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --without-freetype --without-gnutls --enable-winegstreamer)
 fi
 # widl looks for stdole2.tlb under aarch64-windows/ when it builds an ARM64EC
 # typelib import (shell32 and others); this tree builds it into arm64ec-windows/.
@@ -131,15 +142,18 @@ mkdir -p "$B/dlls/stdole2.tlb"
 # or built in this run; its Makefile.in is restored when the script ends.
 # UNDELAY=0 keeps the delay imports.
 undelayed=()
+backup="$(mktemp -d)"
 restore_makefiles() {
     local m
-    for m in "${undelayed[@]+"${undelayed[@]}"}"; do git -C "$R/wine" checkout -- "dlls/$m/Makefile.in"; done
+    for m in "${undelayed[@]+"${undelayed[@]}"}"; do cp "$backup/$m" "$R/wine/dlls/$m/Makefile.in"; done
+    rm -rf "$backup"
 }
 trap restore_makefiles EXIT
 in_farm() { [ -n "$(find "$DEST" -maxdepth 1 -iname "$1.dll" 2>/dev/null)" ]; }
 if [ "${UNDELAY:-1}" != 0 ]; then
     for m in "$@"; do
         mk="$R/wine/dlls/$m/Makefile.in"
+        [ -f "$mk" ] || continue
         delayed="$(sed -n 's/^DELAYIMPORTS[[:space:]]*=[[:space:]]*//p' "$mk")"
         [ -n "$delayed" ] && grep -q '^IMPORTS' "$mk" || continue
         ok=1
@@ -147,9 +161,10 @@ if [ "${UNDELAY:-1}" != 0 ]; then
             in_farm "$i" || case " $* " in *" $i "*) ;; *) ok=0 ;; esac
         done
         [ "$ok" = 1 ] || continue
+        cp "$mk" "$backup/$m"
+        undelayed+=("$m")
         sed -i.bak -e '/^DELAYIMPORTS[[:space:]]*=/d' -e "s/^\(IMPORTS[[:space:]]*=.*\)\$/\1 $delayed/" "$mk" && rm -f "$mk.bak"
         rm -f "$B/dlls/$m/arm64ec-windows/$(sed -n 's/^MODULE[[:space:]]*=[[:space:]]*//p' "$mk")"   # an earlier link with the delay imports must not satisfy make
-        undelayed+=("$m")
     done
     [ ${#undelayed[@]} -eq 0 ] || echo "delay imports linked as plain imports: ${undelayed[*]}"
 fi

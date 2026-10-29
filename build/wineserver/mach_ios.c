@@ -518,9 +518,8 @@ int ios_real_suspend_enabled(void)
     static int logged = -1;
     const char *e = getenv( "MADEIRA_REAL_SUSPEND" );
     int env = (e && e[0] == '1') ? 1 : 0;
-    if (env != logged)
+    if (env != __atomic_exchange_n( &logged, env, __ATOMIC_RELAXED ))
     {
-        logged = env;
         fprintf( stderr, "[real-susp] ml730 MADEIRA_REAL_SUSPEND=%d\n", env );
     }
     return env;

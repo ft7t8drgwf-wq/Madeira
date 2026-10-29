@@ -1528,6 +1528,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                     int pl = (int)strlen( prefixes[p] );
                     for (k = 0; k + pl <= cl_len && !found; k++)
                     {
+                        if (k && cl[k - 1] != ' ' && cl[k - 1] != '\t' && cl[k - 1] != '"') continue;
                         for (j = 0; j < pl; j++)
                         {
                             WCHAR c = cl[k + j];
@@ -1535,17 +1536,23 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                             if (c != (WCHAR)prefixes[p][j]) break;
                         }
                         if (j < pl) continue;
-                        for (j = k + pl; j < cl_len && cl[j] >= '0' && cl[j] <= '9' && appid < 100000000u; j++)
-                            appid = appid * 10 + (cl[j] - '0');
-                        found = appid != 0;
+                        appid = 0;
+                        for (j = k + pl; j < cl_len && cl[j] >= '0' && cl[j] <= '9'; j++)
+                        {
+                            unsigned int digit = cl[j] - '0';
+                            if (appid > (UINT32_MAX - digit) / 10) { appid = 0; break; }
+                            appid = appid * 10 + digit;
+                        }
+                        found = appid && (j == cl_len || cl[j] == ' ' || cl[j] == '\t' ||
+                                          cl[j] == '"' || cl[j] == '/');
                     }
                 }
-                if (found)
+                if (found && wine_steam_run_requested)
                 {
                     dprintf( 2, "[dock-steam-run] %s asks Steam to start app %u: steam.exe not started, "
                              "the app starts it in its next run (env.MADEIRA_DOCK_STEAM_RUN=0 starts steam.exe)\n",
-                             debugstr_us( &params->CommandLine ), appid );
-                    if (wine_steam_run_requested) wine_steam_run_requested( appid );
+                             madeira_debugstr_cmdline_us( &params->CommandLine ), appid );
+                    wine_steam_run_requested( appid );
                     return STATUS_ACCESS_DENIED;
                 }
             }

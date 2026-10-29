@@ -138,3 +138,11 @@ it, as before; the log says `[steam-cloud] remotecache off` once per app run.
 - Log tag `[steam-cloud]`: App IDs, counts and results; no file names or paths.
 
 Profile migration copies files before it changes registry paths. The old profile stays as a recovery copy. A copy or backup failure stops the migration. The sync record is cleared before copying, so a changed save needs a new comparison.
+
+### Unreadable local saves
+
+A local save whose checksum cannot be read completely is not evidence of a
+local change. Read errors discard the partial SHA-1, and an existing cloud/local
+pair with no local checksum waits for a choice instead of being automatically
+uploaded or downloaded. A local-only file without a checksum is not uploaded.
+An empty, readable file still has its valid SHA-1 and follows normal sync rules.
