@@ -68,6 +68,15 @@ assert(!HardwareKeyMap.isPointerLockChord(0x50, held: [0xA2, 0x50]))
 assert(!HardwareKeyMap.isPointerLockChord(0x50, held: [0xA4, 0x50]))
 assert(!HardwareKeyMap.isPointerLockChord(0x51, held: [0xA2, 0xA4, 0x51]))
 
+// Diagnostics name a key that types text "char", never its code; the rest keep theirs.
+for u in Array(0x04...0x27) + Array(0x2C...0x38) + Array(0x54...0x57) + Array(0x59...0x64) {
+    let vk = HardwareKeyMap.vk(forHIDUsage: u)!
+    assert(HardwareKeyMap.logName(vk) == "char", "usage \(u) (vk \(vk)) types text and must be logged as char")
+}
+assert(HardwareKeyMap.logName(0x1B) == "1b" && HardwareKeyMap.logName(0x0D) == "0d")     // Esc, Enter
+assert(HardwareKeyMap.logName(0x09) == "09" && HardwareKeyMap.logName(0x25) == "25")     // Tab, left arrow
+assert(HardwareKeyMap.logName(0x7B) == "7b" && HardwareKeyMap.logName(0xA0) == "a0")     // F12, left shift
+
 // Mouse buttons: MOUSEEVENTF_* pairs, XBUTTON1/2 in mouseData.
 assert(MouseButton.left.event(down: true) == (0x0002, 0) && MouseButton.left.event(down: false) == (0x0004, 0))
 assert(MouseButton.right.event(down: true) == (0x0008, 0) && MouseButton.right.event(down: false) == (0x0010, 0))

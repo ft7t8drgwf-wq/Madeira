@@ -421,6 +421,40 @@ enum SteamInstallRegistry {
         return (lines.joined(separator: "\n"), changed)
     }
 
+    /// The values `write` leaves alone although the .reg text holds something else under
+    /// that name (a present value is kept unless it follows %INSTALLDIR%), one line each:
+    /// the key as written to the log, the name, and what is stored against what the script
+    /// has, both as the .reg file spells them and cut to 100 characters. A game that still
+    /// finds its registry incomplete after a start (Far Cry 3's updater: "Cannot find
+    /// essential information in the registry" with every value present) shows here which
+    /// stored value it may be reading. The text of a name with key, serial, pass or token
+    /// in it is not shown, only that it differs. Log lines only; nothing is changed.
+    static func kept(_ values: [SteamInstallValue], in text: String) -> [String] {
+        let lines = text.components(separatedBy: "\n")
+        let lower = lines.map { $0.lowercased() }
+        var notes: [String] = []
+        for value in values where !value.followsInstall {
+            let wanted = Self.line(value)
+            let namePrefix = value.name.isEmpty ? "@=" : "\"" + Self.text(value.name, quote: "\"").lowercased() + "\"="
+            let hidden = ["key", "serial", "pass", "token"].contains { value.name.lowercased().contains($0) }
+            for key in SteamInstallScripts.keys(value.hive, value.key) {
+                let header = ("[" + Self.text(key, quote: "[]") + "]").lowercased()
+                guard let start = lower.firstIndex(where: { $0.hasPrefix(header) }) else { continue }
+                var end = start + 1
+                while end < lines.count, !lines[end].hasPrefix("[") { end += 1 }
+                guard let index = (start + 1..<end).first(where: { lower[$0].hasPrefix(namePrefix) }),
+                      lines[index] != wanted else { continue }
+                let stored = lines[index].dropFirst(namePrefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                let script = wanted.dropFirst(namePrefix.count)
+                let place = (value.hive == .machine ? "HKLM\\" : "HKCU\\") + key
+                notes.append(place + " " + (value.name.isEmpty ? "@" : "\"" + value.name + "\"") + ": "
+                             + (hidden ? "stored text differs from the script's (not shown)"
+                                       : "stored \(stored.prefix(100)), the script has \(script.prefix(100))"))
+            }
+        }
+        return notes
+    }
+
     /// Writes the values into the prefix's system.reg and user.reg. Returns the number of
     /// lines changed. Only while no session runs.
     @discardableResult
@@ -857,9 +891,18 @@ enum DockInstallers {
             let key = (value.hive == .machine ? "HKLM\\" : "HKCU\\") + value.key
             if !list.contains(key) { list.append(key) }
         }
+        // What is stored already and stays, read before the write (log lines only).
+        var kept: [String] = []
+        for (hive, file) in [(SteamInstallRun.Hive.machine, "system.reg"), (.user, "user.reg")] {
+            let selected = values.filter { $0.hive == hive }
+            guard !selected.isEmpty, let data = try? Data(contentsOf: prefix.appendingPathComponent(file)) else { continue }
+            kept += SteamInstallRegistry.kept(selected, in: String(decoding: data, as: UTF8.self))
+        }
         do {
             let changed = try SteamInstallRegistry.write(values, prefix: prefix)
             LogStore.shared.log("[dock-installers] app=\(game.id) registry values=\(values.count) written=\(changed) keys=" + keys.joined(separator: "; "))
+            for note in kept.prefix(8) { LogStore.shared.log("[dock-installers] app=\(game.id) registry kept: \(note)") }
+            if kept.count > 8 { LogStore.shared.log("[dock-installers] app=\(game.id) registry kept: \(kept.count - 8) more not listed") }
         } catch {
             LogStore.shared.log("[dock-installers] app=\(game.id) registry not written: \(error.localizedDescription)", level: .error)
         }

@@ -192,6 +192,15 @@ let notScript = """
         require(again.changed == 2 && again.text.contains("Fallout New Vegas\\\\\"") && !again.text.contains("Old Folder") &&
                 again.text.components(separatedBy: "dword:00000005").count == 3,
                 "an install path that differs is rewritten; a changed dword is kept")
+        require(SteamInstallRegistry.kept(machine, in: first.text).isEmpty, "nothing kept when the stored values are the script's")
+        let keptNotes = SteamInstallRegistry.kept(machine, in: moved)
+        require(keptNotes == ["HKLM\\Software\\Bethesda Softworks\\FalloutNV \"Version\": stored dword:00000005, the script has dword:00000011",
+                              "HKLM\\Software\\Wow6432Node\\Bethesda Softworks\\FalloutNV \"Version\": stored dword:00000005, the script has dword:00000011"],
+                "the kept dword is named in both views with both texts; the moved install path (rewritten) is not")
+        let secret = SteamInstallValue(hive: .user, key: "Software\\Fixture", name: "CDKey", data: .string("from-script"), followsInstall: false)
+        let secretNotes = SteamInstallRegistry.kept([secret], in: "[Software\\\\Fixture] 1\n\"cdkey\"=\"AAAA-BBBB\"\n")
+        require(secretNotes == ["HKCU\\Software\\Fixture \"CDKey\": stored text differs from the script's (not shown)"],
+                "a name with key in it: found without case, its text not shown")
         let user = SteamInstallRegistry.write(values.filter { $0.hive == .user }, in: "", now: 1)
         require(user.changed == 2 && user.text.contains("[Software\\\\Fixture] 1\n") && !user.text.contains("Wow6432Node"),
                 "HKCU: one view only")
@@ -217,6 +226,18 @@ let notScript = """
         LogStore.shared.lines = []
         DockInstallers.writeRegistry(game, drive: drive, prefix: prefix)
         require(LogStore.shared.lines.contains { $0.contains("registry values=6 written=0") }, "the next start writes nothing")
+        require(!LogStore.shared.lines.contains { $0.contains("registry kept:") }, "no kept line when nothing differs")
+        let stale = system.replacingOccurrences(of: "dword:00000011", with: "dword:00000005")
+        try write(prefix.appendingPathComponent("system.reg"), stale)
+        LogStore.shared.lines = []
+        DockInstallers.writeRegistry(game, drive: drive, prefix: prefix)
+        require(LogStore.shared.lines.filter { $0.hasPrefix("[dock-installers] app=22380 registry kept: HKLM\\Software\\") &&
+                                               $0.hasSuffix("\"Version\": stored dword:00000005, the script has dword:00000011") }.count == 2 &&
+                LogStore.shared.lines.firstIndex { $0.contains("registry values=6 written=0") }! <
+                LogStore.shared.lines.firstIndex { $0.contains("registry kept:") }!,
+                "a stored value that differs and stays is logged after the summary line, in both views")
+        let afterKept = try String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8)
+        require(afterKept == stale, "logging it changes nothing")
 
         // prepare() honours its switch.
         try write(prefix.appendingPathComponent("system.reg"), base)

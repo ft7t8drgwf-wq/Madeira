@@ -297,6 +297,18 @@ enum HardwareKeyMap {
             && (held.contains(0xA2) || held.contains(0xA3))     // L/R control
             && (held.contains(0xA4) || held.contains(0xA5))     // L/R alt
     }
+
+    /// How the input diagnostics name a held key in the log. A key that types
+    /// text (space, digits, letters, the numeric keypad, punctuation) is
+    /// "char", never its code: the keys of a sign-in name or a password typed
+    /// while diagnostics are on would otherwise be in the log, and logs go
+    /// with bug reports. Esc, Enter, Tab, arrows, F-keys and modifiers keep
+    /// their codes.
+    static func logName(_ vk: Int32) -> String {
+        let text = vk == 0x20 || (0x30...0x5A).contains(vk) || (0x60...0x6F).contains(vk)
+            || (0xBA...0xE2).contains(vk)
+        return text ? "char" : String(format: "%02x", vk)
+    }
 }
 
 /// The five buttons a mouse has, and their MOUSEEVENTF_* edges. X1 and X2 share
@@ -2013,7 +2025,7 @@ final class HardwareInput: ObservableObject {
             motionLock.lock(); tickerArmed = false; motionLock.unlock()
             return
         }
-        let keyList = keysPosted.down.sorted().map { String(format: "%02x", $0) }.joined(separator: ",")
+        let keyList = keysPosted.down.sorted().map(HardwareKeyMap.logName).joined(separator: ",")
         log("keys_down=[\(keyList)] mouse_dx=\(Int(dx)) mouse_dy=\(Int(dy)) "
             + "buttons=\(gameButtons.sorted().map(\.rawValue)) wheel=\(wheelN) "
             + "lock=\(pointerLocked ? "on" : "off") path=\(mousePath.rawValue) route=\(currentRoute.rawValue) "
