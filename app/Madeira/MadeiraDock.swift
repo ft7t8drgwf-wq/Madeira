@@ -293,7 +293,7 @@ enum MadeiraDock {
                     ? "Steam could not finish installing content this game needs. Try again later."
                     : "Steam needs to install or update content this game depends on before it can start. Start the game again to let Madeira Dock wait for Steam."
             case 18: return "Steam does not see this game as installed."
-            case 28: return "Steam could not find the game's executable."
+            case 28: return "Steam could not find the game's executable. Game details › Steam shows which program is missing when it can tell."
             // Steam's CreateProcess for the game failed: Madeira could not load the program.
             case 29: return "Steam started this game's program, but Madeira could not load it (Steam reports an invalid platform). Export the log: it names the reason."
             case 22, 23, 24: return "Steam could not read this game's configuration. Try again."
@@ -431,12 +431,17 @@ enum MadeiraDock {
     }
 
     /// The host's environment for one launch.
-    static func configure(_ game: DockGame, launchOption: UInt32 = 0) {
+    /// `arguments`: Game details › Launch arguments, which Valve's client adds after the
+    /// launch option's own (Steam's "Set launch options"; madeira-dock patch 0003).
+    static func configure(_ game: DockGame, launchOption: UInt32 = 0, arguments: String = "") {
         for key in ["MADEIRA_STEAM_HOST_PROBE", "MADEIRA_STEAM_HOST_SESSION", "MADEIRA_STEAM_HOST_LOGIN", "MADEIRA_STEAM_HOST_LAUNCH"] {
             setenv(key, "1", 1)
         }
         setenv("MADEIRA_STEAM_HOST_APPID", String(game.id), 1)
         setenv("MADEIRA_STEAM_HOST_LAUNCH_OPTION", String(launchOption), 1)
+        let arguments = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        if arguments.isEmpty { unsetenv("MADEIRA_STEAM_HOST_LAUNCH_ARGS") }
+        else { setenv("MADEIRA_STEAM_HOST_LAUNCH_ARGS", arguments, 1) }
         setenv("MADEIRA_STEAM_HOST_CLIENT_DIR", SteamRuntimeFiles.windowsRoot, 1)
         setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.windowsInstallPath, 1)
         setenv("MADEIRA_STEAM_HOST_LOG", "C:\\madeira-dock.txt", 1)

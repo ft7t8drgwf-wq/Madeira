@@ -3354,6 +3354,43 @@ static void *ios_mach_exception_thread( void *arg )
                 {
                     uint32_t insn; ios_fault_read_insn( (uint64_t)(uintptr_t)fault_pc, &insn );  /* ml982 */
                     int emulated = 0;
+                    /* Stardew: a store that runs past the end of an anon-JIT alias chunk.
+                     * Each 16 KB chunk gets its own pool offset, so the RW alias of the
+                     * next chunk is usually NOT rw_addr + n. CoreCLR's JIT writes its code
+                     * byte stream with unaligned 4/8-byte stores; one landing on the last
+                     * bytes of a chunk wrote its tail into an unrelated pool chunk, left
+                     * the start of the next chunk unwritten, and FEX then hit "Invalid
+                     * instruction in entry block" there. When the next 16 bytes are not
+                     * contiguous in the RW alias, emulate into a scratch copy and write
+                     * back, byte by byte through each byte's own alias, only the bytes the
+                     * store changed. MADEIRA_ALIAS_SPLIT_STORE=0 turns this off. */
+                    uint8_t span_buf[32], span_old[32];
+                    uintptr_t span_va = 0;
+                    /* Exclusive/CAS and LSE atomics stay on the direct path: they are
+                     * aligned (never cross a chunk) and must stay single-copy atomic. */
+                    if (!in_jit && (insn & 0x3f000000) != 0x08000000 &&
+                        (insn & 0x3b200c00) != 0x38200000 &&
+                        ios_jit_anon_alias_lookup( fault_addr + 15 ) != rw_addr + 15)
+                    {
+                        static int split_on = -1;
+                        if (split_on < 0)
+                        {
+                            const char *e = getenv( "MADEIRA_ALIAS_SPLIT_STORE" );
+                            split_on = !(e && *e == '0');
+                        }
+                        if (split_on)
+                        {
+                            unsigned k;
+                            for (k = 0; k < sizeof(span_buf); k++)
+                            {
+                                uintptr_t b = ios_jit_anon_alias_lookup( fault_addr + k );
+                                span_buf[k] = b ? *(volatile uint8_t *)b : 0;
+                            }
+                            memcpy( span_old, span_buf, sizeof(span_old) );
+                            span_va = fault_addr;
+                            rw_addr = (uintptr_t)span_buf;
+                        }
+                    }
                     /* STP (SIMD&FP, signed offset, 128-bit Q): 10 101 1 1 0 0 0 imm7 Rt2 Rn Rt
                      *   pattern bits 31-22: 10 1011 1000  → top10 = 0x2B8 (= bits 31..22)
                      *   So mask 0xFFC00000 = top10. Match 0x2B8 << 22 = 0xAE000000? Hmm.
@@ -4144,6 +4181,26 @@ static void *ios_mach_exception_thread( void *arg )
                                 "rw_addr=0x%llx — alias OK, ADD THIS ENCODING to the case-4 emulator\n",
                                 ++undecoded_n, insn, (unsigned long long)fault_pc,
                                 (unsigned long long)fault_addr, (unsigned long long)rw_addr);
+                    }
+                    if (span_va)
+                    {
+                        static int split_n;
+                        unsigned k, changed = 0;
+                        if (emulated)
+                            for (k = 0; k < sizeof(span_buf); k++)
+                            {
+                                uintptr_t b;
+                                if (span_buf[k] == span_old[k]) continue;
+                                b = ios_jit_anon_alias_lookup( span_va + k );
+                                if (b) { *(volatile uint8_t *)b = span_buf[k]; changed++; }
+                            }
+                        if (split_n < 8)
+                            dprintf(STDERR_FILENO,
+                                "[alias-split] #%d insn=0x%08x addr=0x%llx emulated=%d bytes-written=%u "
+                                "(store crosses into a non-contiguous alias chunk)\n",
+                                ++split_n, insn, (unsigned long long)span_va, emulated, changed);
+                        /* the diag readback below compares rw_addr with the RX view */
+                        rw_addr = ios_jit_anon_alias_lookup( span_va );
                     }
                     if (emulated)
                     {
@@ -10815,6 +10872,47 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                      di.dli_fbase );
         ios_dump_fault_region( siginfo->si_addr );
     }
+    /* A 32-bit program's call or jump to an address below 64 KB. FEX refuses to
+     * compile such a block (CompileBlock: REFUSING low/invalid RIP) and returns 0,
+     * and its dispatcher branches there, so the fault arrives here with pc = 0 and
+     * lr just past the dispatcher's CompileBlock call. Wow64PrepareForException
+     * then asks FEX's BTCpuResetToConsistentState, which raises a guest exception
+     * only for a pc inside the JIT; for pc 0 it declined, the exception was
+     * dispatched as a native one, the unwind stalled and the program ended
+     * (c0000005). Black Ops II's campaign (build 26, 2026-10-26): DestroyWindow
+     * sent its window WM_ACTIVATE while the game was shutting down to start
+     * Zombies, its window procedure called a null pointer, and the campaign
+     * ended there instead of handing over. Windows and Wine swallow an exception
+     * in a window procedure called back from the kernel; to get there the guest
+     * has to see it. With pc at the dispatcher's call, FEX takes the guest state
+     * from its frame (rip = the refused address) and raises the access violation
+     * to the 32-bit program, whose own handlers then run.
+     * MADEIRA_WOW_LOW_RIP_GUEST=0 dispatches it natively as before. */
+    {
+        extern void *ios_jit_rx_base_global;
+        extern size_t ios_jit_pool_size_global;
+        static int low_rip_guest = -1;
+        uintptr_t lp_pc = (uintptr_t)PC_sig(context), lp_lr = (uintptr_t)LR_sig(context);
+        uintptr_t lp_rx = (uintptr_t)ios_jit_rx_base_global;
+        size_t lp_sz = ios_jit_pool_size_global;
+
+        if (low_rip_guest < 0)
+        {
+            /* A 32-bit program's branch below 64 KB faults in the program (on by default); 0: dispatched natively as before. */
+            const char *e = getenv( "MADEIRA_WOW_LOW_RIP_GUEST" );
+            low_rip_guest = !(e && e[0] == '0' && !e[1]);
+        }
+        if (low_rip_guest && lp_pc < 0x10000 && (uintptr_t)siginfo->si_addr == lp_pc &&
+            NtCurrentTeb()->WowTebOffset && lp_lr >= 4 &&
+            ((lp_rx && lp_lr >= lp_rx && lp_lr < lp_rx + lp_sz) || ios_jit_low_contains( lp_lr )))
+        {
+            static int low_rip_logged;
+            if (low_rip_logged++ < 16)
+                ERR( "[wow-low-rip] guest branch to %p: pc set to the dispatcher's call %p so the "
+                     "32-bit program gets the access violation\n", (void *)lp_pc, (void *)(lp_lr - 4) );
+            PC_sig(context) = lp_lr - 4;
+        }
+    }
 #endif
     setup_exception( context, &rec );
 }
@@ -10898,6 +10996,22 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
             ERR("ILL diag: x6=0x%llx x10=0x%llx x11=0x%llx (pc==x11? %d pc==x10? %d)\n",
                 (unsigned long long)x6, (unsigned long long)x10, (unsigned long long)x11,
                 x11 == pc, x10 == pc);
+            /* Stardew: the guest bytes FEX refused, from 16 before x6 (the
+             * [alias-split] question is whether a chunk start was left unwritten). */
+            if (x6 >= 0x10000ULL && x6 < 0x8000000000ULL)
+            {
+                uint8_t gb[48];
+                vm_size_t gsz = sizeof(gb);
+                if (vm_read_overwrite(mach_task_self(), x6 - 16, sizeof(gb),
+                                      (vm_address_t)gb, &gsz) == KERN_SUCCESS)
+                {
+                    char hex[sizeof(gb) * 3 + 1];
+                    unsigned k;
+                    for (k = 0; k < sizeof(gb); k++)
+                        snprintf( hex + k * 3, 4, "%02x ", gb[k] );
+                    ERR("ILL diag: guest bytes @x6-16: %s\n", hex);
+                }
+            }
             /* FEX inline L1 exit-dispatch reads {L1Ptr, L1Mask} at STATE+0xa0
              * and the entry pair {host, guest} at L1Ptr + (rip & mask)<<?.
              * Dump the entry for x6 so a torn pair is visible at crash time.
@@ -12547,6 +12661,70 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                         (void*)(uintptr_t)g_wine_return_ring[(ri-7)&7],
                         (void*)(uintptr_t)g_wine_return_ring[(ri-8)&7]);
                 }
+                /* ml1353: GIVE UP ON AN UNRECOVERABLE EXEC FAULT.
+                 *
+                 * A pool page whose max protection has lost EXECUTE can never run
+                 * code again (the ml1351 [pool-poison] class). When the faulting
+                 * code is the process's own ntdll copy, the exception dispatcher
+                 * sits on the same dead pages, so delivering the fault faults
+                 * again at the dispatcher, forever: device log 81, two launched
+                 * children at a full core each for the rest of the session. After
+                 * 32 consecutive faults of one thread at one pc on such a page,
+                 * end this pseudo-process (abort_process, run on the thread
+                 * itself after this handler returns) instead.
+                 * env.MADEIRA_POOL_NOEXEC_GIVEUP = 0 keeps the endless retry. */
+                {
+                    static int giveup = -1;
+                    extern int ios_addr_max_prot( const void *addr, int *prot );
+                    if (giveup < 0)
+                    {
+                        const char *e = getenv( "MADEIRA_POOL_NOEXEC_GIVEUP" );
+                        giveup = !(e && e[0] == '0');
+                    }
+                    if (giveup)
+                    {
+                        int cur = -1, maxp = ios_addr_max_prot( pc, &cur );
+                        if (maxp >= 0 && !(maxp & VM_PROT_EXECUTE))
+                        {
+                            static struct { uintptr_t teb, pc; unsigned int n; } trk[32];
+                            static unsigned int trk_next;
+                            uintptr_t fteb = (uintptr_t)REGn_sig(18, bus_ctx);
+                            unsigned int i, slot = 32, n;
+
+                            for (i = 0; i < 32; i++) if (trk[i].teb == fteb) { slot = i; break; }
+                            if (slot == 32)
+                            {
+                                slot = trk_next++ % 32;
+                                trk[slot].teb = fteb;
+                                trk[slot].pc = 0;
+                                trk[slot].n = 0;
+                            }
+                            if (trk[slot].pc != (uintptr_t)pc)
+                            {
+                                trk[slot].pc = (uintptr_t)pc;
+                                trk[slot].n = 0;
+                            }
+                            n = ++trk[slot].n;
+                            if (n >= 32)
+                            {
+                                TEB *cteb = NtCurrentTeb();
+                                dprintf( 2, "[pool] ml1353 giving up: pid %04x tid %04x pc=%p (pool+0x%lx) "
+                                         "faulted %u times in a row on a page whose max protection has no "
+                                         "EXECUTE (prot=%x/%x); ending this process (c0000005) instead of "
+                                         "retrying forever (env.MADEIRA_POOL_NOEXEC_GIVEUP=0 keeps retrying)\n",
+                                         cteb ? (int)HandleToULong( cteb->ClientId.UniqueProcess ) : 0,
+                                         cteb ? (int)HandleToULong( cteb->ClientId.UniqueThread ) : 0,
+                                         pc, (unsigned long)((uintptr_t)pc - rx), n, cur, maxp );
+                                trk[slot].teb = 0;
+                                REGn_sig(0, bus_ctx) = STATUS_ACCESS_VIOLATION;
+                                SP_sig(bus_ctx) &= ~(uintptr_t)15;
+                                LR_sig(bus_ctx) = 0;
+                                PC_sig(bus_ctx) = (uintptr_t)abort_process;
+                                return;
+                            }
+                        }
+                    }
+                }
                 /* Don't try store emulation, go straight to exception */
                 goto bus_fatal;
             }
@@ -12967,6 +13145,37 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                     static unsigned long wr_seen, wr_healed;
                     int stripped = (is_write && (want & PROT_WRITE) &&
                                     host_prot >= 0 && !(host_prot & VM_PROT_WRITE));
+                    /* Stardew: never heal a page owned by a live anon-JIT alias.
+                     * Those pages are RX on purpose (writes go through the RW alias)
+                     * and FEX tracks them as RWX intervals: the write has to reach
+                     * the guest as an access violation so FEX invalidates the code
+                     * it translated from the page. Healing made the page RWX behind
+                     * FEX's back; CoreCLR then patched a FixupPrecode (8-byte CAS)
+                     * with no invalidation, the stale translation kept calling
+                     * PreStubWorker (~11M/s) and the game never got past startup.
+                     * The fall-through AV path is the one that already works for the
+                     * same CAS on pages Wine marks RX ([smc-atomic]).
+                     * MADEIRA_WRSTRIP_ALIAS_HEAL=1 restores the old heal. */
+                    if (stripped)
+                    {
+                        extern uintptr_t ios_jit_anon_alias_lookup(uintptr_t fault_addr);
+                        static int alias_heal = -1;
+                        if (alias_heal < 0)
+                        {
+                            const char *e = getenv( "MADEIRA_WRSTRIP_ALIAS_HEAL" );
+                            alias_heal = e && *e == '1';
+                        }
+                        if (!alias_heal &&
+                            ios_jit_anon_alias_lookup( (uintptr_t)siginfo->si_addr ))
+                        {
+                            static unsigned alias_skips;
+                            if (alias_skips++ < 8)
+                                ERR("[wr-strip] %p is a live anon-JIT alias page — not healing, "
+                                    "delivering the write fault so FEX sees it (skips=%u)\n",
+                                    siginfo->si_addr, alias_skips);
+                            stripped = 0;
+                        }
+                    }
                     ++wr_seen;
                     if (wr_seen <= 12 || (wr_seen % 4096) == 0)
                         ERR("[wr-strip] #%lu addr=%p pc=%p esr=0x%llx write=%d "

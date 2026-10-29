@@ -39,6 +39,9 @@ LOG="$B/madeira-i386-build.log"
 
 [ -x "$STRIP" ] || { echo "llvm-mingw not found at $TC (docs/BUILDING.md)" >&2; exit 1; }
 
+# This repository's wine patches (build/wine-patches) go into the i386 farm too.
+"$R/build/wine-patches/apply.sh"
+
 # ---------------------------------------------------------------- configure
 # Its own tree, like build-arm64ec: reconfiguring build-macos with an extra
 # arch would regenerate every module Makefile the ntdll-unix build relies on.
@@ -122,6 +125,7 @@ echo "== installed ${#TARGETS[@]} Wine modules into app/Madeira/i386-windows =="
 # through its own table (virtual_ios.c, the d3d9shim branch).
 if [ -z "${SKIP_DXMT:-}" ] && [ $# -eq 0 ]; then
     D="$R/dxmt"
+    "$R/build/dxmt-patches/apply.sh"
     X="$B/dxmt-cross-i386.txt"
     cat > "$X" <<EOF
 [binaries]

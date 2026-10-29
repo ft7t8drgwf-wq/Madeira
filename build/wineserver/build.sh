@@ -8,6 +8,9 @@ SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 APP_LIB="$REPO_ROOT/app/Madeira/libwineserver.a"
 SHIMS_DIR="$REPO_ROOT/build/ntdll-unix/shims"
 
+# server/*.c from the submodule are compiled below; apply this repository's wine patches first
+"$REPO_ROOT/build/wine-patches/apply.sh"
+
 # Object files and library go in build dir
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"

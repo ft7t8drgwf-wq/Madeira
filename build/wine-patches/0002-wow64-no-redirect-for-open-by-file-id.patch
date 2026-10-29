@@ -1,0 +1,41 @@
+diff --git a/dlls/wow64/file.c b/dlls/wow64/file.c
+index 6630a5b0..38017de9 100644
+--- a/dlls/wow64/file.c
++++ b/dlls/wow64/file.c
+@@ -258,6 +258,18 @@ NTSTATUS WINAPI wow64_NtCancelSynchronousIoFile( UINT *args )
+ }
+ 
+ 
++/* An open by file ID names the file by an 8-byte ID, not a path, so file
++ * system redirection does not apply to it, as on Windows. Redirecting it
++ * turned the ID into a path under syswow64 when the root was system32, and
++ * the open failed with STATUS_OBJECT_PATH_SYNTAX_BAD. */
++static OBJECT_ATTRIBUTES *objattr_32to64_file( struct object_attr64 *out,
++                                               const OBJECT_ATTRIBUTES32 *in, ULONG options )
++{
++    if (options & FILE_OPEN_BY_FILE_ID) return objattr_32to64( out, in );
++    return objattr_32to64_redirect( out, in );
++}
++
++
+ /**********************************************************************
+  *           wow64_NtCreateFile
+  */
+@@ -281,7 +293,7 @@ NTSTATUS WINAPI wow64_NtCreateFile( UINT *args )
+     NTSTATUS status;
+ 
+     *handle_ptr = 0;
+-    status = NtCreateFile( &handle, access, objattr_32to64_redirect( &attr, attr32 ),
++    status = NtCreateFile( &handle, access, objattr_32to64_file( &attr, attr32, options ),
+                            iosb_32to64( &io, io32 ), alloc_size, attributes,
+                            sharing, disposition, options, ea_buffer, ea_length );
+     put_handle( handle_ptr, handle );
+@@ -542,7 +554,7 @@ NTSTATUS WINAPI wow64_NtOpenFile( UINT *args )
+     NTSTATUS status;
+ 
+     *handle_ptr = 0;
+-    status = NtOpenFile( &handle, access, objattr_32to64_redirect( &attr, attr32 ),
++    status = NtOpenFile( &handle, access, objattr_32to64_file( &attr, attr32, options ),
+                          iosb_32to64( &io, io32 ), sharing, options );
+     put_handle( handle_ptr, handle );
+     put_iosb( io32, &io );

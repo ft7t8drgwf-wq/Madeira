@@ -1,0 +1,174 @@
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -229,6 +229,10 @@
+     unsigned int            count;   /* count of used entries in the names array */
+     unsigned int            pos;     /* current reading position in the names array */
+     struct file_identity    id;      /* directory file identity */
++#ifdef WINE_IOS
++    BOOL                    ios_mtime_valid; /* ios_mtime was read with id */
++    struct timespec         ios_mtime;       /* the directory's mtime when it was read */
++#endif
+     struct dir_data_names  *names;   /* directory file names */
+     struct dir_data_buffer *buffer;  /* head of data buffers list */
+     UNICODE_STRING          mask;    /* the mask used when creating the cache entry */
+@@ -2591,6 +2595,131 @@
+  *
+  * Return a directory entry from the cached data.
+  */
++#ifdef WINE_IOS
++/* iOS-Madeira: a short-lived cache of the stat and attributes of directory entries.
++ *
++ * Every entry a listing returns costs lstat() plus one listxattr() per attribute looked up
++ * (two), a stat() of "<dir>/.." for a directory, and a stat() for a symlink, and in the iOS
++ * sandbox each of those calls is slow. Steam's client service (32-bit SteamService.exe)
++ * prepares a CEG game by listing C:\windows and system32 (syswow64, ~1000 entries) about a
++ * thousand times in a row, on new handles each time; on an iPhone that took longer than the
++ * ~100 s Steam waits for the service, so Black Ops 1 (app 42700) never got its binaries
++ * (RemoteCallFailed, 55). On a PC the same listing takes a second or two.
++ *
++ * An entry is answered from the cache while its directory is the same one (device and inode)
++ * with the same mtime as when the entry was stored, so an entry added, removed or renamed
++ * since misses, and for at most MADEIRA_DIR_INFO_CACHE_MS (default 2000, 0 turns the cache
++ * off), so a file changed in place (size, times, attributes) shows up within that time.
++ * NTFS itself only updates a directory entry's size and times lazily. Called with
++ * dir_mutex held. */
++#define IOS_DIR_INFO_SLOTS 8192
++
++struct ios_dir_info
++{
++    char            *name;        /* entry name, NULL if the slot is free */
++    unsigned int     hash;
++    dev_t            dev;         /* directory identity and mtime */
++    ino_t            dir;
++    struct timespec  dir_mtime;
++    ULONGLONG        stamp;       /* monotonic ms when stored */
++    int              ret;         /* get_file_info() result: 0, or -1 for ENOENT */
++    struct stat      st;
++    ULONG            attributes;
++    ULONG            reparse_tag;
++};
++
++static struct ios_dir_info *ios_dir_info;
++
++static int ios_dir_info_ms(void)
++{
++    static int ms = -1;
++
++    if (ms < 0)
++    {
++        const char *e = getenv( "MADEIRA_DIR_INFO_CACHE_MS" );
++        int v = e ? atoi( e ) : 2000;
++        ms = v < 0 ? 0 : v > 10000 ? 10000 : v;
++    }
++    return ms;
++}
++
++static ULONGLONG ios_dir_info_now(void)
++{
++    struct timespec ts;
++
++    clock_gettime( CLOCK_MONOTONIC, &ts );
++    return (ULONGLONG)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++}
++
++static unsigned int ios_dir_info_hash( const struct dir_data *data, const char *name )
++{
++    unsigned int h = 2166136261u;
++
++    while (*name) h = (h ^ (unsigned char)*name++) * 16777619u;
++    h ^= (unsigned int)data->id.ino * 2654435761u;
++    h ^= (unsigned int)data->id.dev * 40503u;
++    return h;
++}
++
++static int ios_get_dir_entry_info( const struct dir_data *data, const char *name, const char *path,
++                                   struct stat *st, ULONG *attributes, ULONG *reparse_tag )
++{
++    int ms = ios_dir_info_ms(), ret;
++    struct ios_dir_info *e;
++    unsigned int hash;
++    ULONGLONG now;
++
++    if (!ms || !data->ios_mtime_valid) return get_file_info( path, st, attributes, reparse_tag );
++    if (!ios_dir_info && !(ios_dir_info = calloc( IOS_DIR_INFO_SLOTS, sizeof(*ios_dir_info) )))
++        return get_file_info( path, st, attributes, reparse_tag );
++
++    hash = ios_dir_info_hash( data, name );
++    e = &ios_dir_info[hash & (IOS_DIR_INFO_SLOTS - 1)];
++    now = ios_dir_info_now();
++    if (e->name && e->hash == hash && e->dev == data->id.dev && e->dir == data->id.ino &&
++        e->dir_mtime.tv_sec == data->ios_mtime.tv_sec && e->dir_mtime.tv_nsec == data->ios_mtime.tv_nsec &&
++        now - e->stamp < (ULONGLONG)ms && !strcmp( e->name, name ))
++    {
++        if (e->ret == -1)
++        {
++            errno = ENOENT;
++            return -1;
++        }
++        *st = e->st;
++        *attributes = e->attributes;
++        *reparse_tag = e->reparse_tag;
++        return e->ret;
++    }
++
++    ret = get_file_info( path, st, attributes, reparse_tag );
++    if (ret == -1 && errno != ENOENT) return ret;
++
++    if (!e->name || strcmp( e->name, name ))
++    {
++        free( e->name );
++        if (!(e->name = strdup( name ))) return ret;
++    }
++    e->hash = hash;
++    e->dev = data->id.dev;
++    e->dir = data->id.ino;
++    e->dir_mtime = data->ios_mtime;
++    e->stamp = now;
++    e->ret = ret;
++    if (ret != -1)
++    {
++        e->st = *st;
++        e->attributes = *attributes;
++        e->reparse_tag = *reparse_tag;
++    }
++    else errno = ENOENT;
++    return ret;
++}
++
++/* get_dir_data_entry() below reads entry info through the cache */
++#define get_file_info( path, st, attributes, reparse_tag ) \
++    ios_get_dir_entry_info( dir_data, names->unix_name, path, st, attributes, reparse_tag )
++#endif
++
+ static NTSTATUS get_dir_data_entry( struct dir_data *dir_data, void *info_ptr, IO_STATUS_BLOCK *io,
+                                     ULONG max_length, FILE_INFORMATION_CLASS class,
+                                     union file_directory_info **last_info )
+@@ -2701,6 +2830,10 @@
+     return name_len > max_length ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+ }
+ 
++#ifdef WINE_IOS
++#undef get_file_info
++#endif
++
+ #ifdef VFAT_IOCTL_READDIR_BOTH
+ 
+ /***********************************************************************
+@@ -2952,6 +3085,17 @@
+         fstat( fd, &st );
+         data->id.dev = st.st_dev;
+         data->id.ino = st.st_ino;
++#ifdef WINE_IOS
++        data->ios_mtime.tv_sec = st.st_mtime;
++#ifdef HAVE_STRUCT_STAT_ST_MTIM
++        data->ios_mtime.tv_nsec = st.st_mtim.tv_nsec;
++#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC)
++        data->ios_mtime.tv_nsec = st.st_mtimespec.tv_nsec;
++#else
++        data->ios_mtime.tv_nsec = 0;
++#endif
++        data->ios_mtime_valid = TRUE;
++#endif
+     }
+ 
+     TRACE( "mask %s found %u files\n", debugstr_us( mask ), data->count );

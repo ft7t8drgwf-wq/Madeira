@@ -45,10 +45,15 @@ class SteamLibraryFetcher {
 
         // Playable types only: games, demos and applications. This leaves out
         // DLC, soundtracks and tools (redistributables, runtimes, SDKs, servers).
+        // The owned DLC are kept aside for their games' downloads (SteamDLC).
         let games = appInfos.filter { $0.type.isPlayable }
-        SteamLog.trace("\(games.count) of \(appInfos.count) apps are playable (game/demo/application)")
+        ownedDLC = appInfos.filter { $0.type == .dlc }
+        SteamLog.trace("\(games.count) of \(appInfos.count) apps are playable (game/demo/application), \(ownedDLC.count) DLC")
         return games
     }
+
+    /// The DLC apps of the account's licenses, from the last fetchOwnedApps.
+    private(set) var ownedDLC: [SteamAppInfo] = []
 
     /// Depot IDs included in the account's licenses, from the same package
     /// info the library uses (`depotids`). The installer consults it only when
@@ -84,6 +89,15 @@ class SteamLibraryFetcher {
         try await session.ensureConnected()
         let tokens = try await fetchPICSAccessTokens(appIDs: [appID])
         return try await fetchAppInfo(appIDs: [appID], tokens: tokens).first
+    }
+
+    /// Fetches PICS info for several apps in one token and one product-info
+    /// round trip (DLC names for Game details).
+    func fetchAppInfos(appIDs: [UInt32]) async throws -> [SteamAppInfo] {
+        guard !appIDs.isEmpty else { return [] }
+        try await session.ensureConnected()
+        let tokens = try await fetchPICSAccessTokens(appIDs: appIDs)
+        return try await fetchAppInfo(appIDs: appIDs, tokens: tokens)
     }
 
     // MARK: - Install metadata
