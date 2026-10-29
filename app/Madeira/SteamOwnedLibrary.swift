@@ -78,10 +78,12 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     }
 
     /// The owned DLC left on whose files an installed game lacks (its record
-    /// names none or only some of their depots), for Download DLC on its page.
-    func dlcToDownload(installedDepots: Set<Int>) -> [SteamOwnedDLC] {
+    /// names none of them by `dlcappid`, `installedDLC`, and lacks some of
+    /// their depots), for Download DLC on its page.
+    func dlcToDownload(installedDepots: Set<Int>, installedDLC: Set<Int> = []) -> [SteamOwnedDLC] {
         let off = SteamDLC.off(id)
-        return (dlc ?? []).filter { !off.contains($0.id) && !$0.depots.isEmpty && !Set($0.depots).isSubset(of: installedDepots) }
+        return (dlc ?? []).filter { !off.contains($0.id) && !$0.depots.isEmpty && !installedDLC.contains($0.id) &&
+            !Set($0.depots).isSubset(of: installedDepots) }
     }
 
     /// The language to offer on an installed game's page (Download in ...):

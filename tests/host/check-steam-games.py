@@ -313,7 +313,8 @@ func record(_ appID: Int, _ name: String, _ folder: String, flags: Int) -> Strin
         require(dlcGame.dlc?.first?.downloadBytes == 20 && dlcGame.dlc?.first?.installBytes == 25 && dlcGame.dlc?.last?.depots == [],
                 "sizes per DLC, and a DLC without files has no depots")
         require(SteamDLC.offApps(7000).isEmpty, "every owned DLC is on by default")
-        require(dlcGame.dlcToDownload(installedDepots: [7001]).map(\.id) == [7101] && dlcGame.dlcToDownload(installedDepots: [7001, 7002]).isEmpty,
+        require(dlcGame.dlcToDownload(installedDepots: [7001]).map(\.id) == [7101] && dlcGame.dlcToDownload(installedDepots: [7001, 7002]).isEmpty &&
+                dlcGame.dlcToDownload(installedDepots: [7001], installedDLC: [7101]).isEmpty,
                 "an installed game lacking a DLC's depots offers it")
         SteamDLC.setOn(7101, false, for: 7000)
         require(SteamDLC.offApps(7000) == [7101] && dlcGame.dlcToDownload(installedDepots: [7001]).isEmpty, "a DLC turned off is not taken or offered")
