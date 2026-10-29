@@ -16,11 +16,14 @@ are logged as "[mono-bp] alias miss". The alias lookup is also given the
 host address (Address + guest base) that the table holds; in the ARM64EC
 module the base is 0, so only the WOW64 guest window sees a difference.
 
-Applies to willfaust/FEX 35e8f36 (the build line's pin) and 6fb1b50 (125hz
-main's pin), alone or on top of 0001 to 0003. The rebuilt ARM64EC module is
-app/Madeira/arm64ec-windows/xtajit64.dll, built from 35e8f36 + this patch only
-with build/fex-arm64ec/build.sh's options (0001 to 0003 are for the WOW64
-module). The WOW64 module gets the fix the next time xtajit.dll is rebuilt.
+Applies to willfaust/FEX f59cab9, 35e8f36 (the build line's pin) and
+6fb1b50 (125hz main's pin), alone or on top of 0001 to 0003. The rebuilt
+ARM64EC module is app/Madeira/arm64ec-windows/xtajit64.dll, built from
+f59cab9 + this patch only with build/fex-arm64ec/build.sh's options. f59cab9
+is the source of the xtajit64.dll it replaces (an unchanged build has the same
+section sizes and code), so this fix is the only change to the 64-bit module.
+0001 to 0003 are for the WOW64 module, which gets this fix the next time
+xtajit.dll is rebuilt.
 Not for FEX-Emu.
 
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
