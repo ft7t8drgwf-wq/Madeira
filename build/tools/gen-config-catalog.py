@@ -452,6 +452,9 @@ OVERLAY = {
                 "note": "Default off. If the normal JIT image allocation fails, copies up to 16 MB may use "
                         "unallocated region C, preserving 4 MB for code buffers. Requires pool-low; 64-bit "
                         "processes only. Does not shrink live buffers or the pool-low-margin."},
+    "env.MADEIRA_KUSER_NATIVE_ARCH": {"category": "Debugging / logs", "title": "Host CPU type games see in KUSER_SHARED_DATA",
+                "note": "Default empty (ARM64, 12). For diagnosis only: 9 makes KUSER_SHARED_DATA report an AMD64 host, "
+                        "for protected code that takes a Windows-on-ARM path when it sees 12. Logged as [kuser]."},
     "env.MADEIRA_IMAGE_PATCH_TRACE": {"category": "Debugging / logs", "title": "DLL code patch trace", "kind": "bool", "default": "0",
                 "note": "1 logs up to 64 successful 1–16 byte executable-image protection requests and their PE/pool bytes. Read-only, owner-aware diagnostics; does not alter hooks or code."},
     "env.MADEIRA_MOUSE_ROUTING": {"title": "Mouse routing and pointer-lock fixes",
