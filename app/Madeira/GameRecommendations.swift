@@ -740,7 +740,9 @@ enum GameRecommendations {
     /// Launcher.exe" starts Battle.net.exe, a 64-bit Chromium (CEF) client, and
     /// Blizzard's Agent.exe, which installs and updates the games. The same Chromium
     /// lines as Ubisoft Connect; the Wine desktop with Windows services first for the
-    /// Agent's out-of-process COM. Not device-tested yet.
+    /// Agent's out-of-process COM. Windows' location service is off: the client stops
+    /// on it under Wine (Lutris's Battle.net script turns it off the same way). Not
+    /// device-tested yet.
     static let battleNet = GameRecommendation(
         id: "battle-net", title: "Battle.net", version: 1,
         config: """
@@ -761,6 +763,7 @@ enum GameRecommendations {
         env.MADEIRA_TOUCH_MOUSE = 1
         env.MADEIRA_WOW_MIN_FREE_GB = 2
         env.DXMT_SMALL_RINGS = Battle.net.exe
+        env.WINEDLLOVERRIDES = locationapi=d
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
         fastSync: true, display: "fit", launchMode: "desktop", startServices: true)

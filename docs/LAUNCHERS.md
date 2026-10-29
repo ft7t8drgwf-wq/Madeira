@@ -44,6 +44,9 @@ lists have no release delay (`MADEIRA_FREE_DELAY_MS`): Chromium's allocator
 reserves, releases and reserves again. The installers get the standard line
 only.
 
+Battle.net's list also turns off Windows' location service
+(`env.WINEDLLOVERRIDES = locationapi=d`), which the client stops on under Wine.
+
 The Ubisoft Connect and Battle.net lists are not device-tested yet.
 
 ## Ubisoft repairs
