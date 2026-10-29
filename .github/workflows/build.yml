@@ -327,6 +327,12 @@ jobs:
           xcodebuild -downloadComponent MetalToolchain
           tools/build/build-shader-headers.sh
           build/wine-i386/build.sh
+      # Madeira Dock (Steam) is a build output that build-ipa.sh does not make:
+      # without dockhost.exe in the bundle the app hides Steam.
+      - name: Build Madeira Dock
+        run: |
+          tools/build/setup-llvm-mingw.sh
+          build/madeira-dock/build.sh
       - name: Build IPA
         run: tools/build-ipa.sh
       - uses: actions/cache/save@v4
