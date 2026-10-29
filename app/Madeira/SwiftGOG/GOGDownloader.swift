@@ -22,6 +22,8 @@ struct GOGDownloadProgress: Equatable, Sendable {
     var totalBytes: UInt64 = 0
     var doneBytes: UInt64 = 0
     var bytesPerSecond: Double = 0
+    /// Preparing: what is being fetched from GOG ("Getting the file list (2 of 4)").
+    var step: String?
     var fraction: Double { totalBytes > 0 ? min(1, Double(doneBytes) / Double(totalBytes)) : 0 }
 }
 

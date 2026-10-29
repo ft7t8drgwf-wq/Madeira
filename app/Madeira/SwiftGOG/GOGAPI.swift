@@ -202,6 +202,8 @@ actor GOGAPI {
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.urlCache = nil
         config.timeoutIntervalForRequest = 30
+        // A stalled answer fails instead of leaving a download preparing forever.
+        config.timeoutIntervalForResource = 300
         config.httpAdditionalHeaders = ["User-Agent": Self.userAgent]
         http = URLSession(configuration: config)
     }

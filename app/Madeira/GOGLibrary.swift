@@ -343,14 +343,23 @@ struct GOGInstalledGame: Codable, Sendable {
         let kind = downloads[id]?.kind ?? .install
         do {
             guard let title = game(id)?.title ?? installed[id]?.title else { throw GOGAPIError.invalid("unknown-game") }
+            // What the download is waiting for before its first chunk, shown and logged.
+            func step(_ text: String) {
+                downloads[id]?.progress.step = text
+                GOGLog.event("[gog-download] prepare id=\(id) step=\"\(text)\"")
+            }
+            step("Finding the newest build")
             let build = try await api.latestBuild(id)
+            step("Getting the build's details")
             let manifest = try GOGBuildManifest.parse(try GOGCodec.json(try await api.buildManifest(build), what: "build"))
+            step("Checking which DLC you own")
             let ownedIDs = try await api.ownedIDs()
             let (depots, language) = manifest.selected(ownedDLC: ownedIDs.subtracting([manifest.baseProductID]))
             guard !depots.isEmpty else { throw GOGAPIError.noWindowsBuild }
             var files: [GOGFile] = []
-            for depot in depots {
+            for (index, depot) in depots.enumerated() {
                 try Task.checkCancellation()
+                step("Getting the file list (\(index + 1) of \(depots.count))")
                 let data = try await api.depotManifest(depot.manifest)
                 files += try await Task.detached(priority: .userInitiated) { try GOGDepot.files(data, product: depot.productID) }.value
             }

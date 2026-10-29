@@ -287,12 +287,12 @@ struct GOGDownloadStatus: View {
     private var caption: String {
         let p = download.progress
         switch download.state {
-        case .queued: return "Waiting to start…"
+        case .queued: return "Waiting for the other GOG download to finish…"
         case .paused: return p.totalBytes > 0 ? "Paused at \(Int(p.fraction * 100))%" : "Paused"
         case .failed(let message): return message
         case .active:
             switch p.phase {
-            case .preparing: return "Preparing download…"
+            case .preparing: return p.step.map { $0 + "…" } ?? "Preparing download…"
             case .verifying: return "Checking installed files… \(Int(p.fraction * 100))%"
             case .finishing: return "Finishing…"
             case .downloading:
