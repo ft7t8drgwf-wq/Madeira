@@ -44,3 +44,8 @@ reconnect during reads and writes, paused-download resume after relaunch, cloud
 save conflicts, moves and background expiration on iPad. Native Wine launch and
 file-provider coordination also need device checks. The device results reported
 in #235 apply to its own build.
+
+If the folder picker shows the drive but Open does nothing, drag the drive or
+folder from the Files app (Split View) onto Add drive or folder instead. The
+log records `[picker] shown`, `[picker] picked`, `[picker] cancelled` and
+`[external] dropped folder` lines, so a missing step shows where it stopped.
