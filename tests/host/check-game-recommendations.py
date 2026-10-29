@@ -65,9 +65,12 @@ for m in re.finditer(r'static let (\w+) = GameRecommendation\(\n\s*id: "([^"]+)"
     lines = [line[len(indent):] if line.startswith(indent) else line for line in body.split('\n')]
     presets[ident] = dict(name=name, title=title, version=int(version), lines=lines, switches=' '.join((switches or '').split()))
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'ghost-of-tsushima', 'god-of-war',
-                        'horizon-zero-dawn', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'standard'}, sorted(presets)
+                        'horizon-zero-dawn', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid',
+                        'rockstar-launcher', 'rockstar-launcher-setup', 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net',
+                        'battle-net-setup', 'standard'}, sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,\n'
-        '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]') in lists_src
+        '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid,\n'
+        '                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, standard]') in lists_src
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
 # so every game's own list ends with them. The standard list reaches every other game
@@ -81,7 +84,10 @@ for ident, p in presets.items():
         continue
     # The Fallout lists are the standard one plus a switch: the games ran with it. Project Zomboid
     # was tested through Madeira Dock with the standard list's lines.
-    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid'):
+    # The publishers' launchers' Chromium clients take no release delay (their allocator
+    # reserves, releases and reserves again), and their installers the standard line only.
+    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'rockstar-launcher-setup',
+                 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net', 'battle-net-setup'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -112,7 +118,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: fourteen lists, recorded fork defaults retained, Dark Souls and Fallout lists kept separate, no key twice, '
+print('PASS: twenty lists, recorded fork defaults retained, Dark Souls and Fallout lists kept separate, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -301,6 +307,27 @@ assert 'case "playgtav.exe", "gta5_enhanced.exe":' in match and 'return inSteam 
 assert 'return inSteam ? rdr2Steam : rdr2Other' in match
 assert 'guard fileExists(folder + "\\\\GTA5_Enhanced.exe") else { return nil }' in match and 'default:\n            return nil' in match
 
+# The publishers' launchers (LauncherSupport.swift). Rockstar's lists are 125hz's (6f7eb58a) with this
+# tree's fork-default comment; Ubisoft Connect and Battle.net take the Chromium chain's lines without the
+# release delay. All of them, installers too, start in the Wine desktop with Windows services first.
+CHROMIUM = ['pool-low = 1', 'pool-page-fit = 1', 'pool-split = 1', 'env.MADEIRA_SC_PA_POOLS = 2',
+            'env.MADEIRA_POOL_HEAD_RESERVE_MB = 128', 'env.MADEIRA_POOL_LOW_IMAGES = 1', 'env.MADEIRA_POOL_RECYCLE_IMAGES = 1',
+            'env.MADEIRA_X64_IMAGE_NOCOPY = 1', 'env.MADEIRA_LOCK_ORPHAN = stamped']
+for ident in ('rockstar-launcher', 'ubisoft-connect', 'battle-net'):
+    p = presets[ident]
+    assert all(line in p['lines'] for line in CHROMIUM), (ident, 'the Chromium chain')
+    assert p['switches'] == 'fastSync: true, display: "fit", launchMode: "desktop", startServices: true', (ident, p['switches'])
+for ident in ('rockstar-launcher-setup', 'ubisoft-connect-setup', 'battle-net-setup'):
+    p = presets[ident]
+    assert p['tested'] == presets['standard']['tested'] and p['switches'] == 'launchMode: "desktop", startServices: true', (ident, p)
+for ident in ('ubisoft-connect', 'battle-net'):
+    assert not any(line.startswith('env.MADEIRA_FREE_DELAY_MS') for line in presets[ident]['lines']), ident
+assert 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist' in presets['rockstar-launcher']['lines']
+assert 'if let mode = rec.launchMode { entry.launchMode = mode == "desktop" ? mode : nil }' in apply_src
+assert 'if let on = rec.startServices { entry.startServices = on ? true : nil }' in apply_src
+assert 'case "launcher.exe" where Array(parts.dropLast().suffix(2)) == ["rockstar games", "launcher"]:' in lists_src
+print('PASS: the launchers\' lists: the Chromium chain, the Wine desktop with services first, installers the standard line')
+
 # Where the app applies them.
 save = block(library, '    func save(_ entry: LibraryEntry, metadata: Bool = false) {', '\n    }\n')
 assert save.index('let isNew = !next.contains { $0.id == entry.id || (entry.steamAppID != nil && $0.steamAppID == entry.steamAppID) }') \
@@ -395,6 +422,8 @@ struct LibraryEntry {
     var fpsMode = 1
     var fastSync: Bool? = nil
     var semaphoreFastPath: Bool? = nil
+    var launchMode: String? = nil
+    var startServices: Bool? = nil
 }
 
 final class PrefStore {
@@ -491,6 +520,19 @@ check(id(#"C:\GOG Games\Fallout New Vegas\FalloutNV.exe"#) == "fallout-new-vegas
 check(id(steam + #"\Fallout 3 goty"#, 22370) == "fallout-3" && id(steam + #"\Fallout 3"#) == "fallout-3"
       && id(#"D:\Fallout 3\Fallout3.exe"#) == "fallout-3", "Fallout 3 and its GOTY Edition")
 check(id(steam + #"\Fallout 4"#, 377160) == "none", "Fallout 4 has no list")
+check(id(#"C:\Program Files\Rockstar Games\Launcher\Launcher.exe"#) == "rockstar-launcher", "the Rockstar launcher")
+check(id(#"C:\Games\Other\Launcher.exe"#) == "none", "another publisher's Launcher.exe")
+check(id(#"C:\Madeira Downloads\Rockstar-Games-Launcher.exe"#) == "rockstar-launcher-setup", "the Rockstar installer")
+check(id(#"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\UbisoftConnect.exe"#) == "ubisoft-connect"
+      && id(#"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\upc.exe"#) == "ubisoft-connect"
+      && id(#"C:\Program Files\Ubisoft\Ubisoft Game Launcher\Uplay.exe"#) == "ubisoft-connect", "Ubisoft Connect")
+check(id(#"C:\Games\AC2\Uplay.exe"#) == "none" && id(#"C:\Games\x\upc.exe"#) == "none", "a Uplay.exe outside the client's folder")
+check(id(#"C:\Madeira Downloads\UbisoftConnectInstaller.exe"#) == "ubisoft-connect-setup", "the Ubisoft installer")
+check(id(#"C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe"#) == "battle-net"
+      && id(#"C:\Program Files (x86)\Battle.net\Battle.net.exe"#) == "battle-net", "Battle.net")
+check(id(#"C:\Games\Battle.net.exe"#) == "none", "Battle.net.exe outside its folder")
+check(id(#"C:\Madeira Downloads\Battle.net-Setup.exe"#) == "battle-net-setup", "the Battle.net installer")
+check(R.battleNet.switchSummary == "starts in the Wine desktop, Windows services first", R.battleNet.switchSummary)
 check(R.falloutNewVegas.switchSummary == "older NVIDIA card on", R.falloutNewVegas.switchSummary)
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, Horizon Zero Dawn, the Fallouts and Black Ops II by their programs, others none")
 

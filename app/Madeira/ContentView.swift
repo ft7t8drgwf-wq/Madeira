@@ -2621,6 +2621,9 @@ struct ContentView: View {
             }
             return
         }
+        // Ubisoft games look for Uplay.exe and the client's registry values, whoever starts
+        // them; nothing happens without Ubisoft Connect installed (LauncherSupport.swift).
+        LauncherSupport.repairUbisoft()
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
@@ -3489,6 +3492,8 @@ struct ContentView: View {
             try profile?.validate()
             guard SteamSignIn.isSignedIn else { throw DockError.message("Sign in to Steam in Madeira before starting Dock.") }
         } catch { fail(error); return }
+        // A Ubisoft game bought on Steam starts Ubisoft Connect for its licence (LauncherSupport.swift).
+        LauncherSupport.repairUbisoft()
         // Only one sign-in of the account may be online: the app's own Steam connection
         // (library, playtime, downloads) logs off and its socket closes before the sign-in
         // is handed to Valve's client, and it stays off until the Dock session has ended

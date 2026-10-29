@@ -24,6 +24,11 @@
 //      anywhere else a copy from outside Steam (Rockstar Games Launcher or
 //      another store), and each has its own list. Red Dead Redemption 2's
 //      RDR2.exe and PlayRDR2.exe the same way.
+//    - The publishers' launchers (LauncherSupport.swift): Ubisoft Connect's
+//      UbisoftConnect.exe or upc.exe in an "Ubisoft Game Launcher" folder,
+//      "Battle.net Launcher.exe" or Battle.net.exe in a "Battle.net" folder,
+//      Launcher.exe in a "Rockstar Games\Launcher" folder, and their
+//      installers by the names they download with, wherever they are.
 //    - Any other game, and the Desktop, gets the standard list (owner's
 //      decisions, 2026-10-12; GameRecommendationsApply.swift).
 //
@@ -66,6 +71,10 @@ struct GameRecommendation: Equatable {
     static let screen720 = "screen@720"
     /// Aspect & scaling (DisplayMode raw value); "fit" is the default.
     var display: String? = nil
+    /// Game details › Launch › Start (LibraryEntry.launchMode): "desktop", the Wine desktop.
+    var launchMode: String? = nil
+    /// Game details › Launch › Start Windows services first (LibraryEntry.startServices).
+    var startServices: Bool? = nil
 
     /// The config file's text as GameProfile stores it (one trailing newline).
     var fileText: String { config.hasSuffix("\n") ? config : config + "\n" }
@@ -84,6 +93,8 @@ struct GameRecommendation: Equatable {
             parts.append("FPS limit \(label)")
         }
         if let resolution { parts.append(resolution == Self.screen720 ? "this screen's shape at 720 lines" : resolution) }
+        if launchMode == "desktop" { parts.append("starts in the Wine desktop") }
+        if startServices == true { parts.append("Windows services first") }
         return parts.joined(separator: ", ")
     }
 }
@@ -620,6 +631,151 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
+    /// The Rockstar Games Launcher outside Steam (125hz, 6f7eb58a on
+    /// 125hz/Madeira vulkan-stack-1028). Through Madeira Dock the game's own list
+    /// carries the launcher chain's lines and the Dock starts the service manager; a
+    /// library entry for the launcher itself had neither. Log 91: no service manager,
+    /// so the launcher's service could not be installed (\pipe\svcctl missing, RPC
+    /// 1722). Log 92: with it, the sign-in helper's libcef.dll found no room in a
+    /// 624 MB pool (c0000017, six restarts, a black window). Log 93: with the pool
+    /// lines, libcef loaded, then the helper's 32 GB PartitionAlloc reservation met
+    /// the emulator's arena and Chromium stopped itself (0x80000003). So: the Wine
+    /// desktop with Windows services first, and the chain's lines from the games'
+    /// lists (Social Club layout 2, the pool lines, pure-x64 images uncopied, the
+    /// crash handler and the vc_redist re-run refused).
+    static let rockstarLauncher = GameRecommendation(
+        id: "rockstar-launcher", title: "Rockstar Games Launcher", version: 1,
+        config: """
+        # Madeira's recommended settings for the Rockstar Games Launcher outside Steam.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-low = 1
+        pool-mid = 1
+        pool-page-fit = 1
+        pool-split = 1
+        env.FEX_VECTORTSOENABLED = 0
+        env.MADEIRA_SC_PA_POOLS = 2
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_EXECREQ_LEAVE = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
+        env.MADEIRA_POOL_LOW_IMAGES = 1
+        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
+        env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist
+        env.MADEIRA_TOUCH_MOUSE = 1
+        env.MADEIRA_WOW_MIN_FREE_GB = 2
+        env.DXMT_SMALL_RINGS = Launcher.exe;SocialClubHelper.exe
+        env.DXMT_WSI_MONITOR_IDENTITY = 1
+        env.DXMT_WSI_MODE_TABLE = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, display: "fit", launchMode: "desktop", startServices: true)
+
+    /// The Rockstar launcher's installer (125hz, log 91): it installs the launcher's
+    /// service, which needs the service manager, and runs the embedded vc_redist,
+    /// which the launcher's list refuses; so the two Launch switches and the
+    /// standard line only.
+    static let rockstarLauncherSetup = GameRecommendation(
+        id: "rockstar-launcher-setup", title: "Rockstar Games Launcher installer", version: 1,
+        config: """
+        # Madeira's recommended settings for the Rockstar Games Launcher installer.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        launchMode: "desktop", startServices: true)
+
+    /// Ubisoft Connect (LauncherSupport.swift; owner's choice, 2026-10-29). Like the
+    /// Rockstar launcher a Chromium (CEF) client, UplayWebCore.exe draws its window, so
+    /// it takes the layout Social Club and Steam's web helper need: Chromium 128 and
+    /// later reserves three 32 GB blocks on 32 GB boundaries (chrome_elf's and libcef's
+    /// PartitionAlloc, Oilpan's cage), which only Social Club layout 2 leaves room for,
+    /// plus the pool lines for libcef.dll and pure-x64 images uncopied. Its service and
+    /// out-of-process COM need the service manager, so the Wine desktop with Windows
+    /// services first. The swap file takes the web helper's idle pages, as for Steam's
+    /// Big Picture. No release delay (madeira-bcd's 2000 ms): Chromium's allocator
+    /// reserves, releases and reserves again, which the delay turns into a spin. The
+    /// older 32-bit client gets the launcher chain's 2 GB margin and every window slot
+    /// from the start. Not device-tested yet.
+    static let ubisoftConnect = GameRecommendation(
+        id: "ubisoft-connect", title: "Ubisoft Connect", version: 1,
+        config: """
+        # Madeira's recommended settings for Ubisoft Connect.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 4096
+        swap-min-mb = 1
+        pool-low = 1
+        pool-page-fit = 1
+        pool-split = 1
+        env.MADEIRA_SWAP_COVERAGE = broad
+        env.MADEIRA_SC_PA_POOLS = 2
+        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
+        env.MADEIRA_POOL_LOW_IMAGES = 1
+        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_TOUCH_MOUSE = 1
+        env.MADEIRA_WOW_MIN_FREE_GB = 2
+        env.MADEIRA_WOW_PLACEHOLDERS = 1
+        env.DXMT_SMALL_RINGS = UbisoftConnect.exe;upc.exe;UplayWebCore.exe
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        fastSync: true, display: "fit", launchMode: "desktop", startServices: true)
+
+    /// Ubisoft Connect's installer: it installs the client's service, which needs the
+    /// service manager; so the two Launch switches and the standard line only.
+    static let ubisoftConnectSetup = GameRecommendation(
+        id: "ubisoft-connect-setup", title: "Ubisoft Connect installer", version: 1,
+        config: """
+        # Madeira's recommended settings for the Ubisoft Connect installer.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        launchMode: "desktop", startServices: true)
+
+    /// Battle.net (LauncherSupport.swift; owner's choice, 2026-10-29): "Battle.net
+    /// Launcher.exe" starts Battle.net.exe, a 64-bit Chromium (CEF) client, and
+    /// Blizzard's Agent.exe, which installs and updates the games. The same Chromium
+    /// lines as Ubisoft Connect; the Wine desktop with Windows services first for the
+    /// Agent's out-of-process COM. Not device-tested yet.
+    static let battleNet = GameRecommendation(
+        id: "battle-net", title: "Battle.net", version: 1,
+        config: """
+        # Madeira's recommended settings for Battle.net.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 4096
+        swap-min-mb = 1
+        pool-low = 1
+        pool-page-fit = 1
+        pool-split = 1
+        env.MADEIRA_SWAP_COVERAGE = broad
+        env.MADEIRA_SC_PA_POOLS = 2
+        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
+        env.MADEIRA_POOL_LOW_IMAGES = 1
+        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_TOUCH_MOUSE = 1
+        env.MADEIRA_WOW_MIN_FREE_GB = 2
+        env.DXMT_SMALL_RINGS = Battle.net.exe
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        fastSync: true, display: "fit", launchMode: "desktop", startServices: true)
+
+    /// Battle.net's installer (Battle.net-Setup.exe), which downloads the client:
+    /// the two Launch switches and the standard line only.
+    static let battleNetSetup = GameRecommendation(
+        id: "battle-net-setup", title: "Battle.net installer", version: 1,
+        config: """
+        # Madeira's recommended settings for the Battle.net installer.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        launchMode: "desktop", startServices: true)
+
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
     /// the owner tried outside these lists closed at start until the [ec-hook]
     /// reporter was off. It reads code a game's protection rewrites at run time
@@ -639,7 +795,8 @@ enum GameRecommendations {
         """)
 
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
-                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]
+                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid,
+                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, standard]
 
     // MARK: Recognising a game
 
@@ -710,6 +867,20 @@ enum GameRecommendations {
             return blackOps2
         case "projectzomboid64.exe":
             return projectZomboid
+        case "launcher.exe" where Array(parts.dropLast().suffix(2)) == ["rockstar games", "launcher"]:
+            // The Rockstar Games Launcher outside Steam; another publisher's Launcher.exe gets nothing here.
+            return rockstarLauncher
+        case "rockstar-games-launcher.exe":
+            return rockstarLauncherSetup
+        case "ubisoftconnect.exe", "upc.exe", "uplay.exe":
+            // Ubisoft Connect in its own folder (a Uplay.exe of LauncherSupport's links too).
+            return parts.dropLast().last == "ubisoft game launcher" ? ubisoftConnect : nil
+        case "ubisoftconnectinstaller.exe", "uplayinstaller.exe":
+            return ubisoftConnectSetup
+        case "battle.net launcher.exe", "battle.net.exe":
+            return parts.dropLast().last == "battle.net" ? battleNet : nil
+        case "battle.net-setup.exe":
+            return battleNetSetup
         default:
             return nil
         }

@@ -3087,6 +3087,9 @@ struct LibraryView: View {
             if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
                 EpicSettingsSection(open: { settingsSheet = $0 })
             }
+            if settingsShow("launcher", "Ubisoft", "Uplay", "Battle.net", "Blizzard", "Rockstar", "download", "sign in") {
+                LauncherSupportSettingsSection()
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
                 Section {
