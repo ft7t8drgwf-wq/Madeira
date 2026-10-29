@@ -1242,9 +1242,17 @@ final class SteamOwnedLibrary: ObservableObject {
             // Owned DLC comes along unless the player turned it off (SteamDLC);
             // with the switch off, none does.
             info.dlcOff = Self.dlcEnabled ? SteamDLC.offApps(appID) : Set(info.knownDLC)
+            // The depots of the DLC apps the account owns count as owned too: a
+            // package often lists the DLC app but not its depots (New Vegas's
+            // Courier's Stash). Steam still refuses a key for anything not owned.
+            let ownedApps = Self.dlcEnabled ? Set((game(appID)?.dlc ?? []).map { UInt32($0.id) }) : []
+            let dlcDepots = Set(info.depots.filter { $0.dlcAppID.map { ownedApps.contains($0) } ?? false }.map(\.depotID))
             try FileManager.default.createDirectory(at: SteamInstallPaths.common(drive: Self.drive), withIntermediateDirectories: true)
             let folder = try await downloader.install(info, steamApps: Self.steamApps,
-                                                      ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
+                                                      ownedDepots: { [weak self] in
+                let licensed = try? await self?.fetcher.ownedDepotIDs()
+                return licensed.map { $0.union(dlcDepots) } ?? (dlcDepots.isEmpty ? nil : dlcDepots)
+            }) { [weak self] progress in
                 self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)
             }
