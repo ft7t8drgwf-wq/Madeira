@@ -19,6 +19,8 @@ python3 "$R/build/windows-runtime/targets.py" aarch64 install
 DEST="$R/app/Madeira/vulkan/arm64ec-windows" \
     bash "$R/build/wine-pe/build-modules.sh" winevulkan vulkan-1
 
+# This repository's DXMT patches (build/dxmt-patches) go into these DLLs too.
+"$R/build/dxmt-patches/apply.sh"
 for arch in arm64ec aarch64; do
     W="$R/wine/build-arm64ec"
     [ "$arch" != aarch64 ] || W="$R/wine/build-macos"
@@ -39,6 +41,10 @@ for arch in arm64ec aarch64; do
         "$TC/$arch-w64-mingw32-strip" --strip-debug -o "$DEST/$(basename "$m")" "$B/src/$m"
     done
     if [ "$arch" = arm64ec ]; then
+        # dxmt-patches 0003: madeira-d3d12's OpenSharedHandle looks textures up here.
+        exports="$("$TC/llvm-readobj" --coff-exports "$DEST/d3d11.dll")"
+        grep -q 'Name: MadeiraSharedTextureLookup$' <<< "$exports" ||
+            { echo "$DEST/d3d11.dll lacks MadeiraSharedTextureLookup (build/dxmt-patches)" >&2; exit 1; }
         for pair in 'd3d9/d3d9.dll:d3d9.dll' 'nvapi/nvapi64.dll:nvapi64.dll'; do
             "$TC/$arch-w64-mingw32-strip" --strip-debug -o "$DEST/${pair#*:}" "$B/src/${pair%:*}"
         done
