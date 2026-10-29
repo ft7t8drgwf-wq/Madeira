@@ -1469,7 +1469,7 @@ struct SteamEntrySection: View {
         installedDLC = list
         LogStore.shared.log("[steam-dlc] app=\(appID) installed-dlc=\(list.count)")
         guard !list.isEmpty else { return }
-        dlcNames = await steam.names(ofDLC: list.map(\.id))
+        dlcNames = await steam.names(ofDLC: list.map(\.id), gameAppID: appID)
     }
 
     /// "The game": lists the install folder's programs and, unless the user picked one that
