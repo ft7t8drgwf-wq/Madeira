@@ -4749,26 +4749,6 @@ static void *ios_mach_exception_thread( void *arg )
                                 ++undecoded_n, insn, (unsigned long long)fault_pc,
                                 (unsigned long long)fault_addr, (unsigned long long)rw_addr);
                     }
-                    if (span_va)
-                    {
-                        static int split_n;
-                        unsigned k, changed = 0;
-                        if (emulated)
-                            for (k = 0; k < sizeof(span_buf); k++)
-                            {
-                                uintptr_t b;
-                                if (span_buf[k] == span_old[k]) continue;
-                                b = ios_jit_anon_alias_lookup( span_va + k );
-                                if (b) { *(volatile uint8_t *)b = span_buf[k]; changed++; }
-                            }
-                        if (split_n < 8)
-                            dprintf(STDERR_FILENO,
-                                "[alias-split] #%d insn=0x%08x addr=0x%llx emulated=%d bytes-written=%u "
-                                "(store crosses into a non-contiguous alias chunk)\n",
-                                ++split_n, insn, (unsigned long long)span_va, emulated, changed);
-                        /* the diag readback below compares rw_addr with the RX view */
-                        rw_addr = ios_jit_anon_alias_lookup( span_va );
-                    }
                     if (emulated)
                     {
                         /* ml635: record that this alias page was written. FEX's cached
