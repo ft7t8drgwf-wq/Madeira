@@ -1134,6 +1134,90 @@ int read_process_memory( struct process *process, client_ptr_t ptr, data_size_t 
     return (ret == KERN_SUCCESS);
 }
 
+#ifdef WINE_IOS
+/* Garry's Mod: Chromium's sandbox broker (in gmod.exe) prepares each sandboxed
+ * child (gmod.exe --type=gpu-process, ...) by writing into it before resuming
+ * it: the shared-section handle and other sandbox variables, at the same
+ * guest addresses as in the broker.  Writes into other pseudo-processes are
+ * denied here (get_process_port() above, and ml1003 in read_process_memory),
+ * so the broker's setup failed and it terminated every child with exit
+ * code 1 ("The GPU process has crashed"), and the HTML menu never loaded.
+ *
+ * Allowed only when gmod.exe, a 32-bit process, writes into a 32-bit child of
+ * its own in this Unix process.  wow64_NtWriteVirtualMemory has already moved
+ * the address into the child's window (target-window rule), so `ptr` is a host
+ * address.  The write is one mach_vm_write on our own task and never takes the
+ * task_suspend() fallback below: suspending our own task would stop this
+ * server.  madeira.cfg `no-child-write = 1` turns it off. */
+static int ios_is_gmod_image( const struct process *process )
+{
+    static const WCHAR name[] = {'\\','g','m','o','d','.','e','x','e'};
+    data_size_t i, n = ARRAY_SIZE(name), len;
+
+    if (!process->image) return 0;
+    len = process->imagelen / sizeof(WCHAR);
+    if (len < n) return 0;
+    for (i = 0; i < n; i++)
+    {
+        WCHAR c = process->image[len - n + i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c == '/') c = '\\';
+        if (c != name[i]) return 0;
+    }
+    return 1;
+}
+
+static int ios_child_write_allowed( const struct process *process )
+{
+    static int off = -1;
+    const struct process *writer = current ? current->process : NULL;
+
+    if (!writer || writer == process || process->unix_pid != getpid()) return 0;
+    if (writer->machine != IMAGE_FILE_MACHINE_I386 || process->machine != IMAGE_FILE_MACHINE_I386) return 0;
+    if (process->parent_id != writer->id || !ios_is_gmod_image( writer )) return 0;
+    if (off < 0)
+    {
+        off = madeira_cfg_bool( "no-child-write", 0 );
+        fprintf( stderr, "[child-write] gmod.exe writes into its own 32-bit children: %s\n",
+                 off ? "DISABLED by no-child-write" : "ENABLED" );
+    }
+    return !off;
+}
+
+static int ios_local_child_write( struct process *process, client_ptr_t ptr, data_size_t size,
+                                  const char *src, data_size_t *written )
+{
+    static unsigned int n_log;
+    mach_vm_offset_t data;
+    kern_return_t ret;
+
+    if ((mach_vm_address_t)ptr != ptr)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return 0;
+    }
+    if (!size) return 1;
+    if (posix_memalign( (void **)&data, get_page_size(), size ))
+    {
+        set_error( STATUS_NO_MEMORY );
+        return 0;
+    }
+    memcpy( (void *)data, src, size );
+    ret = mach_vm_write( mach_task_self(), (mach_vm_address_t)ptr, data, (mach_msg_type_number_t)size );
+    free( (void *)data );
+    if (n_log++ < 64)
+        fprintf( stderr, "[child-write] #%u pid=%04x -> pid=%04x addr=%p size=0x%x ret=%d\n",
+                 n_log, current->process->id, process->id, (void *)(uintptr_t)ptr, size, ret );
+    if (ret != KERN_SUCCESS)
+    {
+        mach_set_error( ret );
+        return 0;
+    }
+    if (written) *written = size;
+    return 1;
+}
+#endif
+
 /* write data to a process memory space */
 int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t size, const char *src,
                           data_size_t *written )
@@ -1144,6 +1228,10 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
 
     if (written) *written = 0;
 
+#ifdef WINE_IOS
+    if (!process_port && ios_child_write_allowed( process ))
+        return ios_local_child_write( process, ptr, size, src, written );
+#endif
     if (!process_port)
     {
         set_error( STATUS_ACCESS_DENIED );
