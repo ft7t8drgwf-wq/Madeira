@@ -2888,6 +2888,26 @@ static void *ios_mach_exception_thread( void *arg )
                     dprintf(STDERR_FILENO,
                             "[int3-guest] guest_rip=0x%llx x28=0x%llx read=%d rev=ml554\n",
                             (unsigned long long)grip, (unsigned long long)x28v, ok);
+                    /* madeira-bcd: the guest bytes at the breakpoint, as memory holds
+                     * them NOW. Black Ops III (2026-10-19) died on an int3 in code its
+                     * unpacker had just written to an anonymous RWX region that stays
+                     * dual-mapped without write tracking ([alias-own]); a byte other
+                     * than 0xcc at rip-1 means the emulator ran a stale translation. */
+                    if (ok && grip)
+                    {
+                        unsigned char gb[16];
+                        mach_vm_size_t gbn = 0;
+                        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(grip - 1), sizeof(gb),
+                                                    (mach_vm_address_t)gb, &gbn ) == KERN_SUCCESS && gbn == sizeof(gb))
+                            dprintf(STDERR_FILENO,
+                                    "[int3-guest]   bytes at rip-1: %02x %02x %02x %02x %02x %02x %02x %02x "
+                                    "%02x %02x %02x %02x %02x %02x %02x %02x%s\n",
+                                    gb[0], gb[1], gb[2], gb[3], gb[4], gb[5], gb[6], gb[7],
+                                    gb[8], gb[9], gb[10], gb[11], gb[12], gb[13], gb[14], gb[15],
+                                    gb[0] == 0xcc ? "" : "  <== NOT an int3 now: a stale translation ran");
+                        else
+                            dprintf(STDERR_FILENO, "[int3-guest]   bytes at rip-1: unreadable\n");
+                    }
                     if (ok)
                     {
                         /* ml578: the GUEST register file — 16 entries, FEX order.
