@@ -481,6 +481,17 @@ struct ExternalDrivesSection: View {
                 }
             }
             Button("Add drive or folder") { DocumentPicker.shared.pick([.folder]) { picked($0) } }
+                // Drag the drive or a folder from the Files app here instead of
+                // picking it: for when the picker never hands the folder back.
+                .onDrop(of: [.folder], isTargeted: nil) { providers in
+                    guard let provider = providers.first else { return false }
+                    provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.folder.identifier) { url, inPlace, failure in
+                        LogStore.shared.log("[external] dropped folder inPlace=\(inPlace) url=\(url != nil) error=\(failure?.localizedDescription ?? "none")")
+                        guard let url else { return }
+                        DispatchQueue.main.async { picked(url) }
+                    }
+                    return true
+                }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
@@ -491,7 +502,7 @@ struct ExternalDrivesSection: View {
             }
             if let error { Text(error).foregroundStyle(.red) }
         } header: { Text("External drives") } footer: {
-            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
+            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it (or drag it from the Files app onto Add drive or folder). Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
         }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
