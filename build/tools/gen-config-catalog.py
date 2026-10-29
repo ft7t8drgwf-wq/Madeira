@@ -798,6 +798,13 @@ OVERLAY = {
                         "CPU; e.g. 1500 keeps a 60 fps menu near 30-40 fps. [fps-gov] lines every 10 s. "
                         "env.MADEIRA_FPS_GOV_MIN / _MAX (20 / 60) bound the cap, _BAND_MJ (1500) is the energy the "
                         "average may drift before it moves. Needs the [xp] sampler. Read at session start."},
+    # madeira-bcd: winemetal reads it (dxmt, build/dxmt-patches/0002-framegen-d3d12-pacing.patch; Tomba247's RDR2 work).
+    "env.MADEIRA_FRAMEGEN_STALL_MS": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Frame generation: stall threshold (ms)",
+                "kind": "int", "default": "125", "sources": ["build/dxmt-patches/0002-framegen-d3d12-pacing.patch"],
+                "note": "Only with env.MADEIRA_FRAMEGEN = 1: a gap between two game frames longer than this drops the "
+                        "interpolator's history (no frame is generated from stale frames). Unset: 125, so a game "
+                        "capped at 15 fps (66.7 ms a frame) keeps its generated frames; the lowest value used is "
+                        "16.7. Read at every present."},
     "env.MADEIRA_FPS_GOV_MAX": {"category": "Windows, display & input", "title": "Frame-cap governor: highest cap (fps)",
                 "kind": "int", "default": "60", "sources": ["build/ntdll-unix/server_ios.c"],
                 "note": "Only with env.MADEIRA_FPS_GOV_MW set: the highest frame cap the governor uses, the largest of "
