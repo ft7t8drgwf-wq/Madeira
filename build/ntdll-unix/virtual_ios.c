@@ -26623,7 +26623,10 @@ void virtual_init_user_shared_data(void)
      * when it sees 12). Nothing in Wine's PE side reads this field. */
     {
         const char *arch = getenv( "MADEIRA_KUSER_NATIVE_ARCH" );
-        data->Cookie = arc4random() | 1;
+        /* This runs again for every process started without a parent, on the
+         * same shared page, so keep the first value: Windows keeps one Cookie
+         * per boot, and a process that cached it must not see it change. */
+        if (!data->Cookie) data->Cookie = arc4random() | 1;
         data->BootId = 7;
         if (arch && *arch)
         {
