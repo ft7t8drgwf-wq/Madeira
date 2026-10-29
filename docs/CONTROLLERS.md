@@ -127,6 +127,18 @@ physical input takes it over. Hiding the controls or disconnecting the pad then
 leaves player 1 connected at rest until the app exits. Without the switch,
 slot 0 connects only when a real source appears, as before.
 
+## Face-button order per game
+
+`env.MADEIRA_PAD_FACE` (a game's own lines first, then madeira.cfg) names, as
+four letters, the buttons a physical controller's A, B, X and Y send to the
+game: `BAYX` swaps A with B and X with Y, and unset or `ABXY` changes nothing.
+It is for a game that reads the face buttons in another order than its
+prompts show. Anything but four of A, B, X and Y is ignored with an `[xinput]`
+line. It is read at session start and applies to XInput and the HID
+controller. The library, the Session menu and keyboard-and-mouse bindings keep
+the physical buttons, and touch buttons are not remapped. Turbo names the
+button the game receives. (From JesseLovelace's fork, 118c078b.)
+
 ## A controller as keyboard and mouse
 
 For a game without controller support (or with it switched off), Game details
