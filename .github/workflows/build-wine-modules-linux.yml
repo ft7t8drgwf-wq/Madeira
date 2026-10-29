@@ -40,6 +40,8 @@ jobs:
           tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
           # build-modules.sh names the macOS toolchain directory
           ln -s "$MINGW_LINUX" toolchains/llvm-mingw-20260421-ucrt-macos-universal
+      - name: Wine patches
+        run: build/wine-patches/apply.sh
       - name: Build
         run: JOBS=$(nproc) build/wine-pe/build-modules.sh $MODULES
       - name: Commit
