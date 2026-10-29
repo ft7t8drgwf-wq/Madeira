@@ -454,6 +454,8 @@ OVERLAY = {
                         "processes only. Does not shrink live buffers or the pool-low-margin."},
     "env.MADEIRA_IMAGE_PATCH_TRACE": {"category": "Debugging / logs", "title": "DLL code patch trace", "kind": "bool", "default": "0",
                 "note": "1 logs up to 64 successful 1–16 byte executable-image protection requests and their PE/pool bytes. Read-only, owner-aware diagnostics; does not alter hooks or code."},
+    "env.MADEIRA_MOUSE_ROUTING": {"title": "Mouse routing and pointer-lock fixes",
+        "note": "Default on. 0 restores the previous desktop cursor routing, mouse button callbacks, surface-touch handling and key-window-only pointer lock. Keyboard input and manual Ctrl+Alt+P remain available. Fully restart Madeira after changing this switch."},
     "swap-mb": { "note": "Moves game data to a file on this device's storage when memory runs short, up to this size. Off by default; read at launch.", "category": "Memory & JIT pool","title": "Swap tier size", "kind": "choice",
                 "choices": [("", "Off"), ("1024", "1 GB"), ("2048", "2 GB"), ("3072", "3 GB"), ("4096", "4 GB")]},
     "env.MADEIRA_SWAP_COVERAGE": {"category": "Memory & JIT pool", "note": "Which allocations the swap tier backs with its file (only when the tier is on). Large allocations (classic, the default): single 8 MB+ commits in the guest band. All allocations of 1 MB+ (blocks). 1 MB+ and overflow (wide): blocks plus allocations outside the band and fresh reservations. Whole reservations 4 MB+ (broad, ml1257): every new reservation of at least swap-min-mb (4 MB) below FEX's band backed whole when made, holes punched on decommit, swap-mb caps the disk it uses (a soft cap, checked when a block is backed). Unset: broad if swap-mode = 2, else classic.", "title": "Swap tier coverage", "kind": "choice",
@@ -701,6 +703,17 @@ OVERLAY = {
                 "note": "Kill switch, default 0: a file's size, index or end-of-file query (GetFileSizeEx and the "
                         "like) is answered from one fstat; the two extended-attribute reads that came after it fed "
                         "only file attributes, which these queries do not return. 1: as before. Read once per app run."},
+    "env.MADEIRA_DIRCACHE": {"category": "Wine core (ntdll)", "title": "Remember directory listings for file lookups",
+                "kind": "bool", "default": "1",
+                "note": "Kill switch, default 1: a file name that does not match in its exact case is looked up in "
+                        "an in-memory copy of its directory instead of a volume query and a directory read each "
+                        "time (twice when the name is absent). Source-engine games such as Team Fortress 2 probe "
+                        "thousands of absent paths while loading and during play. 0: as before. Read once per app run."},
+    "env.MADEIRA_DIRCACHE_TTL_MS": {"category": "Wine core (ntdll)", "title": "Directory listing trust window (ms)",
+                "kind": "int", "default": "1000",
+                "note": "How long a remembered listing is used without checking the directory, while no file was "
+                        "created, renamed, linked or deleted through Wine. After that one stat of the directory "
+                        "decides whether it is read again. 0 checks it on every lookup. Read once per app run."},
     "env.MADEIRA_SRV_LOG_ALL": {"category": "Wine server", "title": "Every per-descriptor server log line",
                 "kind": "bool", "default": "0",
                 "sources": ["build/wineserver/fd_ios.c", "build/wineserver/request_ios.c"],
@@ -778,16 +791,12 @@ OVERLAY = {
                 "note": "Only with env.MADEIRA_FPS_GOV_MW set: how much energy the running balance may drift above or "
                         "below the target before the cap moves one step (100-100000; unset or out of range: 1500). "
                         "Smaller moves the cap sooner and more often. Read at session start."},
-    # madeira-bcd: the orphan-lock reaper's stamped mode (wine: dlls/ntdll/unix/sync.c).
     "env.MADEIRA_LOCK_ORPHAN": {"category": "Wine core (ntdll)", "title": "Orphan-lock reaper mode",
                 "kind": "choice", "default": "",
-                "choices": [("", "As before"), ("stamped", "Only stamped locks"), ("0", "Off")],
-                "note": "The monitor releases an SRW lock it believes a dead thread left held. Unset (default): as "
-                        "before, which counts one strike per parked waiter, so a busy lock with 3 waiters is released "
-                        "at once even while its owner lives (Horizon Zero Dawn stopped with \"Error\" right after such "
-                        "a release, build 479). stamped: one strike per monitor cycle, three in a row, and only locks a "
-                        "live thread has stamped (FEX's code-buffer locks) can be released. 0: no releases. The "
-                        "dead-thread reaper is unchanged. Restart the session after changing it."},
+                "choices": [("", "Only stamped locks (default)"), ("stamped", "Only stamped locks"), ("0", "Off")],
+                "note": "Default and stamped: only a lock seen held by FEX can be released, after three monitor "
+                        "cycles with the same lock word and no live owner stamp. Guest locks are never released. "
+                        "0: no orphan-lock releases. The dead-thread reaper is unchanged. Restart the session after changing it."},
     # madeira-bcd: small staging rings in DXMT's d3d11 (the dxmt change of this wave).
     "env.DXMT_SMALL_RINGS": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Small DXMT staging rings for these programs",
                 "kind": "text", "default": "",
@@ -798,6 +807,12 @@ OVERLAY = {
                         "Launcher 132 MB, Social Club 68 MB through a whole RDR2 session). Larger uploads still get a "
                         "block of their own; each named program logs one [small-rings] line. Unset or 0 (default): "
                         "32 MB, as before. Set it in the game's own file; read when the program starts."},
+    # Mesa's opengl32 on D3D12 over Wine's stub (WineProcessBridge.m, build/mesa-d3d12).
+    "env.MADEIRA_OPENGL": {"category": "Windows, display & input", "title": "OpenGL through Mesa on D3D12",
+                "kind": "bool", "default": "0",
+                "note": "On: x64 games get Mesa's opengl32.dll (OpenGL 3.3 on D3D12, then Metal) "
+                        "when build/mesa-d3d12/build.sh has put it in the app. 0: Wine's builtin opengl32, "
+                        "which uses the native WGL OpenGL ES/Zink route. A game folder's own opengl32.dll still wins. Read at session start."},
     # The D3D12/DXGI GPU as a D3DKMT adapter (build/win32u-unix/d3dkmt_ios.c).
     "env.MADEIRA_KMT_ADAPTER": {"category": "Windows, display & input", "title": "D3DKMT adapter for the GPU (WDDM 3.1)",
                 "kind": "bool", "default": "0",

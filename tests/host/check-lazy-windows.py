@@ -54,7 +54,8 @@ harness = r"""
 #include <pthread.h>
 #include <time.h>
 #include <sys/mman.h>
-typedef uintptr_t ULONG_PTR; typedef unsigned int ULONG; typedef int NTSTATUS; typedef struct { int x; } PEB; typedef int BOOL;
+typedef int BOOL;
+typedef uintptr_t ULONG_PTR; typedef unsigned int ULONG; typedef int NTSTATUS; typedef struct { int x; } PEB;
 #define STATUS_SUCCESS 0
 #define STATUS_NO_MEMORY ((NTSTATUS)0xc0000017)
 #define PtrToUlong(p) ((ULONG)(ULONG_PTR)(p))

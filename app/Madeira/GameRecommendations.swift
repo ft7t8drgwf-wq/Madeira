@@ -568,6 +568,23 @@ enum GameRecommendations {
     /// (GTA V Enhanced outside Steam on build 451, Ghost of Tsushima on build 515),
     /// and it only logs, so turning it off costs a game nothing. Version 3: without
     /// madeira-bcd's defaults (version 2 had them). This list reaches every game, and
+    /// Project Zomboid (Build 42, Steam). Its launcher starts Azul Zulu 25 with
+    /// -XX:+UseZGC (ProjectZomboid64.json); ZGC reserves its heap 4-8 TB up and the
+    /// guest's address space ends at 512 GB, so every reservation fails and Java
+    /// exits with code 1 about a second in. _JAVA_OPTIONS is read after the
+    /// launcher's own options, so G1 replaces ZGC without editing the game's file
+    /// (iPhone, build 31: Java then starts and reaches LWJGL). The game draws with
+    /// OpenGL only. Tested through Madeira Dock with the standard list's lines, so
+    /// without madeira-bcd's defaults (see the standard list). No switches.
+    static let projectZomboid = GameRecommendation(
+        id: "project-zomboid", title: "Project Zomboid", version: 1,
+        config: """
+        # Madeira's recommended settings for Project Zomboid.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env._JAVA_OPTIONS = -XX:-UseZGC -XX:+UseG1GC
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
+
     /// MADEIRA_FREE_DELAY_MS keeps a released block's addresses taken, so an allocator
     /// that reserves, releases and reserves again inside the same range never gets it
     /// back: Madeira Dock spun on "Loading Steam" before Thumper. The game lists that
@@ -581,13 +598,13 @@ enum GameRecommendations {
         """)
 
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
-                      falloutNewVegas, fallout3, blackOps2, standard]
+                      falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]
 
     // MARK: Recognising a game
 
     /// Steam App IDs.
     static let rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,
-               horizonZeroDawnAppID = 1151640
+               horizonZeroDawnAppID = 1151640, projectZomboidAppID = 108600
     static let falloutNewVegasAppID = 22380, fallout3AppIDs: Set<Int> = [22300, 22370]   // Fallout 3, its GOTY Edition
     /// Black Ops II's campaign, Zombies and multiplayer.
     static let blackOps2AppIDs: Set<Int> = [202970, 212910, 202990]
@@ -616,6 +633,7 @@ enum GameRecommendations {
             if steamAppID.map(fallout3AppIDs.contains) == true || installFolder == "fallout 3"
                 || installFolder == "fallout 3 goty" { return fallout3 }
             if blackOps2AppIDs.contains(steamAppID ?? 0) || installFolder == "call of duty black ops ii" { return blackOps2 }
+            if steamAppID == projectZomboidAppID || installFolder == "projectzomboid" { return projectZomboid }
             return nil
         }
         // A program, wherever it was installed: only the game's own programs, so a
@@ -642,6 +660,8 @@ enum GameRecommendations {
             return fallout3
         case "t6sp.exe", "t6zm.exe", "t6mp.exe":
             return blackOps2
+        case "projectzomboid64.exe":
+            return projectZomboid
         default:
             return nil
         }

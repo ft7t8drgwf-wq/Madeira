@@ -65,9 +65,9 @@ for m in re.finditer(r'static let (\w+) = GameRecommendation\(\n\s*id: "([^"]+)"
     lines = [line[len(indent):] if line.startswith(indent) else line for line in body.split('\n')]
     presets[ident] = dict(name=name, title=title, version=int(version), lines=lines, switches=' '.join((switches or '').split()))
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'ghost-of-tsushima', 'god-of-war',
-                        'horizon-zero-dawn', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'standard'}, sorted(presets)
+                        'horizon-zero-dawn', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'standard'}, sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,\n'
-        '                      falloutNewVegas, fallout3, blackOps2, standard]') in lists_src
+        '                      falloutNewVegas, fallout3, blackOps2, projectZomboid, standard]') in lists_src
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
 # so every game's own list ends with them. The standard list reaches every other game
@@ -77,8 +77,9 @@ FORK_DEFAULTS = ["# madeira-bcd's defaults, which this list was tested with (ups
                  'env.MADEIRA_FREE_DELAY_MS = 2000', 'env.MADEIRA_CTX_CPU_AREA = 2', 'env.MADEIRA_WAIT_CHILDREN = 1',
                  'env.MADEIRA_JIT_DUMP = 0']
 for ident, p in presets.items():
-    # The Fallout lists are the standard one plus a switch: the games ran with it.
-    if ident in NO_FORK_DEFAULTS + ('fallout-new-vegas', 'fallout-3'):
+    # The Fallout lists are the standard one plus a switch: the games ran with it. Project Zomboid
+    # was tested through Madeira Dock with the standard list's lines.
+    if ident in NO_FORK_DEFAULTS + ('fallout-new-vegas', 'fallout-3', 'project-zomboid'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -109,7 +110,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: eleven lists, two comment lines each, every game list ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
+print('PASS: twelve lists, two comment lines each, every game list ends with the four fork defaults and the standard, Fallout, Black Ops II and Project Zomboid ones have none, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -278,7 +279,9 @@ print('PASS: RDR2 (Steam) is the owner\'s 463 list plus the 466, 467, 470, 472, 
 
 # Recognition: Steam by App ID or steamapps\common folder; everything else by the program's name.
 match = block(lists_src, 'static func match(', '\n    }\n')
-assert 'rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,\n               horizonZeroDawnAppID = 1151640' in lists_src
+assert 'rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,\n               horizonZeroDawnAppID = 1151640, projectZomboidAppID = 108600' in lists_src
+assert 'if steamAppID == projectZomboidAppID || installFolder == "projectzomboid" { return projectZomboid }' in match
+assert 'case "projectzomboid64.exe":\n            return projectZomboid' in match
 assert 'let installFolder = last == steamFolder ? steamFolder : nil' in match
 assert 'installFolder == "red dead redemption 2"' in match and 'installFolder == "grand theft auto v enhanced"' in match
 assert 'case "ghostoftsushima.exe":' in match and 'case "gow.exe":' in match and 'case "rdr2.exe", "playrdr2.exe":' in match

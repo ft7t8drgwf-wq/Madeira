@@ -77,6 +77,8 @@
 #include "wine/condrv.h"
 #include "wine/server.h"
 #include "wine/debug.h"
+#define MADEIRA_REDACT_WINE
+#include "../madeira_redact.h"   /* command lines are logged with credential-like values redacted */
 
 WINE_DEFAULT_DEBUG_CHANNEL(process);
 
@@ -656,7 +658,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     if (winedebug) putenv( winedebug );
 
     ERR("spawn_process: creating child thread for %s (fd=%d, unixdir=%d, dup_unixdir=%d)\n",
-        debugstr_us(&params->CommandLine), socketfd, unixdir, args->unixdir);
+        madeira_debugstr_cmdline_us(&params->CommandLine), socketfd, unixdir, args->unixdir);
 
     ret = pthread_create( &child_thread, NULL, ios_child_thread_entry, args );
     if (ret) {
@@ -1426,10 +1428,10 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     if (!process_attr) process_attr = &empty_attr;
 
     TRACE( "%s image %s cmdline %s parent %p machine %x\n", debugstr_us( &path ),
-           debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ), parent, machine );
+           debugstr_us( &params->ImagePathName ), madeira_debugstr_cmdline_us( &params->CommandLine ), parent, machine );
 #ifdef WINE_IOS
     ERR("NtCreateUserProcess: image=%s cmdline=%s\n",
-        debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ));
+        debugstr_us( &params->ImagePathName ), madeira_debugstr_cmdline_us( &params->CommandLine ));
 
     /* TEMP HACK (Steam S3 2026-07-10, task #29): refuse to spawn Steam's
      * minidump reporter. The reporter child hits the deep guest-exception-
@@ -1668,6 +1670,46 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                 "its threads have no CPU area for the emulator loaded into it; env.MADEIRA_EC_CONHOST=1 "
                 "starts it)\n", debugstr_us( &params->ImagePathName ));
         return STATUS_ACCESS_DENIED;
+    }
+
+    /* madeira-conhost-headless: a pipe cannot be a --unix console's tty (the server
+     * calls tcgetattr on it); --headless takes the same standard handles and needs no
+     * terminal device. env.MADEIRA_CONHOST_HEADLESS = 1. */
+    {
+        const char *hl = getenv( "MADEIRA_CONHOST_HEADLESS" );
+        const WCHAR *cl = params->CommandLine.Buffer;
+        int cl_len = params->CommandLine.Length / sizeof(WCHAR), k, at = -1;
+        static const char from[] = "--unix", to[] = "--headless";
+
+        if (hl && hl[0] == '1' && cl &&
+            ios_image_name_is( params->ImagePathName.Buffer, params->ImagePathName.Length / sizeof(WCHAR),
+                               "conhost.exe" ))
+        {
+            for (k = 0; k + (int)sizeof(from) - 1 <= cl_len && at < 0; k++)
+            {
+                int j;
+                for (j = 0; j < (int)sizeof(from) - 1; j++) if (cl[k + j] != (WCHAR)from[j]) break;
+                if (j == (int)sizeof(from) - 1) at = k;
+            }
+            if (at >= 0)
+            {
+                int add = (int)sizeof(to) - (int)sizeof(from), o = 0;
+                WCHAR *nbuf = malloc( (cl_len + add + 1) * sizeof(WCHAR) );   /* leaks once per console, as the other rewrites */
+
+                if (nbuf)
+                {
+                    for (k = 0; k < at; k++) nbuf[o++] = cl[k];
+                    for (k = 0; k < (int)sizeof(to) - 1; k++) nbuf[o++] = (WCHAR)to[k];
+                    for (k = at + (int)sizeof(from) - 1; k < cl_len; k++) nbuf[o++] = cl[k];
+                    nbuf[o] = 0;
+                    params->CommandLine.Buffer = nbuf;
+                    params->CommandLine.Length = o * sizeof(WCHAR);
+                    params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
+                    dprintf( 2, "[console] conhost --unix -> --headless (a pipe is not a terminal device; "
+                                "MADEIRA_CONHOST_HEADLESS)\n" );
+                }
+            }
+        }
     }
 
     /* ml526: stamp every accepted spawn on the startup timeline. This is the
@@ -2001,10 +2043,20 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                      * every injected-arg experiment from now on is proven by
                      * this line, not by binary greps or Valve's log. */
                     {
+                        /* The tail of the redacted line: a value cut by the
+                         * tail's start could no longer be recognised. */
+                        size_t cap = 2 * (size_t)o + 64, sn = 0;
+                        unsigned short *shown = malloc( cap * sizeof(*shown) );
                         char tail[136];
-                        int tstart = o > 128 ? o - 128 : 0, ti;
-                        for (ti = 0; ti + tstart < o && ti < 135; ti++)
-                            tail[ti] = (char)nbuf[tstart + ti];
+                        int tstart, ti = 0;
+                        if (shown)
+                        {
+                            sn = madeira_redact_line_w( (const unsigned short *)nbuf, (size_t)o, shown, cap );
+                            tstart = sn > 128 ? (int)sn - 128 : 0;
+                            for (; ti + tstart < (int)sn && ti < 135; ti++)
+                                tail[ti] = (char)shown[tstart + ti];
+                            free( shown );
+                        }
                         tail[ti] = 0;
                         dprintf(2, "[proc-gate] cmdline-tail(ml428): ...%s\n", tail);
                     }
