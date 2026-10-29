@@ -30,6 +30,22 @@ func checkAppEntitlement(_ ent: String) -> Bool {
     return false
 }
 
+/// The signing identity Files sees, for the picker log: an in-place pick is
+/// granted to the app's identifier, so a re-signer's mismatch shows here.
+func signingIdentitySummary() -> String {
+    func value(_ ent: String) -> String {
+        guard let task = _SecTaskCreateFromSelf(nil),
+              let v = _SecTaskCopyValueForEntitlement(task, ent as NSString, nil) else { return "-" }
+        if let list = v as? [Any] { return list.map { "\($0)" }.joined(separator: "|") }
+        return "\(v)"
+    }
+    return "bundle=\(Bundle.main.bundleIdentifier ?? "-")"
+        + " app-id=\(value("application-identifier"))"
+        + " team=\(value("com.apple.developer.team-identifier"))"
+        + " keychain=\(value("keychain-access-groups"))"
+        + " groups=\(value("com.apple.security.application-groups"))"
+}
+
 struct EntitlementStatus {
     let jitAllowed: Bool
     let increasedMemory: Bool

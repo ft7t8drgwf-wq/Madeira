@@ -440,6 +440,7 @@ struct ExternalGamesSheet: View {
         picker.allowsMultipleSelection = false
         picker.delegate = self
         self.done = done
+        LogStore.shared.log("[picker] identity \(signingIdentitySummary())")
         LogStore.shared.log("[picker] shown types=\(types.map(\.identifier).joined(separator: ",")) asCopy=\(asCopy) from=\(type(of: top))")
         top.present(picker, animated: true)
     }
@@ -489,7 +490,8 @@ struct ExternalDrivesSection: View {
             Button("Add drive or folder") { DocumentPicker.shared.pick([.folder]) { picked($0) } }
                 // Drag the drive or a folder from the Files app here instead of
                 // picking it: for when the picker never hands the folder back.
-                .onDrop(of: [.folder], isTargeted: nil) { providers in
+                .onDrop(of: [.folder, .directory, .fileURL], isTargeted: nil) { providers in
+                    LogStore.shared.log("[external] drop types=\(providers.flatMap(\.registeredTypeIdentifiers).joined(separator: ","))")
                     guard let provider = providers.first else { return false }
                     provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.folder.identifier) { url, inPlace, failure in
                         LogStore.shared.log("[external] dropped folder inPlace=\(inPlace) url=\(url != nil) error=\(failure?.localizedDescription ?? "none")")
