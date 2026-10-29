@@ -67,6 +67,10 @@ struct GOGInstalledGame: Codable, Sendable {
     @Published private(set) var libraryUpdated: Date?
     /// The newest build id seen for each installed game (checked when its page opens).
     @Published private(set) var latestBuild: [String: String] = [:]
+    /// A game's download and installed size for what Madeira would install (the
+    /// newest build's chosen depots, owned DLC included), or why GOG gave none.
+    enum Size: Equatable { case known(download: Int64, install: Int64), unavailable(String) }
+    @Published private(set) var sizes: [String: Size] = [:]
     @Published var error: String?
 
     struct Download: Equatable {
@@ -243,6 +247,24 @@ struct GOGInstalledGame: Codable, Sendable {
             GOGLog.event("[gog-library] owned games=\(owned.count)")
         } catch {
             handle(error, context: "library", report: interactive)
+        }
+    }
+
+    /// Reads a game's sizes from its newest build's details (the download sheet); once per app run.
+    func loadSize(_ id: String) async {
+        guard signedIn, sizes[id] == nil else { return }
+        do {
+            let build = try await api.latestBuild(id)
+            let manifest = try GOGBuildManifest.parse(try GOGCodec.json(try await api.buildManifest(build), what: "build"))
+            let owned = try await api.ownedIDs()
+            let depots = manifest.selected(ownedDLC: owned.subtracting([manifest.baseProductID])).depots
+            guard !depots.isEmpty else { throw GOGAPIError.noWindowsBuild }
+            sizes[id] = .known(download: depots.reduce(0) { $0 + $1.compressedSize }, install: depots.reduce(0) { $0 + $1.size })
+        } catch {
+            let reason = (error as? GOGAPIError)?.reason ?? (error as? URLError).map { "url-\($0.code.rawValue)" } ?? "error"
+            GOGLog.event("[gog-library] size id=\(id) failed reason=\(reason)")
+            // A connection problem is tried again next time; GOG's own answer is kept.
+            if error is GOGAPIError || error is GOGFormatError { sizes[id] = .unavailable(error.localizedDescription) }
         }
     }
 
