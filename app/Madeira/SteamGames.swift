@@ -1508,6 +1508,9 @@ struct SteamCloudSection: View {
         if let problem = state.problem {
             Text(problem).font(.callout).foregroundStyle(.orange)
         }
+        if let full = state.full {
+            Label(full, systemImage: "icloud.slash").font(.callout).foregroundStyle(.secondary)
+        }
         if let last = state.lastDownload, last.files > 0 {
             Text("Downloaded \(Self.saves(last.files))."
                  + (last.backedUp > 0 ? " \(Self.saves(last.backedUp)) replaced on this device \(last.backedUp == 1 ? "was" : "were") backed up." : ""))

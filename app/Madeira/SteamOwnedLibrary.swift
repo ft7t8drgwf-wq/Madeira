@@ -738,6 +738,11 @@ final class SteamOwnedLibrary: ObservableObject {
     }
 
     private var cloudBusy: Set<Int> = []
+    /// Device saves (key + SHA-1) Steam refused because the game's cloud space
+    /// is full (EResult 25), per app, for this app run: automatic syncs do not
+    /// send the same saves again until a new or changed one appears.
+    private var cloudFull: [Int: Set<String>] = [:]
+    private static func cloudFullKey(_ entry: SteamCloudEntry) -> String { entry.key + "|" + SteamCloudPlan.hex(entry.localSHA) }
     private var deleting: Set<Int> = []
     var hasStorageWork: Bool {
         hasActiveDownload || !cloudBusy.isEmpty || !deleting.isEmpty || cloud.values.contains { $0.phase == .checking }
@@ -810,7 +815,13 @@ final class SteamOwnedLibrary: ObservableObject {
         guard let plan = await checkCloud(appID), Self.cloudAutomatic else { return }
         var changed = false
         if !plan.download.isEmpty { changed = await download(appID, plan.download) || changed }
-        if !plan.upload.isEmpty, !inSession { changed = await upload(appID, plan.upload) || changed }
+        if !plan.upload.isEmpty, !inSession {
+            if let refused = cloudFull[appID], Set(plan.upload.map(Self.cloudFullKey)).isSubset(of: refused) {
+                SteamLog.event("[steam-cloud] app=\(appID) upload skipped: cloud full, files=\(plan.upload.count)")
+            } else {
+                changed = await upload(appID, plan.upload) || changed
+            }
+        }
         if changed { await checkCloud(appID) }
     }
 
@@ -896,6 +907,7 @@ final class SteamOwnedLibrary: ObservableObject {
         guard Self.cloudEnabled, signedIn, !cloudBlocked, var state = cloud[appID], !wanted.isEmpty else { return false }
         state.phase = .uploading(done: 0, of: wanted.count); state.problem = nil; cloud[appID] = state
         var done = 0
+        var quotaFull = false
         var batchID: UInt64 = 0
         func complete(_ ok: Bool) async {
             guard batchID != 0 else { return }
@@ -961,6 +973,7 @@ final class SteamOwnedLibrary: ObservableObject {
                 // Steam's answer, logged: a refusal (quota, a name it does not
                 // accept) comes back as an EResult with no upload blocks.
                 guard begun.eresult == 1 else {
+                    quotaFull = begun.eresult == 25
                     SteamLog.event("[steam-cloud] app=\(appID) upload file=\(done + 1)/\(wanted.count) bytes=\(file.count) refused begin-eresult=\(begun.eresult) name=\(Self.cloudLogName(entry.path))")
                     throw SteamFileError.invalid(Self.cloudRefusal(begun.eresult))
                 }
@@ -992,10 +1005,19 @@ final class SteamOwnedLibrary: ObservableObject {
             }
             await complete(true)
             SteamLog.event("[steam-cloud] app=\(appID) uploaded files=\(done) blocks-per-file=steam-decided")
+            state.full = nil; cloudFull[appID] = nil
         } catch {
             await complete(false)
             SteamLog.event("[steam-cloud] app=\(appID) upload failed after=\(done) reason=\(Self.reason(error))")
-            state.problem = "Steam Cloud upload stopped: \(SteamSignIn.message(error)) This device's saves were not changed."
+            if quotaFull {
+                // Not a fault: the game's saves fill its Steam Cloud space. Play is
+                // not held for it, and the same saves are not sent again this run.
+                cloudFull[appID, default: []].formUnion(wanted.map(Self.cloudFullKey))
+                let left = wanted.count - done
+                state.full = "Steam Cloud is full for this game. Delete a few old saves in the game so \(left == 1 ? "1 save" : "\(left) saves") from this device can upload."
+            } else {
+                state.problem = "Steam Cloud upload stopped: \(SteamSignIn.message(error)) This device's saves were not changed."
+            }
         }
         state.lastUpload = done; state.phase = .ready; cloud[appID] = state
         return done > 0
@@ -1134,7 +1156,7 @@ final class SteamOwnedLibrary: ObservableObject {
         }
         func failure() -> String {
             if case .failed(let message)? = cloud[appID]?.phase { return message }
-            return cloud[appID]?.problem ?? "Steam Cloud could not be reached."
+            return cloud[appID]?.problem ?? cloud[appID]?.full ?? "Steam Cloud could not be reached."
         }
         // The game is still running and may be writing: go on once two looks,
         // 2 s apart, find the same device files.
@@ -1166,7 +1188,7 @@ final class SteamOwnedLibrary: ObservableObject {
         }
         cloudQuit = .working("Uploading \(wanted.count) save\(wanted.count == 1 ? "" : "s")…")
         _ = await upload(appID, wanted)
-        guard cloud[appID]?.problem == nil, cloud[appID]?.lastUpload == wanted.count else {
+        guard cloud[appID]?.problem == nil, cloud[appID]?.full == nil, cloud[appID]?.lastUpload == wanted.count else {
             cloudQuit = .failed(failure()); return
         }
         // The comparison records the uploaded files as in sync for the next start.
@@ -1518,7 +1540,7 @@ final class SteamOwnedLibrary: ObservableObject {
     /// What a Steam Cloud refusal means, for the game page.
     static func cloudRefusal(_ eresult: Int32) -> String {
         switch eresult {
-        case 25: return "Steam Cloud is full for this game (code 25). Delete old saves in the game, then sync again."
+        case 25: return "Steam Cloud is full for this game. Delete a few old saves in the game."
         case 15: return "Steam Cloud refused this save (code 15: access denied)."
         case 8: return "Steam Cloud did not accept this save's name (code 8)."
         default: return "Steam Cloud refused this save (code \(eresult))."

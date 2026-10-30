@@ -1041,6 +1041,9 @@ struct SteamCloudState: Equatable, Sendable {
     var lastUpload: Int?
     /// Why the last download or upload stopped, shown on the game's page.
     var problem: String?
+    /// The game's Steam Cloud space is full: some device saves were not
+    /// uploaded. Shown on the game's page; unlike `problem`, Play is not held.
+    var full: String?
 
     mutating func retryFailedCheck() {
         guard case .failed = phase else { return }
@@ -1051,7 +1054,7 @@ struct SteamCloudState: Equatable, Sendable {
 
     static func == (a: SteamCloudState, b: SteamCloudState) -> Bool {
         a.phase == b.phase && a.audit == b.audit && a.checked == b.checked && a.conflicts == b.conflicts
-            && a.lastUpload == b.lastUpload && a.problem == b.problem
+            && a.lastUpload == b.lastUpload && a.problem == b.problem && a.full == b.full
             && a.lastDownload?.files == b.lastDownload?.files && a.lastDownload?.backedUp == b.lastDownload?.backedUp
     }
 }
