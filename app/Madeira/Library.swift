@@ -2621,6 +2621,8 @@ struct LibraryBadges: View {
         if entry.bits == 32 || entry.bits == 64 { texts.append("\(entry.bits)-bit") }
         if entry.isBatch { texts.append("Batch") }   // ml1163
         if let api = LibraryRendererBadge.compact(entry.graphicsAPI) { texts.append(LibraryRendererBadge.display(api)) }
+        // A game device-tested on Madeira (KnownGames, LaunchCheck.swift).
+        if entry.desktop != true, KnownGames.find(windowsPath: entry.windowsPath, steamAppID: entry.steamAppID) != nil { texts.append("Tested") }
         if let note { texts.append(note) }
         return texts
     }

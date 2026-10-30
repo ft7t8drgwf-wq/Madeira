@@ -14,6 +14,8 @@
 //  - It imports mscoree.dll (.NET Framework) and Wine Mono is not on the device.
 //  - Steam's store lists a minimum memory this device does not have.
 //  - Little free space is left on the device.
+//  - On the good side: the game is on KnownGames, the games device-tested on
+//    Madeira (also the library's "Tested" pill).
 //
 //  Plain values and file reads only (no UI), so tests/host/check-launch-check.py
 //  compiles and runs it on Linux. LaunchCheckView.swift shows the result.
@@ -26,7 +28,7 @@ import FoundationNetworking
 
 struct LaunchCheckNote: Identifiable, Equatable {
     enum Level: Int, Comparable {
-        case info, caution, problem
+        case good, info, caution, problem
         static func < (a: Level, b: Level) -> Bool { a.rawValue < b.rawValue }
     }
     /// What the note's button does (LaunchCheckView maps it to the page or action).
@@ -77,6 +79,8 @@ enum LaunchCheck {
         /// Steam's minimum memory for the game, in bytes (minimumMemory(html:)).
         var steamMinimumMemory: UInt64?
         var freeBytes: Int64?
+        /// The game's device test, when it had one (KnownGames).
+        var tested: KnownGame?
     }
 
     static let gb: Double = 1_073_741_824
@@ -123,6 +127,10 @@ enum LaunchCheck {
             notes.append(LaunchCheckNote(id: "space", level: free < 512 * 1_048_576 ? .problem : .caution,
                                          title: "Only \(gigabytes(UInt64(free))) free",
                                          detail: "Games write saves, settings and shader caches while they run. A full device can crash the game or cut a save short. Free some space first."))
+        }
+        if let tested = input.tested {
+            notes.append(LaunchCheckNote(id: "tested", level: .good, title: "Tested: runs on Madeira",
+                                         detail: tested.detail))
         }
         return notes.sorted { $0.level > $1.level }
     }
@@ -262,5 +270,54 @@ enum LaunchCheck {
     /// One log line for the session's log, so a bug report shows what Play warned about.
     static func logLine(title: String, notes: [LaunchCheckNote]) -> String {
         "[will-it-run] \(title): " + (notes.isEmpty ? "no warnings" : notes.map { "\($0.id)=\($0.level)" }.joined(separator: " "))
+    }
+}
+
+/// Games device-tested on Madeira that run (the project's own test log). A game
+/// with recommended settings gets them on first sight (GameRecommendations.swift),
+/// so "runs" means with those. Recognised like GameRecommendations: a Steam App
+/// ID, the install folder under steamapps\common, or the game's own program.
+struct KnownGame: Equatable {
+    let id: String
+    let title: String
+    let appIDs: Set<Int>
+    /// Lowercased folder names (steamapps\common or wherever it was copied).
+    let folders: Set<String>
+    /// Lowercased program names.
+    let programs: Set<String>
+    /// Where it was tested ("build 47, iPhone 17 Pro Max").
+    let tested: String
+    let note: String
+
+    var detail: String { "Tested on \(tested)." + (note.isEmpty ? "" : " " + note) }
+}
+
+enum KnownGames {
+    static let all: [KnownGame] = [
+        KnownGame(id: "counter-strike-2", title: "Counter-Strike 2", appIDs: [730],
+                  folders: ["counter-strike global offensive"], programs: ["cs2.exe"],
+                  tested: "Madeira build 47, iPhone 17 Pro Max",
+                  note: "With Madeira's recommended settings. Start it with -insecure (community servers and bots): how VAC treats Madeira is unknown."),
+        KnownGame(id: "escapists-2", title: "The Escapists 2", appIDs: [641990],
+                  folders: ["the escapists 2"], programs: ["theescapists2.exe"],
+                  tested: "Madeira build 47, iPhone 17 Pro Max", note: "With Madeira's recommended settings."),
+        KnownGame(id: "terraria", title: "Terraria", appIDs: [105600],
+                  folders: ["terraria"], programs: ["terraria.exe"],
+                  tested: "Madeira build 34", note: ""),
+        KnownGame(id: "megabonk", title: "Megabonk", appIDs: [],
+                  folders: ["megabonk"], programs: ["megabonk.exe"],
+                  tested: "Madeira build 31", note: ""),
+        KnownGame(id: "fallout-new-vegas", title: "Fallout: New Vegas", appIDs: [22380],
+                  folders: ["fallout new vegas"], programs: ["falloutnv.exe"],
+                  tested: "Madeira build 18, iPhone", note: "Saves load with Older NVIDIA card (Direct3D 9), which Madeira turns on for it."),
+    ]
+
+    /// The device test for a game: `windowsPath` is a program or a Steam game's install folder.
+    static func find(windowsPath: String, steamAppID: Int?) -> KnownGame? {
+        if let steamAppID, let game = all.first(where: { $0.appIDs.contains(steamAppID) }) { return game }
+        let parts = windowsPath.replacingOccurrences(of: "/", with: "\\").lowercased().split(separator: "\\").map(String.init)
+        guard let last = parts.last else { return nil }
+        if last.hasSuffix(".exe") { return all.first { $0.programs.contains(last) } }
+        return all.first { $0.folders.contains(last) }
     }
 }

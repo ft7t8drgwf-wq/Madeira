@@ -123,7 +123,12 @@ when the page opens. It names a missing program, anti-cheat in the game's files
 neither its folder, Wine's system folders nor Madeira's Wine libraries have,
 .NET Framework without Wine Mono (with a Get Wine Mono button), a Steam minimum
 memory above the device's (from the public store, kept 30 days), and less than
-2 GB free. With nothing found it shows one green line. Play stays available: a
+2 GB free. A game device-tested on Madeira (`KnownGames` in `LaunchCheck.swift`:
+Counter-Strike 2, The Escapists 2, Terraria, Megabonk, Fallout: New Vegas) gets
+a green "Tested: runs on Madeira" line with the build it was tested on, and a
+**Tested** pill in the library; Counter-Strike 2 and The Escapists 2 also have
+recommended settings (`GameRecommendations.swift`), so they get their tested
+config on first sight. With nothing found it shows one green line. Play stays available: a
 red line asks "Play anyway?" once per game and set of problems. Each read is
 logged as `[will-it-run]`. Tested by `tests/host/check-launch-check.py`.
 

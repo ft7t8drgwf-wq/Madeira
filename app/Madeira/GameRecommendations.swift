@@ -631,6 +631,36 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
+    /// Counter-Strike 2 (Steam; tested on an iPhone 17 Pro Max, build 47, 2026-10-30).
+    /// v8.dll (48 MB, the Panorama UI) found no room in the JIT pool and cs2.exe
+    /// stopped (build 39). Pure-x64 DLLs run from their loaded image instead of a
+    /// pool copy (about 400 MB freed), and the pool joins the free run above the
+    /// main thread's stack (about 880 MB instead of 592): the game then reaches
+    /// its menu and matches. No switches.
+    static let counterStrike2 = GameRecommendation(
+        id: "counter-strike-2", title: "Counter-Strike 2", version: 1,
+        config: """
+        # Madeira's recommended settings for Counter-Strike 2.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool = 896
+        pool-split = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
+
+    /// The Escapists 2 (Steam; tested on an iPhone 17 Pro Max, build 47,
+    /// 2026-10-30). A 32-bit Unity game on the old mono.dll: Mono's XCHG code
+    /// patches at unaligned addresses faulted through the JIT pool's alias, so
+    /// its code memory stays plain read/write. No switches.
+    static let escapists2 = GameRecommendation(
+        id: "escapists-2", title: "The Escapists 2", version: 1,
+        config: """
+        # Madeira's recommended settings for The Escapists 2.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_WOW_RWX_PLAIN = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
+
     /// The Rockstar Games Launcher outside Steam (125hz, 6f7eb58a on
     /// 125hz/Madeira vulkan-stack-1028). Through Madeira Dock the game's own list
     /// carries the launcher chain's lines and the Dock starts the service manager; a
@@ -822,7 +852,7 @@ enum GameRecommendations {
 
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
                       darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid,
-                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup,
+                      counterStrike2, escapists2, rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup,
                       ffxivLauncher, ffxivSetup, standard]
 
     // MARK: Recognising a game
@@ -830,7 +860,7 @@ enum GameRecommendations {
     /// Steam App IDs.
     static let rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,
                horizonZeroDawnAppID = 1151640, darkSoulsRemasteredAppID = 570940, darkSoulsIIIAppID = 374320,
-               projectZomboidAppID = 108600
+               projectZomboidAppID = 108600, counterStrike2AppID = 730, escapists2AppID = 641990
     static let falloutNewVegasAppID = 22380, fallout3AppIDs: Set<Int> = [22300, 22370]   // Fallout 3, its GOTY Edition
     /// Black Ops II's campaign, Zombies and multiplayer.
     static let blackOps2AppIDs: Set<Int> = [202970, 212910, 202990]
@@ -862,6 +892,8 @@ enum GameRecommendations {
                 || installFolder == "fallout 3 goty" { return fallout3 }
             if blackOps2AppIDs.contains(steamAppID ?? 0) || installFolder == "call of duty black ops ii" { return blackOps2 }
             if steamAppID == projectZomboidAppID || installFolder == "projectzomboid" { return projectZomboid }
+            if steamAppID == counterStrike2AppID || installFolder == "counter-strike global offensive" { return counterStrike2 }
+            if steamAppID == escapists2AppID || installFolder == "the escapists 2" { return escapists2 }
             return nil
         }
         // A program, wherever it was installed: only the game's own programs, so a
@@ -894,6 +926,10 @@ enum GameRecommendations {
             return blackOps2
         case "projectzomboid64.exe":
             return projectZomboid
+        case "cs2.exe":
+            return counterStrike2
+        case "theescapists2.exe":
+            return escapists2
         case "launcher.exe" where Array(parts.dropLast().suffix(2)) == ["rockstar games", "launcher"]:
             // The Rockstar Games Launcher outside Steam; another publisher's Launcher.exe gets nothing here.
             return rockstarLauncher

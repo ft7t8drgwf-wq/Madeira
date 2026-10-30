@@ -39,6 +39,12 @@ check(start.index('LaunchCheck.acknowledged') < start.index('LaunchCurtain.share
 check('!confirmPlayAnyway' in library, 'the controller\'s accept does not launch past the question')
 check('Button("Play anyway")' in library and 'LaunchCheck.acknowledge(entry' in library, 'Play anyway remembers the answer')
 check('LogStore.shared.log(logLine(' in view, 'the result is logged as [will-it-run]')
+check('KnownGames.find(windowsPath: entry.windowsPath, steamAppID: entry.steamAppID) != nil { texts.append("Tested") }' in library,
+      'the library shows a Tested pill')
+check('input.tested = KnownGames.find(' in view, 'Will it run? names a device test')
+known = (app / 'GameRecommendations.swift').read_text(encoding='utf-8')
+for ident in ('counter-strike-2', 'escapists-2', 'fallout-new-vegas'):
+    check(f'id: "{ident}"' in known, f'tested game {ident} has recommended settings')
 
 harness = r'''
 import Foundation
@@ -114,6 +120,17 @@ expect(LaunchCheck.notes(input).first?.level == .problem, "100 MB free is a prob
 input = base; input.antiCheat = "BattlEye"; input.freeBytes = 100 * 1_048_576
 expect(LaunchCheck.notes(input).map(\.level) == [.problem, .caution], "most serious first")
 expect(LaunchCheck.logLine(title: "X", notes: LaunchCheck.notes(input)) == "[will-it-run] X: space=problem anticheat=caution", "log line")
+// Known games
+expect(KnownGames.find(windowsPath: #"C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"#, steamAppID: 730)?.id == "counter-strike-2", "CS2 by App ID")
+expect(KnownGames.find(windowsPath: #"C:\x\steamapps\common\The Escapists 2"#, steamAppID: nil)?.id == "escapists-2", "Escapists 2 by folder")
+expect(KnownGames.find(windowsPath: #"C:\Games\Megabonk\Megabonk.exe"#, steamAppID: nil)?.id == "megabonk", "Megabonk by program")
+expect(KnownGames.find(windowsPath: #"C:\Games\Foo\foo.exe"#, steamAppID: 620) == nil, "other games are not known")
+expect(Set(KnownGames.all.map(\.id)).count == KnownGames.all.count, "known game ids are unique")
+input = base; input.tested = KnownGames.all[0]
+let tested = LaunchCheck.notes(input)
+expect(tested.map(\.id) == ["tested"] && tested[0].level == .good && tested[0].detail.hasPrefix("Tested on Madeira build"), "a tested game gets a good line")
+input.antiCheat = "Valve Anti-Cheat"
+expect(LaunchCheck.notes(input).last?.id == "tested", "the good line sorts last")
 expect(LaunchCheck.gigabytes(12 * gb - 1) == "12 GB" && LaunchCheck.gigabytes(gb + gb / 2) == "1.5 GB", "sizes in words")
 '''
 

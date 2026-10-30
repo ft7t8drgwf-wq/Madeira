@@ -18,7 +18,7 @@ struct LaunchCheckSection: View {
 
     var body: some View {
         Section {
-            if notes.isEmpty {
+            if !notes.contains(where: { $0.level >= .caution }) {
                 Label {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("No known problems").fontWeight(.semibold)
@@ -48,6 +48,7 @@ struct LaunchCheckSection: View {
 
     static func symbol(_ level: LaunchCheckNote.Level) -> String {
         switch level {
+        case .good: return "checkmark.seal.fill"
         case .info: return "info.circle.fill"
         case .caution: return "exclamationmark.triangle.fill"
         case .problem: return "xmark.octagon.fill"
@@ -55,6 +56,7 @@ struct LaunchCheckSection: View {
     }
     static func color(_ level: LaunchCheckNote.Level) -> Color {
         switch level {
+        case .good: return .green
         case .info: return .blue
         case .caution: return .orange
         case .problem: return .red
@@ -85,6 +87,7 @@ extension LaunchCheck {
         input.monoAvailable = WineMonoModel.available
         input.deviceName = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
         input.physicalMemory = ProcessInfo.processInfo.physicalMemory
+        input.tested = KnownGames.find(windowsPath: entry.windowsPath, steamAppID: entry.steamAppID)
         input.freeBytes = (try? drive.deletingLastPathComponent()
             .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
         let arguments = entry.programArguments.lowercased()
