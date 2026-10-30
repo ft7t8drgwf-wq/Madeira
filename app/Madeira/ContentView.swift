@@ -2197,6 +2197,7 @@ struct ContentView: View {
             case .steamSignIn: SteamSignInView()
             case .gogSignIn: GOGSignInView()
             case .epicSignIn: EpicSignInView()
+            case .eaSignIn: EASignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
             case .allSettings: AllSettingsView()
             case .registry: RegistryEditorView()
@@ -2607,8 +2608,10 @@ struct ContentView: View {
 
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
     /// An Epic game first gets Epic's sign-in arguments with a fresh one-use code
-    /// (EpicLibrary.launchArguments), for this launch only.
-    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false, ffxivReady: Bool = false) {
+    /// (EpicLibrary.launchArguments), for this launch only. An EA game first gets its
+    /// licence, the EA app's environment and Madeira's stand-in for the EA app's local
+    /// service (EALibrary.prepareLaunch); every other launch starts without that environment.
+    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false, ffxivReady: Bool = false, eaReady: Bool = false) {
         guard !EpicCloud.shared.isBusy else {
             library.error = "Wait for Epic Cloud save sync to finish before starting a game."
             return
@@ -2619,12 +2622,25 @@ struct ContentView: View {
             ffxivSignIn = entry
             return
         }
+        if entry.eaOfferID == nil { EALibrary.clearEnvironment() }
+        if let offer = entry.eaOfferID, !eaReady {
+            Task { @MainActor in
+                do {
+                    try await EALibrary.shared.prepareLaunch(entry)
+                    startLibraryEntry(entry, epicReady: epicReady, ffxivReady: ffxivReady, eaReady: true)
+                } catch {
+                    LogStore.shared.log("[ea-launch] offer=\(offer) not started: \(error.localizedDescription)", level: .error)
+                    library.error = "This EA game could not be prepared: \(error.localizedDescription)"
+                }
+            }
+            return
+        }
         if let app = entry.epicAppName, !epicReady {
             Task { @MainActor in
                 do {
                     let arguments = try await EpicLibrary.shared.launchArguments(appName: app)
                     LibraryEntry.setTransientArguments(arguments, for: entry.id)
-                    startLibraryEntry(entry, epicReady: true)
+                    startLibraryEntry(entry, epicReady: true, ffxivReady: ffxivReady, eaReady: eaReady)
                 } catch {
                     LogStore.shared.log("[epic-launch] app=\(app) not started: no sign-in arguments", level: .error)
                     library.error = "This Epic game could not get its sign-in from Epic: \(error.localizedDescription)"
@@ -2721,6 +2737,7 @@ struct ContentView: View {
         GOGLibrary.shared.sessionChanged(active: true)
         ItchLibrary.shared.sessionChanged(active: true)
         EpicLibrary.shared.sessionChanged(active: true)
+        EALibrary.shared.sessionChanged(active: true)
         /* ml1095: one config file. Written once from any legacy madeira-*.txt. */
         MadeiraConfig.migrateLegacy { self.logStore.log($0) }
         MadeiraConfig.deleteLegacyFiles { self.logStore.log($0) }   /* ml1096: the old files go once the cfg exists */
