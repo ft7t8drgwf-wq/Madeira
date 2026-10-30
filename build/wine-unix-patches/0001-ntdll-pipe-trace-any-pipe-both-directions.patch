@@ -1,0 +1,144 @@
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -5398,59 +5398,100 @@ static void madeira_file_trace( const char *what, unsigned int status, const UNI
+  * (OnChannelConnected) but the game never asks the helper for a UI (GTA logs of
+  * 2026-10-02/03). Log every NtWriteFile on a handle whose object name contains
+  * "rgsc_": who writes, how much, and the first bytes, so both directions of the
+- * exchange show up. The name is looked up once per (process, handle). */
+-static void madeira_pipe_trace( HANDLE handle, const void *buffer, ULONG length )
+-{
+-    static int on = -1, limit, bytes = 48;
++ * exchange show up. The name is looked up once per (process, handle).
++ *
++ * Black Ops (2026-10-30): Steam's client service hands the CEG module's answer
++ * to the Steam client over anonymous pipes (\\.\pipe\Win32.Pipes.<pid>.<n>, the
++ * names CreatePipe gives), a 32 KB message every ~150 ms for the whole 20 s job,
++ * and the client reads them 1 KB at a time. So the name to match comes from
++ * MADEIRA_PIPE_TRACE_MATCH (default rgsc_; ASCII, any case), reads are traced
++ * too with MADEIRA_PIPE_TRACE_READS=1, a line shows up to 65536 bytes
++ * (MADEIRA_PIPE_TRACE_BYTES; past 1024 bytes the hex has no spaces and there is
++ * no text column), and MADEIRA_PIPE_TRACE_LIMIT goes up to 1000000 lines. */
++static void madeira_pipe_trace_io( HANDLE handle, const void *buffer, ULONG length, BOOL is_read )
++{
++    static int on = -1, limit, bytes = 48, reads, ml;
++    static char match[64] = "rgsc_";
+     static volatile int n;
+-    static struct { void *peb; HANDLE h; int rgsc; } cache[64];
++    static struct { void *peb; HANDLE h; int hit; } cache[64];
+     static int cache_n;
+     void *peb = NtCurrentTeb()->Peb;
+-    int i, k, rgsc = -1, line;
+-    char hex[3 * 1024 + 1], asc[1024 + 1];
++    int i, k, ta, hit = -1, line;
++    char *hex, *asc;
+     const unsigned char *b = buffer;
+ 
+     if (on < 0)
+     {
+         const char *e = getenv( "MADEIRA_PIPE_TRACE" ), *l = getenv( "MADEIRA_PIPE_TRACE_LIMIT" );
+-        const char *nb = getenv( "MADEIRA_PIPE_TRACE_BYTES" );
++        const char *nb = getenv( "MADEIRA_PIPE_TRACE_BYTES" ), *m = getenv( "MADEIRA_PIPE_TRACE_MATCH" );
++        const char *r = getenv( "MADEIRA_PIPE_TRACE_READS" );   /* 1: NtReadFile too (the receiving side) */
+         limit = l ? atoi( l ) : 2000;
+-        if (limit <= 0 || limit > 100000) limit = 2000;
+-        /* bytes shown in hex per write (default 48; 16..1024). The helper's load
++        if (limit <= 0 || limit > 1000000) limit = 2000;
++        /* bytes shown per operation (default 48; 16..65536). The helper's load
+          * events (type 0x10, 58..102 bytes) carry their result past byte 48. */
+         bytes = nb ? atoi( nb ) : 48;
+-        if (bytes < 16 || bytes > 1024) bytes = 48;
++        if (bytes < 16 || bytes > 65536) bytes = 48;
++        /* the part of the pipe's object name to look for, e.g. Win32.Pipes */
++        if (m && m[0] && strlen( m ) < sizeof(match)) strcpy( match, m );
++        ml = strlen( match );
++        reads = r && r[0] == '1';
+         on = e && e[0] == '1';
+-        if (on) dprintf( 2, "[pipe-trace] madeira-bcd on: writes to rgsc_ pipes, %d lines, %d bytes (MADEIRA_PIPE_TRACE)\n", limit, bytes );
++        if (on) dprintf( 2, "[pipe-trace] madeira-bcd on: writes%s on pipes whose name has \"%s\", %d lines, "
++                            "%d bytes a line (MADEIRA_PIPE_TRACE, _MATCH, _READS, _BYTES, _LIMIT)\n",
++                         reads ? " and reads" : "", match, limit, bytes );
+     }
+-    if (!on || n >= limit) return;
++    if (!on || n >= limit || (is_read && !reads)) return;
+     for (i = 0; i < cache_n; i++)
+-        if (cache[i].peb == peb && cache[i].h == handle) { rgsc = cache[i].rgsc; break; }
+-    if (rgsc < 0)
++        if (cache[i].peb == peb && cache[i].h == handle) { hit = cache[i].hit; break; }
++    if (hit < 0)
+     {
+         char buf[sizeof(OBJECT_NAME_INFORMATION) + 512];
+         OBJECT_NAME_INFORMATION *oni = (OBJECT_NAME_INFORMATION *)buf;
+         ULONG used = 0;
+-        rgsc = 0;
++        hit = 0;
+         if (!NtQueryObject( handle, ObjectNameInformation, oni, sizeof(buf), &used ) && oni->Name.Buffer)
+         {
+             const WCHAR *w = oni->Name.Buffer;
+-            unsigned int wl = oni->Name.Length / sizeof(WCHAR), j;
+-            for (j = 0; j + 5 <= wl && !rgsc; j++)
+-                rgsc = w[j] == 'r' && w[j + 1] == 'g' && w[j + 2] == 's' && w[j + 3] == 'c' && w[j + 4] == '_';
++            unsigned int wl = oni->Name.Length / sizeof(WCHAR), j, c;
++            for (j = 0; j + ml <= wl && !hit; j++)
++            {
++                for (c = 0; c < (unsigned int)ml; c++)
++                {
++                    WCHAR a = w[j + c], d = (unsigned char)match[c];
++                    if (a >= 'A' && a <= 'Z') a += 32;
++                    if (d >= 'A' && d <= 'Z') d += 32;
++                    if (a != d) break;
++                }
++                hit = (c == (unsigned int)ml);
++            }
+         }
+-        if (cache_n < 64) { cache[cache_n].peb = peb; cache[cache_n].h = handle; cache[cache_n].rgsc = rgsc; cache_n++; }
+-    }
+-    if (!rgsc || !b) return;
+-    for (k = 0; k < bytes && k < (int)length; k++) sprintf( hex + 3 * k, "%02x ", b[k] );
+-    hex[3 * k] = 0;
+-    for (k = 0; k < (bytes > 96 ? bytes : 96) && k < (int)length; k++) asc[k] = (b[k] < 32 || b[k] > 126) ? '.' : (char)b[k];
+-    asc[k] = 0;
++        if (cache_n < 64) { cache[cache_n].peb = peb; cache[cache_n].h = handle; cache[cache_n].hit = hit; cache_n++; }
++    }
++    if (!hit || !b) return;
++    k = (int)length < bytes ? (int)length : bytes;
++    ta = bytes > 96 ? bytes : 96;
++    if (ta > (int)length) ta = length;
++    if (k > 1024) ta = 0;                      /* a long line is hex only */
++    else if (ta > 1024) ta = 1024;
++    if (!(hex = malloc( 3 * k + 1 ))) return;
++    if (!(asc = malloc( ta + 1 ))) { free( hex ); return; }
++    if (k <= 1024) { for (i = 0; i < k; i++) sprintf( hex + 3 * i, "%02x ", b[i] ); hex[3 * k] = 0; }
++    else { for (i = 0; i < k; i++) sprintf( hex + 2 * i, "%02x", b[i] ); hex[2 * k] = 0; }
++    for (i = 0; i < ta; i++) asc[i] = (b[i] < 32 || b[i] > 126) ? '.' : (char)b[i];
++    asc[ta] = 0;
+     line = __atomic_add_fetch( &n, 1, __ATOMIC_RELAXED );
+-    if (line > limit) return;
+-    dprintf( 2, "[pipe-trace] #%d write peb=%p tid=%04x h=%p len=%u | %s| %s\n", line, peb,
+-             (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ), handle,
+-             (unsigned int)length, hex, asc );
++    if (line <= limit)
++        dprintf( 2, "[pipe-trace] #%d %s peb=%p tid=%04x h=%p len=%u | %s| %s\n", line,
++                 is_read ? "read" : "write", peb,
++                 (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ), handle,
++                 (unsigned int)length, hex, asc );
++    free( hex );
++    free( asc );
++}
++
++static void madeira_pipe_trace( HANDLE handle, const void *buffer, ULONG length )
++{
++    madeira_pipe_trace_io( handle, buffer, length, FALSE );
+ }
+ #endif
+ 
+@@ -7588,7 +7629,10 @@ done:
+ #ifdef WINE_IOS
+     /* ml487 (#78): single choke point — every read path above reaches here. */
+     if (status == STATUS_SUCCESS && total)
++    {
+         ios_js_read_note( handle, unix_handle, buffer, length, total, offset );
++        madeira_pipe_trace_io( handle, buffer, total, TRUE );   /* [pipe-trace] MADEIRA_PIPE_TRACE_READS=1 */
++    }
+     ios_video_read_note( handle, status, total, offset );
+ #endif
+     send_completion = cvalue != 0;

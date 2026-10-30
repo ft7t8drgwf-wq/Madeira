@@ -11,8 +11,10 @@ APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
-# dlls/ntdll/unix/*.c from the submodule are compiled below; apply this repository's wine patches first
+# dlls/ntdll/unix/*.c from the submodule are compiled below; apply this repository's wine patches first,
+# then the unix-only ones (build/wine-unix-patches/apply.sh explains the split)
 "$REPO_ROOT/build/wine-patches/apply.sh"
+"$REPO_ROOT/build/wine-unix-patches/apply.sh"
 
 # Optional Vulkan route; do not change the normal native build.
 VULKAN_FLAGS=()
