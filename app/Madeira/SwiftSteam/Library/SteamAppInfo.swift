@@ -208,6 +208,22 @@ struct SteamAppInfo {
         return preferred
     }
 
+    /// The `sharedinstall` redistributables (DirectX, VC++ runtimes) another app
+    /// owns, usually Steamworks Common Redistributables (228980), that a Windows
+    /// install of this app names: matching OS and language, no low-violence
+    /// alternates. Valve's client records them under the game's SharedDepots and
+    /// refuses to start the game ("required app 228980 not ready") until the
+    /// owner app is installed with them, so they are downloaded into the
+    /// owner's folder and recorded there.
+    func redistDepots(os: String = "windows", language: String? = nil) -> [DepotInfo] {
+        let language = language ?? depotLanguage
+        return depots.filter { d in
+            d.isSharedInstall && d.fromApp != nil && d.fromApp != appID && d.dlcAppID == nil &&
+                d.supports(os: os) && !d.lowViolence &&
+                (d.language.isEmpty || d.language.caseInsensitiveCompare(language) == .orderedSame)
+        }.sorted { $0.depotID < $1.depotID }
+    }
+
     /// Every depot with why it was or was not selected, for the install log
     /// ("sel", or the first failing rule). IDs and flags only.
     func depotSelectionSummary(os: String = "windows", arch: String = "64",

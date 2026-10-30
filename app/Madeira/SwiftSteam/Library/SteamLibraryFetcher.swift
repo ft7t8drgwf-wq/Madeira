@@ -117,6 +117,9 @@ class SteamLibraryFetcher {
         }
         var pending = app.depots.filter { eligible($0) && $0.publicManifestID == nil && $0.fromApp != nil }
             .map { ($0.fromApp!, $0.depotID) }
+        // Redistributables (sharedinstall) resolve the same way, but a missing one
+        // never fails the install: the game's own content does not depend on it.
+        pending += app.redistDepots().filter { $0.publicManifestID == nil }.map { ($0.fromApp!, $0.depotID) }
         while let (id, depotID) = pending.popLast() {
             try Task.checkCancellation()
             if !references.insert("\(id):\(depotID)").inserted { continue }
@@ -147,7 +150,11 @@ class SteamLibraryFetcher {
         guard missing.isEmpty else { throw SteamFileError.invalid("Steam did not provide required shared content metadata. Refresh and retry the download.") }
         // The direct owner of each selected shared depot, for its install
         // record. Metadata only; Valve still decides access and launch readiness.
-        for id in Set(app.installDepots().compactMap(\.fromApp)).subtracting([appID]).sorted() {
+        let redist = app.redistDepots().filter { $0.publicManifestID != nil }
+        if !redist.isEmpty {
+            SteamLog.event("[steam-redist] app=\(appID) depots=\(redist.map { "\($0.depotID)<\($0.fromApp!)" }.joined(separator: ","))")
+        }
+        for id in Set(app.installDepots().compactMap(\.fromApp) + redist.compactMap(\.fromApp)).subtracting([appID]).sorted() {
             try Task.checkCancellation()
             if owners[id] == nil {
                 guard owners.count <= 64 else { break }
