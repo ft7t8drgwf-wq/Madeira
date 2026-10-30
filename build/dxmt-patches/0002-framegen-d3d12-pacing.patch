@@ -1,0 +1,96 @@
+Frame generation (MADEIRA_FRAMEGEN=1) for D3D12 games at an even cadence.
+
+From Tomba247/Madeira (bo3-build, 156b503e and eba2ddc1, GPL-3.0), RDR2 work:
+- one window at a time: a hidden window's layer (Winios -madeiraWindowHidden)
+  presents as usual, the interpolator's state is serialized, and a change of
+  layer starts a new history; only the game's process (ntdll unix
+  ios_framegen_game_thread) uses it once a D3D12 game is known;
+- a stall drops the history after MADEIRA_FRAMEGEN_STALL_MS (default 125 ms)
+  instead of 66.7 ms, so a game capped at 15 fps keeps its generated frames;
+- with an FPS limit on, the generated and the real frame each stay one slot
+  (afterMinimumDuration), so env.MADEIRA_FPS_CAP = 15 under the 30 limit
+  shows an even 30.
+Log marker: [framegen] layer ... owns the interpolator.
+
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 3f7974e..1728d48 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3384,7 +3384,12 @@ static int madeira_fg_present_inner(id<MTLCommandBuffer> cb, id<CAMetalDrawable>
+   if (g_fg.last_abs) {
+     double d = (double)(now - g_fg.last_abs) * tb.numer / tb.denom / 1e9;
+     if (d < 1.0 / 120.0) d = 1.0 / 120.0;
+-    if (d > 1.0 / 15.0) { d = 1.0 / 15.0; g_fg.have_prev = 0; }   /* a stall: no stale history */
++    /* madeira-bcd framegen-d3d12: a stall drops the history; the threshold is
++     * MADEIRA_FRAMEGEN_STALL_MS (default 125 ms), so a game capped at 15 fps
++     * (66.7 ms a frame) keeps its generated frames through ordinary jitter. */
++    double stall = madeira_fg_envf("MADEIRA_FRAMEGEN_STALL_MS", 125.0f) / 1000.0;
++    if (stall < 1.0 / 60.0) stall = 1.0 / 60.0;
++    if (d > stall) { d = stall; g_fg.have_prev = 0; }   /* a stall: no stale history */
+     g_fg.dt = g_fg.dt > 0 ? g_fg.dt * 0.8 + d * 0.2 : d;
+   }
+   g_fg.last_abs = now;
+@@ -3463,17 +3468,61 @@ static int madeira_fg_present_inner(id<MTLCommandBuffer> cb, id<CAMetalDrawable>
+     [blit copyFromTexture:g_fg.out toTexture:extra.texture];
+     [blit endEncoding];
+   }
+-  [cb presentDrawable:extra];
+-  [cb presentDrawable:drawable atTime:CACurrentMediaTime() + g_fg.dt * 0.5];
++  {
++    /* madeira-bcd framegen-d3d12: with an FPS limit of 30 (40, 60) on, the limit
++     * is the DISPLAY cadence: the generated frame and then the real one each stay
++     * on screen at least one slot, so a game capped at half the limit (e.g.
++     * env.MADEIRA_FPS_CAP = 15) shows an evenly spaced 30. Without a limit, the
++     * real frame follows half a game frame after the generated one, as before. */
++    int m = g_madeira_vsync_mode;
++    double slot = m == 3 ? 1.0 / 30.0 : m == 4 ? 1.0 / 40.0 : m == 1 ? 1.0 / 60.0 : 0.0;
++    if (slot > 0.0) {
++      [cb presentDrawable:extra afterMinimumDuration:slot];
++      [cb presentDrawable:drawable afterMinimumDuration:slot];
++    } else {
++      [cb presentDrawable:extra];
++      [cb presentDrawable:drawable atTime:CACurrentMediaTime() + g_fg.dt * 0.5];
++    }
++  }
+   g_fg.generated++;
+   if (g_fg.generated == 1 || (g_fg.generated % 600) == 0)
+     dprintf(STDERR_FILENO, "[framegen] %llu generated / %llu frames (no drawable %llu), game frame %.1f ms\n",
+             g_fg.generated, g_fg.frames, g_fg.no_drawable, g_fg.dt * 1000.0);
+   return 1;
+ }
++/* madeira-bcd framegen-d3d12: every Wine process of a session presents through
++ * this one process, and the interpolator's state is one global. The Rockstar
++ * Games Launcher (1280x600) and Social Club (700x800) windows presented through
++ * it from their own threads, each re-sizing it under the other, until Metal
++ * aborted on a copy between textures of different sizes (2026-10-22, 17:10).
++ * Only the game's threads use it now (ios_framegen_game_thread: the process
++ * whose D3D12 runtime presents, from the [xp] sampler; any thread while none
++ * is known, e.g. a D3D11 game), never a hidden window's layer (Winios'
++ * -madeiraWindowHidden), and
++ * one at a time; a change of layer starts a new history. */
++extern int ios_framegen_game_thread(void);
++static os_unfair_lock g_fg_lock = OS_UNFAIR_LOCK_INIT;
++static void *g_fg_owner;
+ static int madeira_fg_present(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
+   int r;
++  CALayer *layer = drawable.layer;
++  if (!ios_framegen_game_thread())
++    return 0;
++  if (layer && [layer respondsToSelector:@selector(madeiraWindowHidden)] &&
++      ((BOOL (*)(id, SEL))objc_msgSend)(layer, @selector(madeiraWindowHidden)))
++    return 0;
++  os_unfair_lock_lock(&g_fg_lock);
++  if ((void *)layer != g_fg_owner) {
++    static unsigned said;
++    if (said++ < 8)
++      dprintf(STDERR_FILENO, "[framegen] layer %p (%lux%lu) presents: it now owns the interpolator\n", (void *)layer,
++              (unsigned long)drawable.texture.width, (unsigned long)drawable.texture.height);
++    g_fg_owner = (void *)layer;
++    g_fg.have_prev = 0;
++    g_fg.last_abs = 0;
++  }
+   @autoreleasepool { r = madeira_fg_present_inner(cb, drawable); }
++  os_unfair_lock_unlock(&g_fg_lock);
+   return r;
+ }
+ 
