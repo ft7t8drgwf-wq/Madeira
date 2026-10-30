@@ -424,6 +424,7 @@ struct ExternalGamesSheet: View {
 struct ExternalDrivesSection: View {
     @ObservedObject private var drives = ExternalDrives.shared
     @State private var error: String?
+    @State private var dropTarget = false
     @State private var scanning: ExternalFolder?
     @State private var removing: ExternalFolder?
 
@@ -442,7 +443,8 @@ struct ExternalDrivesSection: View {
                 }
             }
             Button("Add drive or folder") { ExternalFolderPicker.shared.present(added) }
-                .onDrop(of: [.folder], isTargeted: nil) { providers in
+                // Anything is let in so the log shows every drop; dropped() picks the folder out.
+                .onDrop(of: [.folder, .directory, .item], isTargeted: $dropTarget) { providers in
                     guard let provider = providers.first else { return false }
                     ExternalFolderPicker.shared.dropped(provider, done: added, failed: { error = $0 })
                     return true
@@ -468,6 +470,8 @@ struct ExternalDrivesSection: View {
         .sheet(item: $scanning) { folder in
             if let root = drives.mounted[folder.id] { ExternalGamesSheet(folder: folder, root: root.resolvingSymlinksInPath()) }
         }
+        .onAppear { ExternalFolderPicker.shared.installWindowDrop() }
+        .onChange(of: dropTarget) { _, over in if over { LogStore.shared.log("[external] something is being dragged over Add drive or folder") } }
     }
 
     private func added(_ url: URL) {
@@ -483,7 +487,8 @@ struct ExternalDrivesSection: View {
 /// Settings › External drives' folder picker. Madeira presents it itself, not
 /// through SwiftUI's fileImporter, so FolderPickerSigning can fix the picker up
 /// before it is shown and the log can tell Cancel apart from a pick.
-@MainActor final class ExternalFolderPicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+@MainActor final class ExternalFolderPicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate,
+                                          UIDropInteractionDelegate {
     static let shared = ExternalFolderPicker()
     private var done: (@MainActor (URL) -> Void)?
 
@@ -523,13 +528,68 @@ struct ExternalDrivesSection: View {
         done = nil
     }
 
+    /// A second drop target on the whole window, under every SwiftUI view: Form rows
+    /// may never hand a drop to SwiftUI's onDrop, and build 50's log showed a folder
+    /// dragged onto Add drive or folder never reaching it. Installed once, when the
+    /// External drives settings first show; a folder dropped anywhere in Madeira is
+    /// then added as a drive.
+    private var windowDrop: UIDropInteraction?
+
+    func installWindowDrop() {
+        guard windowDrop == nil, let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow) else { return }
+        let interaction = UIDropInteraction(delegate: self)
+        window.addInteraction(interaction)
+        windowDrop = interaction
+        LogStore.shared.log("[external] window drop target installed")
+    }
+
+    private static let folderTypes = [UTType.folder.identifier, UTType.directory.identifier]
+
+    func dropInteraction(_ interaction: UIDropInteraction, canHandle session: UIDropSession) -> Bool {
+        let types = session.items.flatMap { $0.itemProvider.registeredTypeIdentifiers }
+        LogStore.shared.log("[external] drag entered the window, types: \(types.joined(separator: ","))")
+        return session.hasItemsConforming(toTypeIdentifiers: Self.folderTypes)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
+        UIDropProposal(operation: session.hasItemsConforming(toTypeIdentifiers: Self.folderTypes) ? .copy : .forbidden)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, performDrop session: UIDropSession) {
+        guard let provider = session.items.first?.itemProvider else { return }
+        dropped(provider, done: { url in
+            do {
+                try ExternalDrives.shared.add(url)
+                SteamGamesModel.shared.refresh()
+            } catch { Self.tell(error.localizedDescription) }
+        }, failed: { Self.tell($0) })
+    }
+
+    /// The drop has no settings row to show an error under, so it gets an alert.
+    private static func tell(_ message: String) {
+        LogStore.shared.log("[external] window drop failed: \(message)")
+        guard var top = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else { return }
+        while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
+        let alert = UIAlertController(title: "External drives", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        top.present(alert, animated: true)
+    }
+
     /// A folder dragged in from the Files app. Drag and drop hands the folder over
     /// on a different path than the picker's Open button, so it is a second way in
     /// when the picker refuses the folder.
     func dropped(_ provider: NSItemProvider, done: @escaping @MainActor (URL) -> Void,
                  failed: @escaping @MainActor (String) -> Void) {
-        LogStore.shared.log("[external] folder dropped, types: \(provider.registeredTypeIdentifiers.joined(separator: ","))")
-        _ = provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.folder.identifier) { url, inPlace, error in
+        let types = provider.registeredTypeIdentifiers
+        LogStore.shared.log("[external] folder dropped, types: \(types.joined(separator: ","))")
+        // Files offers a folder as public.folder; anything that is a folder or directory will do.
+        guard let type = types.first(where: { UTType($0).map { $0.conforms(to: .folder) || $0.conforms(to: .directory) } ?? false }) else {
+            failed("That is not a folder. Drag the folder itself, not a file inside it.")
+            return
+        }
+        _ = provider.loadInPlaceFileRepresentation(forTypeIdentifier: type) { url, inPlace, error in
             // Held across the hop to the main thread; add() takes its own access and keeps it.
             let scoped = url?.startAccessingSecurityScopedResource() ?? false
             Task { @MainActor in
