@@ -134,6 +134,10 @@ OVERLAY = {
                         "anywhere still free instead of the thread failing. Red Dead Redemption 2 froze four minutes "
                         "into the story because every new thread failed this way while 1.8 GB was free elsewhere. "
                         "Read at session start."},
+    "env.MADEIRA_BROWSER_ADDRESS": {"category": "Wine core (ntdll)", "title": "Game browser address (set by Madeira)",
+                "kind": "text", "default": "",
+                "note": "Madeira sets this itself for each session: the loopback address where a game's web page "
+                        "requests reach the in-app browser (willfaust/Madeira#480). Leave it empty."},
     "env.MADEIRA_SMALL_STACK_EXES": {"category": "Memory & JIT pool", "title": "Programs whose threads keep a 2 MB stack",
                 "kind": "text", "default": "",
                 "note": "Empty by default: every thread stack is at least 8 MB (Chromium needs that). Exe names, "
