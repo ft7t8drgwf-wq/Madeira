@@ -442,6 +442,11 @@ struct ExternalDrivesSection: View {
                 }
             }
             Button("Add drive or folder") { ExternalFolderPicker.shared.present(added) }
+                .onDrop(of: [.folder], isTargeted: nil) { providers in
+                    guard let provider = providers.first else { return false }
+                    ExternalFolderPicker.shared.dropped(provider, done: added, failed: { error = $0 })
+                    return true
+                }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
@@ -452,7 +457,7 @@ struct ExternalDrivesSection: View {
             }
             if let error { Text(error).foregroundStyle(.red) }
         } header: { Text("External drives") } footer: {
-            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
+            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive. If Open does nothing in the picker, drag the folder from the Files app onto Add drive or folder instead.")
         }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
@@ -516,6 +521,27 @@ struct ExternalDrivesSection: View {
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         FolderPickerSigning.didPick(.swipedAway)
         done = nil
+    }
+
+    /// A folder dragged in from the Files app. Drag and drop hands the folder over
+    /// on a different path than the picker's Open button, so it is a second way in
+    /// when the picker refuses the folder.
+    func dropped(_ provider: NSItemProvider, done: @escaping @MainActor (URL) -> Void,
+                 failed: @escaping @MainActor (String) -> Void) {
+        LogStore.shared.log("[external] folder dropped, types: \(provider.registeredTypeIdentifiers.joined(separator: ","))")
+        _ = provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.folder.identifier) { url, inPlace, error in
+            // Held across the hop to the main thread; add() takes its own access and keeps it.
+            let scoped = url?.startAccessingSecurityScopedResource() ?? false
+            Task { @MainActor in
+                defer { if scoped { url?.stopAccessingSecurityScopedResource() } }
+                LogStore.shared.log("[external] dropped folder: url=\(url == nil ? 0 : 1) in-place=\(inPlace ? 1 : 0)"
+                    + " scoped=\(scoped ? 1 : 0)" + (error.map { " error=\($0.localizedDescription)" } ?? ""))
+                guard let url else { failed(error?.localizedDescription ?? "Madeira could not open that folder."); return }
+                // A copy would fill this device and is not the drive: only the folder itself will do.
+                guard inPlace else { failed("Files handed over a copy instead of the folder itself."); return }
+                done(url)
+            }
+        }
     }
 }
 
