@@ -75,6 +75,10 @@ check('AudioOutputUnitStop(g_dev.au);' in resume and 'AudioOutputUnitStart(g_dev
 check('int madeira_audio_background(int keepalive, int mute, int halt);' in bridging
       and 'void madeira_audio_resume_after_interruption(void);' in bridging, 'bridging header')
 check('BackgroundRun.shared.start()' in madeira_app, 'the app starts BackgroundRun')
+launcher = (app / 'LauncherSupport.swift').read_text()
+check(launcher.index('BackgroundRun.shared.beginTask(') < launcher.index('task.resume()')
+      and 'BackgroundRun.shared.endTask(background)' in body(launcher, '    private func downloaded(')
+      and 'task?.cancel()' in launcher, 'launcher installer downloads keep going in the background, cancelled when Madeira stops')
 for name, label in [('SteamDownloadBackground.swift', 'Steam and Epic'), ('GOGLibrary.swift', 'GOG'),
                     ('EALibrary.swift', 'EA'), ('ItchLibrary.swift', 'itch.io')]:
     src = (app / name).read_text()
