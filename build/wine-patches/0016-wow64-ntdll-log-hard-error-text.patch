@@ -5,7 +5,7 @@ then exit 0xdeadc0de on build 48) closes without saying why. Log tag
 [hard-error]; err channel, so the default WINEDEBUG shows it.
 
 diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
-index 282ef396396..6808a1be1be 100644
+index 282ef396..6808a1be 100644
 --- a/dlls/ntdll/unix/system.c
 +++ b/dlls/ntdll/unix/system.c
 @@ -4748,7 +4748,19 @@ NTSTATUS WINAPI NtRaiseHardError( NTSTATUS status, ULONG count,
@@ -29,10 +29,10 @@ index 282ef396396..6808a1be1be 100644
  }
  
 diff --git a/dlls/wow64/system.c b/dlls/wow64/system.c
-index 9428616062d..a1cdaf215b7 100644
+index 94286160..2be91953 100644
 --- a/dlls/wow64/system.c
 +++ b/dlls/wow64/system.c
-@@ -724,7 +724,20 @@ NTSTATUS WINAPI wow64_NtRaiseHardError( UINT *args )
+@@ -724,7 +724,28 @@ NTSTATUS WINAPI wow64_NtRaiseHardError( UINT *args )
      HARDERROR_RESPONSE_OPTION option = get_ulong( &args );
      HARDERROR_RESPONSE *response = get_ptr( &args );
  
@@ -45,8 +45,16 @@ index 9428616062d..a1cdaf215b7 100644
 +    {
 +        const UNICODE_STRING32 *str = (params_mask & (1u << i)) ? guest_ptr32( params[i] ) : NULL;
 +        if (str && str->Buffer)
-+            ERR( "[hard-error] status=%08lx param%lu=%s\n", status, i,
-+                 debugstr_wn( guest_ptr32( str->Buffer ), str->Length / sizeof(WCHAR) ));
++        {
++            /* wow64.dll links against ntdll only: no debugstr_wn (IsBadStringPtrW), see dllname_a */
++            const WCHAR *text = guest_ptr32( str->Buffer );
++            char buffer[256];
++            ULONG j, len = min( str->Length / sizeof(WCHAR), sizeof(buffer) - 1 );
++
++            for (j = 0; j < len; j++) buffer[j] = (text[j] >= 0x20 && text[j] < 0x7f) ? (char)text[j] : '?';
++            buffer[j] = 0;
++            ERR( "[hard-error] status=%08lx param%lu=\"%s\"\n", status, i, buffer );
++        }
 +        else if (!str)
 +            ERR( "[hard-error] status=%08lx param%lu=%#lx\n", status, i, params[i] );
 +    }
