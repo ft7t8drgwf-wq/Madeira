@@ -231,7 +231,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
     private var resumeAfterBackground = Set<Int>()
     private var started = false
     private var timer: Timer?
-    private var grace: UIBackgroundTaskIdentifier = .invalid
+    private var grace: BackgroundRun.Token?   // BackgroundRun.swift
     private let api = ItchAPI.shared
 
     private init() { loadInstalled() }
@@ -570,8 +570,8 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
     }
 
     private func beginGrace() {
-        guard hasActiveDownload, grace == .invalid else { return }
-        grace = UIApplication.shared.beginBackgroundTask(withName: "itch.io download") { [weak self] in
+        guard hasActiveDownload, grace == nil else { return }
+        grace = BackgroundRun.shared.beginTask("itch.io download") { [weak self] in
             MainActor.assumeIsolated {
                 self?.pauseForBackground()
                 self?.endGrace()
@@ -580,9 +580,9 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
     }
 
     private func endGrace() {
-        guard grace != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(grace)
-        grace = .invalid
+        guard let task = grace else { return }
+        grace = nil
+        BackgroundRun.shared.endTask(task)
     }
 
     private func pauseForBackground() {

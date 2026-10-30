@@ -21,6 +21,16 @@ void wine_log_set_file(const char *path);
 typedef void (*wine_ui_log_callback_t)(const char *message);
 void wine_set_ui_log_callback(wine_ui_log_callback_t cb);
 
+// Madeira in the background (audio_null_ios.c, BackgroundRun.swift): keep the
+// RemoteIO endpoint running with no client (keepalive), render silence (mute),
+// or stop it so iOS can suspend Madeira (halt). Returns 1 when it runs.
+int madeira_audio_background(int keepalive, int mute, int halt);
+// Start the endpoint again after an audio interruption ended.
+void madeira_audio_resume_after_interruption(void);
+// Metal command buffers off the main thread wait while Madeira is inactive
+// (Winios/MetalBackgroundGate.m). Returns the number of classes wrapped.
+int madeira_metal_gate_install(void);
+
 // DXMT present counter (winemetal_unix.c) — for SwiftUI FPS overlay
 #include <stdint.h>
 uint64_t madeira_get_present_count(void);

@@ -88,9 +88,10 @@ struct GOGInstalledGame: Codable, Sendable {
     private var resumeAfterBackground = Set<String>()
     private var started = false
     private var timer: Timer?
-    /// In the background a download runs for the grace period iOS allows, then
+    /// In the background a download keeps going while Madeira keeps running
+    /// (BackgroundRun.swift), else for the grace period iOS allows; then it
     /// pauses cleanly and continues when Madeira is active again.
-    private var grace: UIBackgroundTaskIdentifier = .invalid
+    private var grace: BackgroundRun.Token?
     private let api = GOGAPI.shared
     private let downloader = GOGDownloader()
 
@@ -504,8 +505,8 @@ struct GOGInstalledGame: Codable, Sendable {
 
     /// Madeira went to the background during a download: iOS's grace period, then a clean pause.
     private func beginGrace() {
-        guard hasActiveDownload, grace == .invalid else { return }
-        grace = UIApplication.shared.beginBackgroundTask(withName: "GOG download") { [weak self] in
+        guard hasActiveDownload, grace == nil else { return }
+        grace = BackgroundRun.shared.beginTask("GOG download") { [weak self] in
             MainActor.assumeIsolated {
                 self?.pauseForBackground()
                 self?.endGrace()
@@ -514,9 +515,9 @@ struct GOGInstalledGame: Codable, Sendable {
     }
 
     private func endGrace() {
-        guard grace != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(grace)
-        grace = .invalid
+        guard let task = grace else { return }
+        grace = nil
+        BackgroundRun.shared.endTask(task)
     }
 
     /// iOS ended Madeira's background time: downloads pause cleanly (finished files
