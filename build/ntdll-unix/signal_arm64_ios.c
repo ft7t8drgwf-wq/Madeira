@@ -2197,6 +2197,139 @@ static int ios_fault_read_insn( uint64_t fault_pc, uint32_t *out )
     return 1;
 }
 
+/* ml1290: replay of the ALU step between an LDXR/LDAXR and its faulting STXR/STLXR.
+ *
+ * ml1284 turns the LL/SC pair into a compare-and-swap, which needs the value the load
+ * returned. When the only instructions between rewrite the loaded register with an
+ * ADD/SUB immediate it is recovered by undoing them; anything else used to refuse.
+ * Grounded's (Unreal 4) main thread then looped on ntdll's atomic bit clear
+ *     LDAXR W11, [X8]; AND W11, W11, W10; STLXR W12, W11, [X8]
+ * into a 64 KB HEAP_CREATE_ENABLE_EXECUTE heap until ml461 ended the process: an AND
+ * cannot be undone.
+ *
+ * So these steps run forward instead. The caller reads the current memory value C,
+ * replays the steps on it, and swaps C for the guest's value only when the replay gives
+ * exactly that value: the store is then what the guest computes from C, so the result is
+ * the one a fresh LDAXR of C would have produced. Otherwise Ws = 1 and the guest's loop
+ * retries, as on a lost exclusive monitor. Every other register is read from the faulting
+ * state, as the guest saw it.
+ *
+ * Supported: ADD/SUB(S) immediate, ADD/SUB(S) shifted register, logical shifted register
+ * (AND, BIC, ORR, ORN, EOR, EON, ANDS, BICS), logical immediate, MOVN/MOVZ/MOVK. Each must
+ * write the loaded register at the load's width (sf = 1 only for a 64-bit load). Returns
+ * 0 for anything else, and the caller refuses the emulation as before. */
+static int ios_llsc_reg( const arm_thread_state64_t *st, int r, int ld_rt, uint64_t v, uint64_t *out )
+{
+    if (r == ld_rt) *out = v;
+    else if (r == 31) *out = 0;          /* ZR in every form below that reads it */
+    else if (r < 29) *out = st->__x[r];
+    else return 0;                       /* FP / LR: not expected in these sequences */
+    return 1;
+}
+
+static uint64_t ios_llsc_shift( uint64_t x, unsigned type, unsigned amt, int is64 )
+{
+    const unsigned bits = is64 ? 64 : 32;
+    if (!is64) x &= 0xffffffffULL;
+    if (!amt) return x;
+    switch (type)
+    {
+    case 0: x <<= amt; break;                                              /* LSL */
+    case 1: x >>= amt; break;                                              /* LSR */
+    case 2: x = is64 ? (uint64_t)((int64_t)x >> amt)                       /* ASR */
+                     : (uint64_t)(uint32_t)((int32_t)(uint32_t)x >> amt); break;
+    default: x = (x >> amt) | (x << (bits - amt)); break;                  /* ROR */
+    }
+    return is64 ? x : (x & 0xffffffffULL);
+}
+
+/* The A64 DecodeBitMasks for a logical immediate (wmask only). */
+static int ios_llsc_bitmask( unsigned n, unsigned immr, unsigned imms, int is64, uint64_t *out )
+{
+    unsigned combined = (n << 6) | (~imms & 0x3f), len = 0, esize, s, r, i;
+    uint64_t elem;
+
+    if (!is64 && n) return 0;
+    if (!combined) return 0;
+    for (i = 0; i < 7; i++) if (combined & (1u << i)) len = i;
+    if (len < 1) return 0;
+    esize = 1u << len;
+    s = imms & (esize - 1);
+    r = immr & (esize - 1);
+    if (s == esize - 1) return 0;
+    elem = (s + 1 == 64) ? ~0ULL : ((1ULL << (s + 1)) - 1);
+    if (r) elem = ((elem >> r) | (elem << (esize - r))) & (esize == 64 ? ~0ULL : ((1ULL << esize) - 1));
+    for (i = esize; i < 64; i *= 2) elem |= elem << i;
+    *out = is64 ? elem : (elem & 0xffffffffULL);
+    return 1;
+}
+
+/* Replays one instruction that writes ld_rt; *v is the register's value before and after. */
+static int ios_llsc_sim( uint32_t op, int ld_rt, int is64, const arm_thread_state64_t *st, uint64_t *v )
+{
+    const uint64_t wmask = is64 ? ~0ULL : 0xffffffffULL;
+    const int rd = op & 0x1f, rn = (op >> 5) & 0x1f, rm = (op >> 16) & 0x1f;
+    uint64_t a, b, res;
+
+    if (rd != ld_rt || (int)(op >> 31) != is64) return 0;
+
+    if ((op & 0x1f800000) == 0x11000000)                    /* ADD/SUB(S) immediate */
+    {
+        if (rn == 31) return 0;                             /* SP form */
+        if (!ios_llsc_reg( st, rn, ld_rt, *v, &a )) return 0;
+        b = (op >> 10) & 0xfff;
+        if (op & 0x400000) b <<= 12;
+        res = (op & 0x40000000) ? a - b : a + b;
+    }
+    else if ((op & 0x1f200000) == 0x0b000000)               /* ADD/SUB(S) shifted register */
+    {
+        const unsigned type = (op >> 22) & 3, amt = (op >> 10) & 0x3f;
+        if (type == 3 || (!is64 && amt >= 32)) return 0;
+        if (!ios_llsc_reg( st, rn, ld_rt, *v, &a ) || !ios_llsc_reg( st, rm, ld_rt, *v, &b )) return 0;
+        b = ios_llsc_shift( b, type, amt, is64 );
+        res = (op & 0x40000000) ? a - b : a + b;
+    }
+    else if ((op & 0x1f000000) == 0x0a000000)               /* logical shifted register */
+    {
+        const unsigned type = (op >> 22) & 3, amt = (op >> 10) & 0x3f;
+        if (!is64 && amt >= 32) return 0;
+        if (!ios_llsc_reg( st, rn, ld_rt, *v, &a ) || !ios_llsc_reg( st, rm, ld_rt, *v, &b )) return 0;
+        b = ios_llsc_shift( b, type, amt, is64 );
+        if (op & 0x200000) b = ~b;                          /* N: BIC, ORN, EON, BICS */
+        switch ((op >> 29) & 3)
+        {
+        case 1:  res = a | b; break;
+        case 2:  res = a ^ b; break;
+        default: res = a & b; break;                        /* AND, ANDS */
+        }
+    }
+    else if ((op & 0x1f800000) == 0x12000000)               /* logical immediate */
+    {
+        const unsigned opc = (op >> 29) & 3;
+        if (!ios_llsc_reg( st, rn, ld_rt, *v, &a )) return 0;   /* Rn 31 is ZR (ORR: MOV) */
+        if (!ios_llsc_bitmask( (op >> 22) & 1, (op >> 16) & 0x3f, (op >> 10) & 0x3f, is64, &b )) return 0;
+        switch (opc)
+        {
+        case 1:  res = a | b; break;
+        case 2:  res = a ^ b; break;
+        default: res = a & b; break;
+        }
+    }
+    else if ((op & 0x1f800000) == 0x12800000)               /* MOVN / MOVZ / MOVK */
+    {
+        const unsigned opc = (op >> 29) & 3, hw = (op >> 21) & 3;
+        const uint64_t imm = ((op >> 5) & 0xffff), sh = 16u * hw;
+        if (opc == 1 || (!is64 && hw > 1)) return 0;
+        if (opc == 0)      res = ~(imm << sh);
+        else if (opc == 2) res = imm << sh;
+        else               res = (*v & ~(0xffffULL << sh)) | (imm << sh);
+    }
+    else return 0;
+
+    *v = res & wmask;
+    return 1;
+}
+
 /* x18-derived base register.
  *
  * Wine's EC kernelbase TlsGetValue is `add x8, x18, w0, uxtw #3;
@@ -5087,7 +5220,8 @@ static void *ios_mach_exception_thread( void *arg )
                      * InterlockedDecrement shape LDAXR W9; SUBS W9, W9, #1; STLXR W10, W9 of
                      * RtlLeaveCriticalSection) is undone to recover the loaded value; any
                      * other instruction that may write it (anything but a branch on it)
-                     * refuses the emulation. Ws = 0 when the swap succeeds and
+                     * is replayed forward instead when ios_llsc_sim knows it (ml1290);
+                     * anything else refuses the emulation. Ws = 0 when the swap succeeds and
                      * 1 when the value changed, so the guest's loop retries as on hardware.
                      * Every write to such a page traps and is handled on the one Mach
                      * exception thread, and the CAS is a real atomic on the shared pages. */
@@ -5097,9 +5231,9 @@ static void *ios_mach_exception_thread( void *arg )
                         const int rs = (insn >> 16) & 0x1f, rn = (insn >> 5) & 0x1f, rt = insn & 0x1f;
                         const uint64_t mask = size == 3 ? ~0ull : ((1ull << (8u << size)) - 1);
                         const uint64_t ea = rn == 31 ? state.__sp : state.__x[rn];
-                        int ld_rt = -1, k, clobbered = 0;
+                        int ld_rt = -1, k, clobbered = 0, nsteps = 0, replay = 0;
                         uint64_t delta = 0;   /* what in-place ADD/SUB immediates added to it */
-                        uint32_t prev;
+                        uint32_t prev, steps[8];   /* ml1290: the writes to it, oldest first */
 
                         for (k = 1; k <= 8 && ld_rt < 0 && !clobbered; k++)
                         {
@@ -5126,7 +5260,18 @@ static void *ios_mach_exception_thread( void *arg )
                                     uint64_t imm = (prev >> 10) & 0xfff;
                                     if (prev & 0x400000) imm <<= 12;
                                     delta += (prev & 0x40000000) ? (uint64_t)0 - imm : imm;
+                                    steps[nsteps++] = prev;
                                     continue;
+                                }
+                                /* ml1290: a step that cannot be undone, but can be replayed */
+                                {
+                                    uint64_t probe = 0;
+                                    if (ios_llsc_sim( prev, ld_rt, size == 3, &state, &probe ))
+                                    {
+                                        steps[nsteps++] = prev;
+                                        replay = 1;
+                                        continue;
+                                    }
                                 }
                                 clobbered = 1;
                             }
@@ -5134,9 +5279,25 @@ static void *ios_mach_exception_thread( void *arg )
                         if (ld_rt >= 0 && ld_rt != 31 && !clobbered && rw_addr && !(ea & ((1u << size) - 1))
                             && (uint64_t)fault_addr == ea)
                         {
-                            const uint64_t expect = (state.__x[ld_rt] - delta) & mask, val = IOS_STORE_SRC(rt) & mask;
-                            int ok = 0;
-                            switch (size)
+                            const uint64_t val = IOS_STORE_SRC(rt) & mask;
+                            uint64_t expect = (state.__x[ld_rt] - delta) & mask;
+                            int ok = 0, i, stale = 0;
+                            if (replay)
+                            {
+                                /* ml1290: swap only if the steps turn what is there now into val */
+                                uint64_t now = 0, v;
+                                switch (size)
+                                {
+                                case 0:  now = __atomic_load_n( (uint8_t  *)rw_addr, __ATOMIC_SEQ_CST ); break;
+                                case 1:  now = __atomic_load_n( (uint16_t *)rw_addr, __ATOMIC_SEQ_CST ); break;
+                                case 2:  now = __atomic_load_n( (uint32_t *)rw_addr, __ATOMIC_SEQ_CST ); break;
+                                default: now = __atomic_load_n( (uint64_t *)rw_addr, __ATOMIC_SEQ_CST ); break;
+                                }
+                                for (i = 0, v = now; i < nsteps; i++) ios_llsc_sim( steps[i], ld_rt, size == 3, &state, &v );
+                                expect = now;
+                                stale = (v & mask) != val;   /* no swap: Ws = 1 and the guest retries */
+                            }
+                            if (!stale) switch (size)
                             {
                             case 0: { uint8_t  e = (uint8_t)expect;  ok = __atomic_compare_exchange_n( (uint8_t  *)rw_addr, &e, (uint8_t)val,  0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ); break; }
                             case 1: { uint16_t e = (uint16_t)expect; ok = __atomic_compare_exchange_n( (uint16_t *)rw_addr, &e, (uint16_t)val, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ); break; }
@@ -5147,14 +5308,19 @@ static void *ios_mach_exception_thread( void *arg )
                             emulated = 1;
                         }
                         {
-                            static int excl_n;
-                            if (excl_n < 8)
+                            /* ml1290: replays and refusals keep their own budget, so a run of
+                             * ordinary critical sections cannot hide them */
+                            static int excl_n, excl_odd_n;
+                            int *n = (replay || !emulated) ? &excl_odd_n : &excl_n;
+                            if (*n < 8)
                                 dprintf(STDERR_FILENO,
-                                    "[excl-store] ml1284 #%d insn=0x%08x size=%u ea=0x%llx load-reg=%d delta=%lld%s %s\n",
-                                    ++excl_n, insn, 1u << size, (unsigned long long)ea, ld_rt,
+                                    "[excl-store] ml1284 #%d insn=0x%08x size=%u ea=0x%llx load-reg=%d delta=%lld%s%s %s\n",
+                                    ++*n, insn, 1u << size, (unsigned long long)ea, ld_rt,
                                     (long long)delta, clobbered ? " (overwritten)" : "",
+                                    replay ? " (replayed, ml1290)" : "",
                                     emulated ? (rs != 31 && state.__x[rs] ? "emulated: value changed, retry" : "emulated")
-                                             : "REFUSED: no matching LDXR/LDAXR");
+                                             : (clobbered ? "REFUSED: a step between cannot be replayed"
+                                                          : "REFUSED: no matching LDXR/LDAXR"));
                         }
                     }
 
