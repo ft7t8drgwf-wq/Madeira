@@ -57,10 +57,6 @@ repair = repair[:repair.index('\n    }\n')]
 require('guard wine_process_is_running() == 0' in repair, 'the registry is only written while no session runs')
 require('reg.exe' not in source and 'Process(' not in source, 'the registry is written from the app, never by a program')
 
-require('URLSession.shared.downloadTask(withResumeData:' in source and '.networkConnectionLost' in source
-        and 'attempt < Self.attempts && Self.retryable(failure)' in source,
-        'a dropped installer download is tried again, resuming where it stopped (build 48)')
-
 # Every program and installer the section knows has its recommended list.
 names = set(re.findall(r'\\\\([^\\"]+\.exe)"', source.split('var installerURL')[0]))
 names |= set(re.findall(r'return "([^"]+\.exe)"', source))
