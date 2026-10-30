@@ -4,7 +4,8 @@
 """Madeira Dock: the "Registry" values of a game's Steam install script.
 
 Synthetic data only: no Steam, Wine, iOS or credentials. Compiles production
-Swift (app/Madeira/DockInstallers.swift plus DockGame from MadeiraDock.swift)
+Swift (app/Madeira/DockInstallers.swift plus DockGame from MadeiraDock.swift and
+DockGameSession.isMicrosoftKey from DockGameSession.swift)
 under AddressSanitizer and checks:
   * the reader: "InstallScript" > "Registry" > key > "string" | "dword", values
     directly or in language blocks (Steam's language, else english, else the
@@ -68,6 +69,12 @@ struct LogEntry { enum Level { case info, success, error, debug } }
 }
 enum MadeiraDock { static let executable = "C:\\windows\\system32\\dockhost.exe" }
 ''' + game_src
+
+# Production code too (DockGameSession.swift): the installer's third-party count reads isMicrosoftKey.
+session = (app / 'DockGameSession.swift').read_text(encoding='utf-8')
+key_fn = session[session.index('    static func isMicrosoftKey('):]
+key_fn = key_fn[:key_fn.index('\n    }\n') + len('\n    }\n')]
+stubs += '\nenum DockGameSession {\n' + key_fn + '}\n'
 
 checks = r'''
 import Foundation
