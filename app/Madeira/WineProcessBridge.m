@@ -1638,6 +1638,16 @@ static void *wine_process_thread(void *arg) {
             LOG("Wine log file: %{public}s", logPath.UTF8String);
             /* Expose the app Documents dir to Wine code (e.g. for fex-jit-dump.bin) */
             setenv("MADEIRA_DOCS_DIR", docs.UTF8String, 1);
+            /* madeira-p81jbs: the JIT-pool dump is up to the pool's size (592MB on
+             * build 50) and is only read by hand; one left over 3 days is removed. */
+            {
+                NSString *dumpPath = [docs stringByAppendingPathComponent:@"fex-jit-dump.bin"];
+                NSDate *dumpDate = [[[NSFileManager defaultManager] attributesOfItemAtPath:dumpPath error:nil] fileModificationDate];
+                if (dumpDate && -[dumpDate timeIntervalSinceNow] > 3 * 24 * 3600 &&
+                    [[NSFileManager defaultManager] removeItemAtPath:dumpPath error:nil])
+                    dprintf(STDERR_FILENO, "[jit-dump] removed fex-jit-dump.bin from %s (over 3 days old)\n",
+                            dumpDate.description.UTF8String);
+            }
             dprintf(STDERR_FILENO, "[config-dir] early MADEIRA_DOCS_DIR=%s; native madeira.cfg readers that run "
                     "before this point (wineserver start: madsync inproc-sync) use it (MADEIRA_CFG_EARLY_DOCS=0 disables)\n",
                     g_madeira_docs_early);
