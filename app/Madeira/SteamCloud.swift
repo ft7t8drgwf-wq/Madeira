@@ -435,6 +435,9 @@ struct SteamCloudAudit: Equatable, Sendable {
     var entries: [SteamCloudEntry] = []
     /// Cloud paths under a root this prefix has no folder for.
     var unmapped: [String] = []
+    /// Device-only saves left out because the cloud lists them as deleted or
+    /// forgotten, and the device copy is that copy or older.
+    var removedInCloud = 0
 
     func count(_ kind: SteamCloudEntry.Kind) -> Int { entries.reduce(0) { $0 + ($1.kind == kind ? 1 : 0) } }
     func paths(_ kind: SteamCloudEntry.Kind) -> [String] { entries.filter { $0.kind == kind }.map(\.path) }
@@ -468,6 +471,15 @@ struct SteamCloudAudit: Equatable, Sendable {
         var audit = SteamCloudAudit()
         audit.changeNumber = listing.changeNumber
         var known = Set<String>()   // local paths the cloud lists
+        // Local paths the cloud lists as deleted or forgotten: Valve's client
+        // does not send such a save back up (the game deleted it, or stopped
+        // syncing it, on another computer).
+        var removed: [String: SteamCloudFile] = [:]
+        for file in listing.files where file.persistState != 0 {
+            guard let place = paths.location(cloudPath: file.path),
+                  let url = try? paths.resolve(base: place.base, parts: place.parts) else { continue }
+            removed[key(url)] = file
+        }
         for file in listing.files where file.persistState == 0 {
             audit.cloudFiles += 1
             guard let place = paths.location(cloudPath: file.path) else { audit.unmapped.append(file.path); continue }
@@ -512,6 +524,13 @@ struct SteamCloudAudit: Equatable, Sendable {
                 guard fnmatch(folder.pattern, url.lastPathComponent, FNM_CASEFOLD) == 0, let local = attributes(url) else { continue }
                 let fileKey = key(url)
                 guard !known.contains(fileKey), seen.insert(fileKey).inserted else { continue }
+                // The same save, or one older than the cloud's record of its
+                // removal, stays on the device and is not offered for upload.
+                // A newer save of that name is.
+                if let gone = removed[fileKey], local.time <= gone.timestamp || (!gone.sha.isEmpty && sha1(of: url) == gone.sha) {
+                    audit.removedInCloud += 1
+                    continue
+                }
                 // Both resolved: the enumerator may spell the same folder differently (/private/var).
                 let relative = url.resolvingSymlinksInPath().path.dropFirst(base.count).drop { $0 == "/" }
                 audit.entries.append(SteamCloudEntry(path: folder.label + String(relative), kind: .localOnly,
@@ -557,7 +576,7 @@ struct SteamCloudAudit: Equatable, Sendable {
 
     var summary: String {
         "cloud-change=\(changeNumber) cloud-files=\(cloudFiles) same=\(count(.same)) differ=\(count(.differ)) " +
-        "missing-local=\(count(.cloudOnly)) local-only=\(count(.localOnly)) unmapped=\(unmapped.count)"
+        "missing-local=\(count(.cloudOnly)) local-only=\(count(.localOnly)) unmapped=\(unmapped.count) removed-in-cloud=\(removedInCloud)"
     }
 }
 

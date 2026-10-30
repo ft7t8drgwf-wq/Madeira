@@ -34,7 +34,7 @@ SKIP = ("/host-tests/", "/ffmpeg/", "ConfigCatalog.generated.swift")
 CFG = re.compile(r'\b(madeira_cfg_(?:get|int|bool)|mad_cfg_(?:int|str)_pe|'
                  r'MadeiraConfig\.(?:get|bool|flag))\(\s*"([A-Za-z0-9._-]+)"\s*(?:,\s*([^,)]+))?')
 ENV = re.compile(r'\b(getenv|GetEnvironmentVariable[AW]?|env::getEnvVar|madeiraSwitch|'
-                 r'madeira_switch_for_caller|mad_env_is_zero|flag|envFlag|ios_srv_switch)\(\s*L?"((?:MADEIRA|DXMT|MYTHIC)_[A-Z0-9_]+)"'
+                 r'madeira_switch_for_caller|mad_env_is_zero|flag|envFlag|ios_srv_switch|value)\(\s*L?"((?:MADEIRA|DXMT|MYTHIC)_[A-Z0-9_]+)"'
                  r'\s*(?:,\s*(?:fallback:|default:)?\s*([^,)]+))?')
 BOOL_READERS = {"madeira_cfg_bool", "MadeiraConfig.bool", "MadeiraConfig.flag", "flag", "envFlag",
                 "madeiraSwitch", "madeira_switch_for_caller", "mad_env_is_zero"}
@@ -43,6 +43,34 @@ INT_READERS = {"madeira_cfg_int", "mad_cfg_int_pe"}
 # Titles, kinds and fixed choices for options with a dedicated Settings row.
 # "choices" are (value, label); the empty value means "remove the key".
 OVERLAY = {
+    # Madeira in the background (app/Madeira/BackgroundRun.swift, build/ntdll-unix/audio_null_ios.c).
+    "background-run": {"category": "App & front end", "title": "Keep a game running in the background (minutes)",
+                "kind": "int", "default": "10", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "Minutes a running game keeps going after you switch apps or lock the screen, so a long load "
+                        "finishes while you are away. Loading and other CPU work go on; drawing waits until Madeira is "
+                        "back (background-pause). The game's sound is muted meanwhile. 0: iOS pauses the game within "
+                        "seconds, as before. A game's own config can set it. [bg-run] lines in the log."},
+    "background-gpu-gate": {"category": "App & front end", "title": "Hold GPU work in the background",
+                "kind": "bool", "default": "1", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "On by default. While Madeira is not the active app, any thread other than the app's main "
+                        "thread that commits a Metal command buffer waits until Madeira is back, so a game that keeps "
+                        "loading in the background (Zink OpenGL, Direct3D, Vulkan) never sends GPU work iOS refuses "
+                        "and never loses its device. [metal-bg] lines in the log. 0: not installed. Read at app start."},
+    "background-cpu": {"category": "App & front end", "title": "CPU cap in the background (% of one core)",
+                "kind": "int", "default": "50", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "While Madeira keeps a game or a download running in the background, its CPU use is held under "
+                        "this percent of one core on average (threads are paused for 100 ms at a time when it is over), "
+                        "because iOS ends a background app that averages more than about 80% for a minute. Higher loads "
+                        "faster but risks that. 0: no cap. A game's own config can set it. [bg-cpu] lines in the log."},
+    "background-download": {"category": "App & front end", "title": "Keep downloads running in the background (minutes)",
+                "kind": "int", "default": "60", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "Minutes a Steam, Epic, GOG, EA or itch.io download keeps going after you switch apps or lock "
+                        "the screen. Then it pauses cleanly and continues when Madeira is active again. 0: only iOS's "
+                        "short grace period, as before."},
+    "background-sound": {"category": "App & front end", "title": "Game sound in the background",
+                "kind": "bool", "default": "0", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "Off by default: while a game keeps running in the background its sound is muted, and other "
+                        "apps' audio plays normally. 1: you keep hearing the game. A game's own config can set it."},
     "env.MADEIRA_PASTE_INTERVAL_MS": {"category": "Windows, display & input", "title": "Clipboard typing interval (ms)",
                 "kind": "int", "default": "10",
                 "note": "Default 10 ms between pasted characters. Range 5-100 ms; use a longer interval for games "
@@ -134,6 +162,10 @@ OVERLAY = {
                         "anywhere still free instead of the thread failing. Red Dead Redemption 2 froze four minutes "
                         "into the story because every new thread failed this way while 1.8 GB was free elsewhere. "
                         "Read at session start."},
+    "env.MADEIRA_BROWSER_ADDRESS": {"category": "Wine core (ntdll)", "title": "Game browser address (set by Madeira)",
+                "kind": "text", "default": "",
+                "note": "Madeira sets this itself for each session: the loopback address where a game's web page "
+                        "requests reach the in-app browser (willfaust/Madeira#480). Leave it empty."},
     "env.MADEIRA_SMALL_STACK_EXES": {"category": "Memory & JIT pool", "title": "Programs whose threads keep a 2 MB stack",
                 "kind": "text", "default": "",
                 "note": "Empty by default: every thread stack is at least 8 MB (Chromium needs that). Exe names, "
@@ -802,6 +834,14 @@ OVERLAY = {
                         "CPU; e.g. 1500 keeps a 60 fps menu near 30-40 fps. [fps-gov] lines every 10 s. "
                         "env.MADEIRA_FPS_GOV_MIN / _MAX (20 / 60) bound the cap, _BAND_MJ (1500) is the energy the "
                         "average may drift before it moves. Needs the [xp] sampler. Read at session start."},
+    # winemetal reads it (dxmt, build/dxmt-patches/0004-pause-metal-in-background.patch).
+    "background-pause": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Pause Metal games in the background",
+                "kind": "bool", "default": "1", "sources": ["build/dxmt-patches/0004-pause-metal-in-background.patch"],
+                "note": "On by default. While Madeira is not the active app (app switcher, a call, Control Center), "
+                        "a Direct3D 9/10/11/12 game's threads wait at their next frame or command buffer instead of "
+                        "sending GPU work iOS refuses in the background, so the game carries on where it was when "
+                        "you come back. [wmt-bg] lines in the log. 0: the game keeps submitting, as before. Read once "
+                        "per session."},
     # madeira-bcd: winemetal reads it (dxmt, build/dxmt-patches/0002-framegen-d3d12-pacing.patch; Tomba247's RDR2 work).
     "env.MADEIRA_FRAMEGEN_STALL_MS": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Frame generation: stall threshold (ms)",
                 "kind": "int", "default": "125", "sources": ["build/dxmt-patches/0002-framegen-d3d12-pacing.patch"],

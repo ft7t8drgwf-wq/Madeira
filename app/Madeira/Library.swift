@@ -2621,6 +2621,8 @@ struct LibraryBadges: View {
         if entry.bits == 32 || entry.bits == 64 { texts.append("\(entry.bits)-bit") }
         if entry.isBatch { texts.append("Batch") }   // ml1163
         if let api = LibraryRendererBadge.compact(entry.graphicsAPI) { texts.append(LibraryRendererBadge.display(api)) }
+        // A game device-tested on Madeira (KnownGames, LaunchCheck.swift).
+        if entry.desktop != true, KnownGames.find(windowsPath: entry.windowsPath, steamAppID: entry.steamAppID) != nil { texts.append("Tested") }
         if let note { texts.append(note) }
         return texts
     }
@@ -3171,6 +3173,7 @@ struct LibraryView: View {
                 EASettingsSection(open: { settingsSheet = $0 })
             }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
+            if settingsShow("Gecko", "Wine Gecko", "web", "HTML", "Internet Explorer", "download") { WineGeckoSettingsSection() }
             if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
                 Section {
                     Button { settingsSheet = .registry } label: {
@@ -3562,6 +3565,10 @@ struct LibraryDetail: View {
     @State private var confirmReset = false
     @State private var leaving = false
     @State private var error: String?
+    /// "Will it run?" (LaunchCheck.swift): nil until read, and Play's "Play anyway?".
+    @State private var launchNotes: [LaunchCheckNote]?
+    @State private var confirmPlayAnyway = false
+    @State private var launchCheckRound = 0
     @State private var copiedLink = false
     /// Where Play is on screen: the starting screen grows out of it (LaunchCurtain).
     @State private var playFrame: CGRect = .zero
@@ -3670,6 +3677,8 @@ struct LibraryDetail: View {
                 error = blocker; return
             }
         }
+        // "Will it run?" found something that stops the start: ask once per set of problems.
+        if let notes = launchNotes, !LaunchCheck.acknowledged(entry, notes) { confirmPlayAnyway = true; return }
         leaving = true
         let steamCover = entry.coverFile == nil ? entry.steamAppID : nil
         LaunchCurtain.shared.begin(from: playFrame, appID: steamCover, artwork: steamCover.flatMap { id in
@@ -3680,6 +3689,14 @@ struct LibraryDetail: View {
         // Give the pressed state a display turn before saving and handing off.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             model.save(profile); play(profile)
+        }
+    }
+    /// A "Will it run?" line's button.
+    private func launchCheckFix(_ fix: LaunchCheckNote.Fix) {
+        switch fix {
+        case .steamPage: path.append(.steam)
+        case .getWineMono: WineMonoModel.shared.install()
+        case .getWineGecko: WineGeckoModel.shared.install()
         }
     }
     /// A Steam game without a chosen cover shows Steam's store artwork.
@@ -4107,6 +4124,7 @@ struct LibraryDetail: View {
                 }
                 // A Play error sits under Play.
                 if let error { Section { Text(error).foregroundStyle(.red) } }
+                if let launchNotes { LaunchCheckSection(notes: launchNotes, fix: launchCheckFix) }
                 // A running update blocks Play: its progress shows here too.
                 if let appID = entry.steamAppID, let download = SteamOwnedLibrary.shared.downloads[appID] {
                     Section { SteamDownloadStatus(download: download) }
@@ -4156,6 +4174,18 @@ struct LibraryDetail: View {
             .toolbarBackground(.regularMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.save(entry); dismiss() } } }
+            // "Will it run?": read again when the program or arguments change, or Wine Mono or Gecko arrives.
+            .task(id: "\(entry.launchRelativePath)#\(entry.steamStart ?? "")#\(entry.arguments)#\(launchCheckRound)") {
+                launchNotes = await LaunchCheck.run(entry)
+            }
+            .onReceive(WineMonoModel.shared.$installed.dropFirst()) { _ in launchCheckRound += 1 }
+            .onReceive(WineGeckoModel.shared.$installed.dropFirst()) { _ in launchCheckRound += 1 }
+            .confirmationDialog("This game probably won't start", isPresented: $confirmPlayAnyway, titleVisibility: .visible) {
+                Button("Play anyway") { if let launchNotes { LaunchCheck.acknowledge(entry, launchNotes) }; start() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text((launchNotes ?? []).filter { $0.level == .problem }.map(\.title).joined(separator: "\n"))
+            }
             .task {
                 if entry.graphicsAPI == nil, entry.desktop != true, let url = try? LibraryModel.executable(entry.relativePath) { entry.graphicsAPI = LibraryModel.graphicsImports(url) }
             }
@@ -4190,7 +4220,7 @@ struct LibraryDetail: View {
         }
         .onDisappear { if !leaving { model.save(entry) } }
         .onReceive(LibraryController.shared.commands) { command in
-            guard !leaving, !findCover, !importCover, !remove, !confirmReset else { return }
+            guard !leaving, !findCover, !importCover, !remove, !confirmReset, !confirmPlayAnyway else { return }
             if command == "back" {
                 if path.isEmpty { model.save(entry); dismiss() } else { path.removeLast() }
             }

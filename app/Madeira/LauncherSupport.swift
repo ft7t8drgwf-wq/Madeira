@@ -156,6 +156,9 @@ final class LauncherSupportModel: ObservableObject {
     @Published private(set) var downloading: LauncherID?
     @Published var status = ""
     @Published var error: String?
+    /// The installer download keeps going while Madeira keeps running in the background (BackgroundRun.swift).
+    private var background: BackgroundRun.Token?
+    private var stoppedInBackground = false
 
     func refresh() {
         var found: [LauncherID: URL] = [:]
@@ -212,7 +215,7 @@ final class LauncherSupportModel: ObservableObject {
         catch { self.error = "The download folder could not be made: \(error.localizedDescription)"; return }
         downloading = id; error = nil; status = "Downloading the \(id.title) installer…"
         LogStore.shared.log("[launcher] download \(id.rawValue) from \(id.installerURL.host ?? "?")")
-        URLSession.shared.downloadTask(with: id.installerURL) { temporary, response, failure in
+        let task = URLSession.shared.downloadTask(with: id.installerURL) { temporary, response, failure in
             // The file is gone once this returns: move it before going to the main actor.
             var moved: URL?
             var problem = failure?.localizedDescription
@@ -228,13 +231,23 @@ final class LauncherSupportModel: ObservableObject {
                 } catch { problem = error.localizedDescription }
             }
             Task { @MainActor in self.downloaded(id, moved, problem ?? (moved == nil ? "no file arrived" : nil)) }
-        }.resume()
+        }
+        stoppedInBackground = false
+        background = BackgroundRun.shared.beginTask("\(id.title) installer download") { [weak self, weak task] in
+            MainActor.assumeIsolated { self?.stoppedInBackground = true }
+            task?.cancel()
+        }
+        task.resume()
     }
 
     private func downloaded(_ id: LauncherID, _ file: URL?, _ problem: String?) {
         downloading = nil
+        if let background { BackgroundRun.shared.endTask(background) }
+        background = nil
         guard let file, problem == nil else {
-            error = "The \(id.title) installer did not download: \(problem ?? "unknown error")."
+            error = stoppedInBackground
+                ? "The \(id.title) installer download stopped while Madeira was in the background. Tap Download to start it again."
+                : "The \(id.title) installer did not download: \(problem ?? "unknown error")."
             LogStore.shared.log("[launcher] download \(id.rawValue) failed: \(problem ?? "?")", level: .error)
             status = ""
             return

@@ -27710,6 +27710,15 @@ static BOOL ios_kw_store( char *dst, const char *src, size_t n )
     return TRUE;
 }
 
+/* For the wineserver (mach_ios.c, ios_local_child_write): a store into another pseudo-process of this session.
+ * Garry's Mod's Chromium sandbox broker writes interception thunks into PAGE_EXECUTE_READWRITE memory it allocated
+ * in its child; that memory took the JIT-pool path, so its guest address is an RX view and mach_vm_write fails
+ * there. Same page-by-page store as the kernel-write path above. Returns nonzero when every byte was stored. */
+int ios_child_write_store( void *dst, const void *src, size_t n )
+{
+    return ios_kw_store( dst, src, n );
+}
+
 static void ios_kw_note( const char *what, int fd, const void *addr, size_t size )
 {
     static unsigned int logs;

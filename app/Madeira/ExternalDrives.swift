@@ -442,6 +442,11 @@ struct ExternalDrivesSection: View {
                 }
             }
             Button("Add drive or folder") { ExternalFolderPicker.shared.present(added) }
+                .onDrop(of: [.folder], isTargeted: nil) { providers in
+                    guard let provider = providers.first else { return false }
+                    ExternalFolderPicker.shared.dropped(provider, done: added, failed: { error = $0 })
+                    return true
+                }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
@@ -452,7 +457,7 @@ struct ExternalDrivesSection: View {
             }
             if let error { Text(error).foregroundStyle(.red) }
         } header: { Text("External drives") } footer: {
-            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
+            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive. If Open does nothing in the picker, drag the folder from the Files app onto Add drive or folder instead.")
         }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
@@ -517,6 +522,27 @@ struct ExternalDrivesSection: View {
         FolderPickerSigning.didPick(.swipedAway)
         done = nil
     }
+
+    /// A folder dragged in from the Files app. Drag and drop hands the folder over
+    /// on a different path than the picker's Open button, so it is a second way in
+    /// when the picker refuses the folder.
+    func dropped(_ provider: NSItemProvider, done: @escaping @MainActor (URL) -> Void,
+                 failed: @escaping @MainActor (String) -> Void) {
+        LogStore.shared.log("[external] folder dropped, types: \(provider.registeredTypeIdentifiers.joined(separator: ","))")
+        _ = provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.folder.identifier) { url, inPlace, error in
+            // Held across the hop to the main thread; add() takes its own access and keeps it.
+            let scoped = url?.startAccessingSecurityScopedResource() ?? false
+            Task { @MainActor in
+                defer { if scoped { url?.stopAccessingSecurityScopedResource() } }
+                LogStore.shared.log("[external] dropped folder: url=\(url == nil ? 0 : 1) in-place=\(inPlace ? 1 : 0)"
+                    + " scoped=\(scoped ? 1 : 0)" + (error.map { " error=\($0.localizedDescription)" } ?? ""))
+                guard let url else { failed(error?.localizedDescription ?? "Madeira could not open that folder."); return }
+                // A copy would fill this device and is not the drive: only the folder itself will do.
+                guard inPlace else { failed("Files handed over a copy instead of the folder itself."); return }
+                done(url)
+            }
+        }
+    }
 }
 
 /// The folder picker's Open button does nothing when this copy is signed with a
@@ -534,9 +560,13 @@ struct ExternalDrivesSection: View {
 /// device log shows how far the change got. Nothing changes on a copy whose bundle
 /// ID already is its App ID, and the folder is still opened in place, never copied.
 ///
-/// madeira.cfg `external-picker-fix`: unset or 1 = all of the above; hooks = only
-/// build 47's setter/getter swap; ignore = all of the above plus the picker's own
-/// "ignore the application entitlement" flag; 0 = off.
+/// Build 48 showed the App ID reaching the configuration that is sent (hostIdentifier
+/// = App ID, encoded once) and Open still doing nothing on iOS 27.2, so the host
+/// identity alone is not what iOS checks there. madeira.cfg `external-picker-fix`
+/// picks what else to try, without a new build: unset or 1 = all of the above; or a
+/// comma list of hooks (only build 47's setter/getter swap), ignore (the picker's
+/// "ignore the application entitlement" flag), inprocess (the configuration's
+/// _inProcess flag) and nobookmark (_neverCreateBookmarkForOpenInPlace); 0 = off.
 enum FolderPickerSigning {
     enum Outcome: String { case picked, cancelled, swipedAway = "swiped away" }
 
@@ -552,7 +582,8 @@ enum FolderPickerSigning {
 
     private static let lock = NSLock()
     private static var open = false
-    private static var mode = "all"
+    /// Extra changes chosen in madeira.cfg (hooks, ignore, inprocess, nobookmark).
+    private static var options: Set<String> = []
     private static var installed = false
     /// Hook calls while the picker is open: how many ran, how many swapped a value.
     private static var calls: [String: (ran: Int, swapped: Int)] = [:]
@@ -562,10 +593,13 @@ enum FolderPickerSigning {
     /// Right before the picker is created, so the hooks are in effect when iOS fills it in.
     static func willPick() {
         // Default on. 0: the folder picker is left as iOS builds it, so on a copy signed with a different App ID
-        // its Open button does nothing again; hooks: only build 47's swap; ignore: also the picker's ignore flag.
+        // its Open button does nothing again. Otherwise a comma list of extras: hooks (only build 47's swap), ignore
+        // (the picker's ignore-entitlement flag), inprocess (the picker runs inside Madeira), nobookmark (no bookmark
+        // for the opened folder). Read each time the picker opens.
         let setting = (MadeiraConfig.get("external-picker-fix") ?? "1").lowercased()
-        let chosen = ["0", "off", "no", "false"].contains(setting) ? "off"
-            : setting == "hooks" ? "hooks" : setting == "ignore" ? "ignore" : "all"
+        let words = Set(setting.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init))
+        let picked = words.intersection(["hooks", "ignore", "inprocess", "nobookmark"])
+        let chosen = words.isDisjoint(with: ["0", "off", "no", "false"]) ? (picked.isEmpty ? "all" : picked.sorted().joined(separator: ",")) : "off"
         guard let signedAppID else {
             LogStore.shared.log("[external] folder picker: App ID matches the bundle ID, nothing to fix")
             return
@@ -576,7 +610,7 @@ enum FolderPickerSigning {
         }
         lock.lock()
         if !installed { installed = install(signedAppID) }
-        open = true; mode = chosen; calls = [:]
+        open = true; options = picked; calls = [:]
         lock.unlock()
         LogStore.shared.log("[external] folder picker opened with the signed App ID mode=\(chosen)"
             + " bundle-id-len=\(bundleID.count) app-id-len=\(signedAppID.count)")
@@ -592,9 +626,9 @@ enum FolderPickerSigning {
         LogStore.shared.log("[external] folder picker \(outcome.rawValue); hook calls ran/swapped: \(counts.isEmpty ? "none" : counts)")
     }
 
-    private static var active: (on: Bool, mode: String) {
+    private static var active: (on: Bool, options: Set<String>) {
         lock.lock(); defer { lock.unlock() }
-        return (open, mode)
+        return (open, options)
     }
 
     private static func count(_ hook: String, swapped: Bool) {
@@ -609,13 +643,18 @@ enum FolderPickerSigning {
 
     /// Just after the picker is created and before it is shown.
     static func prepare(_ picker: NSObject) {
-        let (on, mode) = active
+        let (on, options) = active
         guard on else { return }
         report(picker, stage: "created")
-        guard mode != "hooks" else { return }
+        guard !options.contains("hooks") else { return }
         var rewritten = rewrite(picker)
-        for config in configurations(of: picker) { rewritten += rewrite(config) }
-        if mode == "ignore" { setFlag(picker, name: "_ignoreApplicationEntitlementForImport") }
+        let configs = configurations(of: picker)
+        for config in configs { rewritten += rewrite(config) }
+        if options.contains("ignore") { setFlag(picker, name: "_ignoreApplicationEntitlementForImport") }
+        for config in configs {
+            if options.contains("inprocess") { setFlag(config, name: "_inProcess") }
+            if options.contains("nobookmark") { setFlag(config, name: "_neverCreateBookmarkForOpenInPlace") }
+        }
         LogStore.shared.log("[external] folder picker fields rewritten: \(rewritten.isEmpty ? "none" : rewritten.joined(separator: ","))")
         report(picker, stage: "prepared")
     }
@@ -665,7 +704,7 @@ enum FolderPickerSigning {
     /// The fields that look like an app's identity, with what they hold: the
     /// bundle ID, the signed App ID, nothing, or the value itself.
     private static func describe(_ object: NSObject) -> String {
-        let words = ["identifier", "host", "bundle", "entitlement", "client", "source"]
+        let words = ["identifier", "host", "bundle", "entitlement", "client", "source", "process", "bookmark", "interaction"]
         var parts: [String] = []
         for (name, ivar, kind) in ivars(of: object) where words.contains(where: { name.lowercased().contains($0) }) {
             if isObject(ivar) {
@@ -677,6 +716,9 @@ enum FolderPickerSigning {
             } else if kind == "B" || kind == "c" {
                 let field = Unmanaged.passUnretained(object).toOpaque().advanced(by: ivar_getOffset(ivar))
                 parts.append("\(name)=\(field.load(as: UInt8.self))")
+            } else if kind == "q" || kind == "Q" {
+                let field = Unmanaged.passUnretained(object).toOpaque().advanced(by: ivar_getOffset(ivar))
+                parts.append("\(name)=\(field.load(as: Int64.self))")
             }
         }
         return parts.joined(separator: " ")
@@ -763,8 +805,8 @@ enum FolderPickerSigning {
             typealias Encode = @convention(c) (AnyObject, Selector, NSCoder) -> Void
             let original = unsafeBitCast(method_getImplementation(method), to: Encode.self)
             let body: @convention(block) (AnyObject, NSCoder) -> Void = { object, coder in
-                let (on, mode) = active
-                if on, mode != "hooks", let config = object as? NSObject {
+                let (on, options) = active
+                if on, !options.contains("hooks"), let config = object as? NSObject {
                     FolderPickerSigning.count("encode", swapped: !rewrite(config).isEmpty)
                 } else if on {
                     FolderPickerSigning.count("encode", swapped: false)
