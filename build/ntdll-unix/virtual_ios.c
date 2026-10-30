@@ -35625,31 +35625,6 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         server_leave_uninterrupted_section( &virtual_mutex, &sigset );
         return STATUS_SUCCESS;
     }
-    /* ml1310 lazy placeholders (ios_lazy_ph_make): a split past what is reserved
-     * reserves that much more first; a coalesce covers the reserved part, the
-     * rest being one placeholder already; a release may end the entry. */
-    struct ios_lazy_ph *ios_lazy = NULL;
-    SIZE_T ios_lazy_size = 0;
-    if (base && ios_lazy_ph_count)
-    {
-        struct file_view *lv = NULL;
-        if ((type & (MEM_PRESERVE_PLACEHOLDER | MEM_COALESCE_PLACEHOLDERS)) ||
-            ((type & MEM_RELEASE) && (lv = find_view( base, 0 )) && (lv->protect & VPROT_PLACEHOLDER)))
-            ios_lazy = ios_lazy_ph_find( base );
-    }
-    if (ios_lazy)
-    {
-        if (type == (MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
-        {
-            if (size && base < ios_lazy->backed && base + size > ios_lazy->backed)
-            {
-                ios_lazy_size = size;
-                size = ios_lazy->backed - base;
-            }
-        }
-        else if (type == (MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) && size)
-            ios_lazy_ph_cover( ios_lazy, base + size );
-    }
 #endif
 
     /* avoid freeing the DOS area when a broken app passes a NULL pointer */

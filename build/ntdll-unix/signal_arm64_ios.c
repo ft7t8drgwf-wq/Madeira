@@ -5246,7 +5246,6 @@ static void *ios_mach_exception_thread( void *arg )
                  * routed the same way -- its alias is at the pool's distance. in_low
                  * keeps the bounds checks below to C's own extent. */
                 int in_low = rx && rw && sz && ios_jit_low_contains( (uintptr_t)fault_addr );
-                int watch_hit = 0, watch_prot = 0;   /* ml1201 */
                 int in_jit = (rx && rw && sz &&
                               fault_addr >= rx && fault_addr < rx + sz) || in_low;
                 if (in_jit) {
