@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2CA2E0ECAB17387183994F18 /* GameBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AF67B4DB3D08939EEF829A4 /* GameBrowser.swift */; };
+		79CAD4FC8F9DC4CA65DD6A24 /* GameBrowserKit in Frameworks */ = {isa = PBXBuildFile; productRef = F20BF4ABD273978AC3D64CF7 /* GameBrowserKit */; };
 		A1000E07 /* EpicCloudSaves.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E07 /* EpicCloudSaves.swift */; };
 		A1000E06 /* EpicCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E06 /* EpicCloud.swift */; };
 		A1000520 /* MadeiraDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000520 /* MadeiraDock.swift */; };
@@ -246,6 +248,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		8AF67B4DB3D08939EEF829A4 /* GameBrowser.swift */ = {isa = PBXFileReference; explicitFileType = sourcecode.swift; lastKnownFileType = sourcecode.swift; name = GameBrowser.swift; path = GameBrowser.swift; sourceTree = "<group>"; };
 		A2000E07 /* EpicCloudSaves.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicCloudSaves.swift"; sourceTree = "<group>"; };
 		A2000E06 /* EpicCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicCloud.swift"; sourceTree = "<group>"; };
 		A2000520 /* MadeiraDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDock.swift"; sourceTree = "<group>"; };
@@ -507,6 +510,7 @@
 				A1000307 /* libswresample.a in Frameworks */,
 				A1000308 /* libavutil.a in Frameworks */,
 				B1000005 /* ExtensionFoundation.framework in Frameworks */,
+				79CAD4FC8F9DC4CA65DD6A24 /* GameBrowserKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -711,6 +715,7 @@
 				A2000006 /* Madeira-Bridging-Header.h */,
 				A2000007 /* Madeira.entitlements */,
 				A2000008 /* Info.plist */,
+				8AF67B4DB3D08939EEF829A4 /* GameBrowser.swift */,
 			);
 			path = Madeira;
 			sourceTree = "<group>";
@@ -798,6 +803,9 @@
 				B3000006 /* PBXTargetDependency */,
 			);
 			name = Madeira;
+			packageProductDependencies = (
+				F20BF4ABD273978AC3D64CF7 /* GameBrowserKit */,
+			);
 			productName = Madeira;
 			productReference = A2000009 /* Madeira.app */;
 			productType = "com.apple.product-type.application";
@@ -848,6 +856,9 @@
 				Base,
 			);
 			mainGroup = A4000001;
+			packageReferences = (
+				08E6E0F94AD8B4432844AA3F /* XCLocalSwiftPackageReference "Packages/GameBrowserKit" */,
+			);
 			productRefGroup = A4000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -1083,6 +1094,7 @@
 				B1000040 /* JITPairing.swift in Sources */,
 				B1000060 /* SigningRefresh.swift in Sources */,
 				B1000061 /* AppleSignIn.swift in Sources */,
+				2CA2E0ECAB17387183994F18 /* GameBrowser.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1367,6 +1379,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		08E6E0F94AD8B4432844AA3F /* XCLocalSwiftPackageReference "Packages/GameBrowserKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/GameBrowserKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F20BF4ABD273978AC3D64CF7 /* GameBrowserKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GameBrowserKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A6000001 /* Project object */;
 }
