@@ -1636,7 +1636,11 @@ static void ios_jit_verify_copy( const char *src, const char *rx, size_t size,
     for (i = 0; i + 8 <= size; i += step)
     {
         uint64_t a, b;
-        memcpy( &a, src + i, 8 );
+        mach_vm_size_t got = 0;
+        /* madeira-bcd copy-readable: the source may hold pages that were never
+         * committed (ios_copy_guest_bytes left them zero); skip, never fault */
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(src + i), 8,
+                                    (mach_vm_address_t)&a, &got ) != KERN_SUCCESS || got != 8) continue;
         memcpy( &b, rx  + i, 8 );
         checked++;
         if (a != b)
@@ -4965,6 +4969,57 @@ void ios_mono_bridge_capture( uint64_t teb, uint64_t frame, uint64_t host_pc, ui
     }
 }
 /* ========================== end ml648 MONO BRIDGE ========================= */
+
+/* madeira-bcd view-alias-drop: env.MADEIRA_VIEW_ALIAS_DROP = 1 (opt-in, per game).
+ * An anon RWX alias is cleared only when its pool range is handed out again or
+ * its process exits, so a SECTION view that is unmapped leaves its executable
+ * copy registered for the guest VA. Black Ops III (2026-10-19, 611924f) maps a
+ * pagefile section at 0x7032eb0000 (0x250000, made executable: a pool copy),
+ * unmaps it and maps a second view of 0xc0000 at the same address: the new
+ * view's exec request found the old alias ([alias-own] ml640 "keeping the pool
+ * dual-map"), so the guest kept running the first copy, still int3 padding
+ * (cc cc ...) where the second view had code, and died on 0x80000003. With the
+ * switch, deleting a non-image section view retires the aliases inside it, so
+ * the next view mapped there gets a copy of its own. Their pool ranges are left
+ * allocated (reclaimed at process exit). Same order as the handout purge:
+ * user_va_end first, then user_va, for the lock-free readers.
+ * (Named apart from ios_jit_anon_alias_retire_range below, which does the same
+ * for NtFreeVirtualMemory(MEM_RELEASE) of a private allocation, always on.) */
+static int ios_view_alias_drop_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_VIEW_ALIAS_DROP" );
+        on = e && e[0] == '1' && !e[1];
+    }
+    return on;
+}
+
+static void ios_jit_view_alias_retire_range( const void *base, size_t size )
+{
+    uintptr_t lo = (uintptr_t)base, hi = lo + size;
+    static int said;
+    int i;
+
+    if (!ios_view_alias_drop_on()) return;
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_jit_anon_alias_count; i++)
+    {
+        uintptr_t va = ios_jit_anon_aliases[i].user_va;
+        if (!va || va < lo || ios_jit_anon_aliases[i].user_va_end > hi) continue;
+        if (said++ < 16)
+            dprintf(2, "[view-alias-drop] section view %p+0x%lx unmapped: alias %p..%p rw=%p retired\n",
+                    base, (unsigned long)size, (void *)va, (void *)ios_jit_anon_aliases[i].user_va_end,
+                    (void *)ios_jit_anon_aliases[i].jit_rw_alias);
+        ios_jit_anon_aliases[i].user_va_end = 0;
+        __sync_synchronize();
+        ios_mono_alias_retire( va );
+        ios_jit_anon_aliases[i].user_va = 0;
+        if (ios_jit_anon_alias_live > 0) ios_jit_anon_alias_live--;
+    }
+    pthread_mutex_unlock( &ios_pool_lock );
+}
 
 int ios_jit_anon_alias_add(void *user_va, size_t size, void *jit_rw_alias)
 {
@@ -14378,6 +14433,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
     if ((view->protect & SEC_IMAGE) && ios_jit_image_retire_enabled())
         ios_jit_retire_image( view->base, view->size );
     if (view->protect & SEC_IMAGE) ios_jit_note_image_unmapped( view->base, view->size );
+    else if (!is_view_valloc( view )) ios_jit_view_alias_retire_range( view->base, view->size );   /* madeira-bcd view-alias-drop */
     ios_swap_release_range( view->base, view->size, 0 );   /* ml1077 */
     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
     if (ios_retire_trace_armed) ios_retire_mark( "D1u\n" );   /* unmap_area done */
@@ -17089,6 +17145,59 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
 }
 
 
+/* madeira-bcd copy-readable: copy guest bytes into the JIT pool without faulting.
+ * Black Ops III (2026-10-19, build 2cd6f36): after its unpacker made the exe RWX, an
+ * executable protect reached a memcpy in mprotect_exec whose source ran into pages
+ * that were reserved but never committed (a growing buffer at 0x7059f70000); the
+ * READ fault at 0x705a470000 happened on the host stack, the Mach handler could
+ * only deliver it "best-effort on guest stack", and the main thread sat in
+ * _platform_memmove for good while the game drew nothing. mach_vm_read_overwrite
+ * returns an error instead of faulting: a chunk that reads whole is copied, one
+ * that does not is retried page by page and its unreadable pages are left zero,
+ * as an uncommitted page reads on Windows-side bookkeeping. Returns the number of
+ * bytes that could not be read. */
+static size_t ios_copy_guest_bytes( void *dst, const void *src, size_t size )
+{
+    const size_t chunk = 1 << 20, pg = 0x1000;   /* 4 KB: exact on 4 KB and 16 KB pages */
+    size_t off = 0, bad = 0;
+
+    while (off < size)
+    {
+        size_t n = size - off < chunk ? size - off : chunk, p;
+        mach_vm_size_t got = 0;
+
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)((const char *)src + off), n,
+                                    (mach_vm_address_t)((char *)dst + off), &got ) == KERN_SUCCESS && got == n)
+        {
+            off += n;
+            continue;
+        }
+        for (p = 0; p < n; )
+        {
+            uintptr_t a = (uintptr_t)src + off + p;
+            size_t m = pg - (a & (pg - 1));
+            if (m > n - p) m = n - p;
+            got = 0;
+            if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)a, m,
+                                        (mach_vm_address_t)((char *)dst + off + p), &got ) != KERN_SUCCESS || got != m)
+            {
+                memset( (char *)dst + off + p, 0, m );
+                bad += m;
+            }
+            p += m;
+        }
+        off += n;
+    }
+    if (bad)
+    {
+        static int said;
+        if (said++ < 16)
+            dprintf( 2, "[copy-readable] %p+0x%lx: 0x%lx bytes unreadable (reserved, not committed?) left zero "
+                        "instead of faulting in mprotect_exec\n", src, (unsigned long)size, (unsigned long)bad );
+    }
+    return bad;
+}
+
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
 #ifdef WINE_IOS
@@ -18124,14 +18233,13 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                     const unsigned char *src = (const unsigned char *)base;
                     size_t i;
 
+                    memset( rw_dst, 0, alloc_size );
+                    ios_copy_guest_bytes( rw_dst, src, size );   /* madeira-bcd copy-readable */
                     for (i = 0; i < size; i++)
                     {
-                        ml634_pre_hash = (ml634_pre_hash ^ src[i]) * 1099511628211ull;
-                        if (src[i]) ml634_nonzero++;
+                        ml634_pre_hash = (ml634_pre_hash ^ (unsigned char)rw_dst[i]) * 1099511628211ull;
+                        if (rw_dst[i]) ml634_nonzero++;
                     }
-
-                    memset( rw_dst, 0, alloc_size );
-                    memcpy( rw_dst, src, size );
                     sys_icache_invalidate( rx_dst, alloc_size );
 
                     {
@@ -18383,7 +18491,7 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
              * This preserves ADRP-based PC-relative references between sections. */
             ios_jit_scan_nonexec( "pre-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
-            memcpy((char *)jit_rw_base + offset, image_base, image_size);
+            ios_copy_guest_bytes((char *)jit_rw_base + offset, image_base, image_size);   /* madeira-bcd copy-readable */
             ios_jit_scan_nonexec( "post-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
             sys_icache_invalidate((char *)jit_rx_base + offset, image_size);
@@ -24442,6 +24550,79 @@ done:
 }
 
 
+#ifdef WINE_IOS
+/* madeira-bcd sysx64-image: env.MADEIRA_SYSX64_IMAGE = 1 (opt-in, per game). On
+ * Windows on ARM, system32's DLLs are ARM64X: an x64 program that maps one
+ * itself gets code it can call. Here system32 holds the pure ARM64 builds and
+ * the x64-callable (ARM64EC) builds live in C:\windows\sysx64, where the
+ * loader's mixed-arch fallback finds them -- but a program that maps the file
+ * on its own gets the ARM64 one. Black Ops III (2026-10-19) maps
+ * system32\gdi32.dll that way, without a loader name, and calls its
+ * GdiDllInitialize: ARM64 code decoded as x64, "Invalid instruction in entry
+ * block", c0000005. With the switch, an x64 process's own map of a pure ARM64
+ * system32 image takes the sysx64 file of the same name when there is one.
+ * A map that asks for write access keeps the file it named. Returns a new
+ * image section handle for that file, or 0. */
+static HANDLE ios_sysx64_image_section( const UNICODE_STRING *nt_name, const struct pe_image_info *pi,
+                                         ACCESS_MASK access )
+{
+    static const WCHAR dir[] = {'\\','w','i','n','d','o','w','s','\\','s','y','s','t','e','m','3','2','\\'};
+    static const WCHAR x64[] = {'s','y','s','x','6','4'};
+    static int on = -1, said;
+    const USHORT dlen = ARRAY_SIZE(dir), len = nt_name->Length / sizeof(WCHAR);
+    WCHAR path[MAX_PATH];
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE file = 0, section = 0;
+    USHORT i, j, at = 0;
+    NTSTATUS status;
+
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_SYSX64_IMAGE" );
+        on = e && e[0] == '1' && !e[1];
+    }
+    if (!on || NtCurrentTeb()->Tib.ArbitraryUserPointer || (access & SECTION_MAP_WRITE)) return 0;
+    if (pi->machine != IMAGE_FILE_MACHINE_ARM64 || pi->is_hybrid) return 0;
+    if (ios_cur_image_info_machine() != IMAGE_FILE_MACHINE_AMD64) return 0;
+    if (!nt_name->Buffer || len <= dlen || len + 2 >= ARRAY_SIZE(path)) return 0;
+    for (i = 0; i + dlen < len && !at; i++)
+    {
+        for (j = 0; j < dlen; j++)
+        {
+            WCHAR c = nt_name->Buffer[i + j];
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c != dir[j]) break;
+        }
+        if (j == dlen) at = i + 9;   /* index of "system32", after "\windows\" */
+    }
+    if (!at) return 0;
+    for (i = at + 9; i < len; i++) if (nt_name->Buffer[i] == '\\') return 0;   /* a file right in system32 */
+
+    /* the same path with "system32" replaced by "sysx64" */
+    memcpy( path, nt_name->Buffer, at * sizeof(WCHAR) );
+    memcpy( path + at, x64, sizeof(x64) );
+    memcpy( path + at + ARRAY_SIZE(x64), nt_name->Buffer + at + 8, (len - at - 8) * sizeof(WCHAR) );
+    us.Buffer = path;
+    us.Length = us.MaximumLength = (len - 2) * sizeof(WCHAR);
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtOpenFile( &file, GENERIC_READ | GENERIC_EXECUTE | SYNCHRONIZE, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_SYNCHRONOUS_IO_NONALERT );
+    if (!status)
+    {
+        status = NtCreateSection( &section, SECTION_QUERY | SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+                                  NULL, NULL, PAGE_EXECUTE_READ, SEC_IMAGE, file );
+        NtClose( file );
+        if (status) section = 0;
+    }
+    if (said++ < 16)
+        dprintf( 2, "[sysx64-image] x64 map of ARM64 %s: %s %s (status 0x%x)\n", debugstr_us(nt_name),
+                 section ? "mapping" : "keeping it, no", debugstr_us(&us), (unsigned)status );
+    return section;
+}
+#endif
+
 /***********************************************************************
  *             virtual_map_section
  *
@@ -24510,6 +24691,19 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     {
         SECTION_IMAGE_INFORMATION info;
         ULONG64 prev = 0;
+#ifdef WINE_IOS
+        HANDLE sysx64 = ios_sysx64_image_section( &nt_name, image_info, access );
+
+        if (sysx64)   /* madeira-bcd sysx64-image: map the x64-callable build instead */
+        {
+            if (shared_file) NtClose( shared_file );
+            free( image_info );
+            res = virtual_map_section( sysx64, addr_ptr, limit_low, limit_high, commit_size,
+                                       offset_ptr, size_ptr, alloc_type, protect, machine );
+            NtClose( sysx64 );
+            return res;
+        }
+#endif
 
         if (NtCurrentTeb64())
         {

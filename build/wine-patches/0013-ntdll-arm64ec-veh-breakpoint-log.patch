@@ -1,0 +1,116 @@
+Subject: [PATCH] ntdll ARM64EC: log vectored handlers, function tables and breakpoint SEH walks
+
+Black Ops III dies on an int3 at +0x761a0 of its freshly unpacked code that
+its anti-tamper expects a handler to take. Capped log lines: [veh-add]
+(vectored handlers registered), [veh-bp] (each one's answer to a breakpoint,
+or that there is none), [fn-table] (unwind data registered for generated
+code) and [seh-bp] (each frame a breakpoint's handler search visits).
+Logging only; ARM64EC builds only.
+
+Originally-by: Tomba247 (https://github.com/Tomba247/Madeira, bo3-build eec39325
+and 0cbed50a, build/patches/wine/0003-veh-breakpoint-log.patch), taken unchanged.
+diff --git a/dlls/ntdll/exception.c b/dlls/ntdll/exception.c
+index e90eb016..9b0fba4c 100644
+--- a/dlls/ntdll/exception.c
++++ b/dlls/ntdll/exception.c
+@@ -113,6 +113,15 @@ static VECTORED_HANDLER *add_vectored_handler( LIST_ENTRY *handler_list, ULONG f
+         else InsertTailList( handler_list, &handler->entry );
+         RtlLeaveCriticalSection( &vectored_handlers_section );
+     }
++#ifdef __arm64ec__
++    {   /* madeira-bcd [veh-add]: which handlers a program registers (Black Ops III's
++         * anti-tamper raises int3 in its own code and expects a handler for them) */
++        static LONG add_n;
++        if (InterlockedIncrement( &add_n ) <= 32)
++            ERR( "[veh-add] %s handler %p first=%lu\n",
++                 handler_list == &vectored_exception_handlers ? "exception" : "continue", func, first );
++    }
++#endif
+     return handler;
+ }
+ 
+@@ -161,6 +170,14 @@ static LONG call_vectored_handlers( EXCEPTION_RECORD *rec, CONTEXT *context )
+ 
+     mark = &vectored_exception_handlers;
+     entry = mark->Flink;
++#ifdef __arm64ec__
++    if (rec->ExceptionCode == STATUS_BREAKPOINT && entry == mark)
++    {   /* madeira-bcd [veh-bp]: a breakpoint with no vectored handler to take it */
++        static LONG none_n;
++        if (InterlockedIncrement( &none_n ) <= 16)
++            ERR( "[veh-bp] breakpoint at %p: no vectored exception handler registered\n", rec->ExceptionAddress );
++    }
++#endif
+     while (entry != mark)
+     {
+         handler = CONTAINING_RECORD( entry, VECTORED_HANDLER, entry );
+@@ -209,6 +226,14 @@ static LONG call_vectored_handlers( EXCEPTION_RECORD *rec, CONTEXT *context )
+ #endif
+         ret = func( &except_ptrs );
+ #ifdef __arm64ec__
++        if (rec->ExceptionCode == STATUS_BREAKPOINT)
++        {   /* madeira-bcd [veh-bp]: each vectored handler's answer to a breakpoint */
++            static LONG bp_n;
++            if (InterlockedIncrement( &bp_n ) <= 48)
++                ERR( "[veh-bp] breakpoint at %p: handler %p returned %x, Rip %p -> %p\n",
++                     rec->ExceptionAddress, func, (unsigned int)ret,
++                     (void *)(ULONG_PTR)veh_saved.Rip, (void *)(ULONG_PTR)context->Rip );
++        }
+         if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION)
+         {
+             static LONG vehr_n;
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 9ed09f7e..c19a1c38 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -3116,6 +3116,16 @@ NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
+     for (;;)
+     {
+         status = virtual_unwind( UNW_FLAG_EHANDLER, &dispatch, &context );
++        if (rec && rec->ExceptionCode == STATUS_BREAKPOINT)
++        {   /* madeira-bcd [seh-bp]: each frame a breakpoint's handler search visits */
++            static LONG bpf_n;
++            if (InterlockedIncrement( &bpf_n ) <= 96)
++                ERR( "[seh-bp] bp %p: frame pc=%p ec=%d entry=%p base=%p handler=%p establisher=%p status=%x\n",
++                     rec->ExceptionAddress, (void *)(ULONG_PTR)dispatch.ControlPc,
++                     (int)RtlIsEcCode( dispatch.ControlPc ), dispatch.FunctionEntry,
++                     (void *)(ULONG_PTR)dispatch.ImageBase, dispatch.LanguageHandler,
++                     (void *)(ULONG_PTR)dispatch.EstablisherFrame, (unsigned int)status );
++        }
+         if (status != STATUS_SUCCESS) return status;
+ 
+     unwind_done:
+diff --git a/dlls/ntdll/unwind.c b/dlls/ntdll/unwind.c
+index f55ca6a4..435ac5ed 100644
+--- a/dlls/ntdll/unwind.c
++++ b/dlls/ntdll/unwind.c
+@@ -141,6 +141,14 @@ BOOLEAN CDECL RtlInstallFunctionTableCallback( ULONG_PTR table, ULONG_PTR base,
+     RtlEnterCriticalSection( &dynamic_unwind_section );
+     list_add_tail( &dynamic_unwind_list, &entry->entry );
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
++#ifdef __arm64ec__
++    {   /* madeira-bcd [fn-table]: unwind data a program registers for code it made */
++        static LONG cb_n;
++        if (InterlockedIncrement( &cb_n ) <= 32)
++            ERR( "[fn-table] callback %p for %p..%p (context %p)\n", callback, (void *)base,
++                 (void *)(base + length), context );
++    }
++#endif
+ 
+     return TRUE;
+ }
+@@ -171,6 +179,14 @@ NTSTATUS WINAPI RtlAddGrowableFunctionTable( void **table, RUNTIME_FUNCTION *fun
+     RtlEnterCriticalSection( &dynamic_unwind_section );
+     list_add_tail( &dynamic_unwind_list, &entry->entry );
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
++#ifdef __arm64ec__
++    {   /* madeira-bcd [fn-table]: unwind data a program registers for code it made */
++        static LONG tab_n;
++        if (InterlockedIncrement( &tab_n ) <= 32)
++            ERR( "[fn-table] table %p: %lu function(s) for %p..%p (ec=%d)\n", functions, count,
++                 (void *)base, (void *)end, (int)RtlIsEcCode( base ) );
++    }
++#endif
+ 
+     *table = entry;
+ 
