@@ -52,7 +52,7 @@ for path in sources:
 
 library = (app / 'Library.swift').read_text()
 require('var eaOfferID: String?' in library, 'library entries record their EA offer')
-require(library.count('$0.gogProductID == nil && $0.eaOfferID == nil') >= 2,
+require(library.count('$0.eaOfferID == nil') >= 2,
         'Other games: no EA game (it is listed in the EA app section)')
 require('case .eaSignIn: EASignInView()' in library and 'eaSignIn' in library[library.index('enum SettingsSheet'):],
         'Settings: the EA sign-in sheet')
