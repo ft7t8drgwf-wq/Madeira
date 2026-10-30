@@ -130,7 +130,7 @@ enum LaunchCheck {
         }
         if let tested = input.tested {
             notes.append(LaunchCheckNote(id: "tested", level: .good, title: "Tested: runs on Madeira",
-                                         detail: tested.detail))
+                                         detail: tested.detail(deviceName: input.deviceName, physicalMemory: input.physicalMemory)))
         }
         return notes.sorted { $0.level > $1.level }
     }
@@ -273,6 +273,22 @@ enum LaunchCheck {
     }
 }
 
+/// One device test of a known game. More devices can be added to a game later.
+struct KnownTest: Equatable {
+    /// "iPhone 17 Pro Max"; nil when the device was not recorded.
+    let device: String?
+    /// "iOS 27".
+    let os: String?
+    let build: Int
+    /// The device's memory as sold, in GB (0 when unknown).
+    let memoryGB: Int
+
+    var text: String {
+        let on = device.map { name in os.map { "\(name) (\($0))" } ?? name }
+        return (on.map { "\($0), " } ?? "") + "Madeira build \(build)"
+    }
+}
+
 /// Games device-tested on Madeira that run (the project's own test log). A game
 /// with recommended settings gets them on first sight (GameRecommendations.swift),
 /// so "runs" means with those. Recognised like GameRecommendations: a Steam App
@@ -285,31 +301,48 @@ struct KnownGame: Equatable {
     let folders: Set<String>
     /// Lowercased program names.
     let programs: Set<String>
-    /// Where it was tested ("build 47, iPhone 17 Pro Max").
-    let tested: String
+    /// Where it ran, newest first.
+    let tests: [KnownTest]
     let note: String
 
-    var detail: String { "Tested on \(tested)." + (note.isEmpty ? "" : " " + note) }
+    /// "Tested on iPhone 17 Pro Max (iOS 27), Madeira build 47." plus a hint when this
+    /// device has less memory than every device it was tested on.
+    func detail(deviceName: String, physicalMemory: UInt64) -> String {
+        var text = "Tested on " + tests.map(\.text).joined(separator: "; ") + "."
+        let tested = tests.map(\.memoryGB).filter { $0 > 0 }
+        let own = Int((Double(physicalMemory) / LaunchCheck.gb).rounded(.up))
+        if physicalMemory > 0, let least = tested.min(), own < least {
+            text += " This \(deviceName) has \(own) GB of memory, less than the \(least) GB it was tested with, so it may not run the same."
+        }
+        return note.isEmpty ? text : text + " " + note
+    }
 }
 
 enum KnownGames {
+    /// Cameron's iPhone (iPhone18,2), where the project's device tests run.
+    static let iPhone17ProMax = (device: "iPhone 17 Pro Max", os: "iOS 27", memoryGB: 12)
+    static func onIPhone17ProMax(build: Int) -> KnownTest {
+        KnownTest(device: iPhone17ProMax.device, os: iPhone17ProMax.os, build: build, memoryGB: iPhone17ProMax.memoryGB)
+    }
+
     static let all: [KnownGame] = [
         KnownGame(id: "counter-strike-2", title: "Counter-Strike 2", appIDs: [730],
                   folders: ["counter-strike global offensive"], programs: ["cs2.exe"],
-                  tested: "Madeira build 47, iPhone 17 Pro Max",
+                  tests: [onIPhone17ProMax(build: 47)],
                   note: "With Madeira's recommended settings. Start it with -insecure (community servers and bots): how VAC treats Madeira is unknown."),
         KnownGame(id: "escapists-2", title: "The Escapists 2", appIDs: [641990],
                   folders: ["the escapists 2"], programs: ["theescapists2.exe"],
-                  tested: "Madeira build 47, iPhone 17 Pro Max", note: "With Madeira's recommended settings."),
+                  tests: [onIPhone17ProMax(build: 47)], note: "With Madeira's recommended settings."),
         KnownGame(id: "terraria", title: "Terraria", appIDs: [105600],
                   folders: ["terraria"], programs: ["terraria.exe"],
-                  tested: "Madeira build 34", note: ""),
+                  tests: [onIPhone17ProMax(build: 47)], note: ""),
         KnownGame(id: "megabonk", title: "Megabonk", appIDs: [],
                   folders: ["megabonk"], programs: ["megabonk.exe"],
-                  tested: "Madeira build 31", note: ""),
+                  tests: [KnownTest(device: nil, os: nil, build: 31, memoryGB: 0)], note: ""),
         KnownGame(id: "fallout-new-vegas", title: "Fallout: New Vegas", appIDs: [22380],
                   folders: ["fallout new vegas"], programs: ["falloutnv.exe"],
-                  tested: "Madeira build 18, iPhone", note: "Saves load with Older NVIDIA card (Direct3D 9), which Madeira turns on for it."),
+                  tests: [onIPhone17ProMax(build: 18)],
+                  note: "Saves load with Older NVIDIA card (Direct3D 9), which Madeira turns on for it."),
     ]
 
     /// The device test for a game: `windowsPath` is a program or a Steam game's install folder.

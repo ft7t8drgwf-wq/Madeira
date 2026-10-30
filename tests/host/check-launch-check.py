@@ -128,7 +128,14 @@ expect(KnownGames.find(windowsPath: #"C:\Games\Foo\foo.exe"#, steamAppID: 620) =
 expect(Set(KnownGames.all.map(\.id)).count == KnownGames.all.count, "known game ids are unique")
 input = base; input.tested = KnownGames.all[0]
 let tested = LaunchCheck.notes(input)
-expect(tested.map(\.id) == ["tested"] && tested[0].level == .good && tested[0].detail.hasPrefix("Tested on Madeira build"), "a tested game gets a good line")
+expect(tested.map(\.id) == ["tested"] && tested[0].level == .good
+       && tested[0].detail.hasPrefix("Tested on iPhone 17 Pro Max (iOS 27), Madeira build 47.") && !tested[0].detail.contains("less than"),
+       "a tested game names the device, iOS and build: \(tested[0].detail)")
+var small = input; small.physicalMemory = 8 * gb - 400 * 1_048_576
+let hint = LaunchCheck.notes(small).first { $0.id == "tested" }?.detail ?? ""
+expect(hint.contains("This iPhone has 8 GB of memory, less than the 12 GB it was tested with"), "less memory than the tested device is pointed out: \(hint)")
+let mega = KnownGames.find(windowsPath: #"C:\Games\Megabonk\Megabonk.exe"#, steamAppID: nil)!
+expect(mega.detail(deviceName: "iPhone", physicalMemory: 4 * gb) == "Tested on Madeira build 31.", "no device recorded: build only, no memory hint")
 input.antiCheat = "Valve Anti-Cheat"
 expect(LaunchCheck.notes(input).last?.id == "tested", "the good line sorts last")
 expect(LaunchCheck.gigabytes(12 * gb - 1) == "12 GB" && LaunchCheck.gigabytes(gb + gb / 2) == "1.5 GB", "sizes in words")

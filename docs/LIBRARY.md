@@ -125,7 +125,9 @@ neither its folder, Wine's system folders nor Madeira's Wine libraries have,
 memory above the device's (from the public store, kept 30 days), and less than
 2 GB free. A game device-tested on Madeira (`KnownGames` in `LaunchCheck.swift`:
 Counter-Strike 2, The Escapists 2, Terraria, Megabonk, Fallout: New Vegas) gets
-a green "Tested: runs on Madeira" line with the build it was tested on, and a
+a green "Tested: runs on Madeira" line naming the device, iOS and build it was
+tested on (each game keeps a list of tests, so more devices can be added; a
+device with less memory than every tested one is told so), and a
 **Tested** pill in the library; Counter-Strike 2 and The Escapists 2 also have
 recommended settings (`GameRecommendations.swift`), so they get their tested
 config on first sight. With nothing found it shows one green line. Play stays available: a
