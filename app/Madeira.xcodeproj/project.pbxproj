@@ -49,6 +49,7 @@
 		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
 		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
 		A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711 /* WineMono.swift */; };
+		A1007D03 /* WineGecko.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007D03 /* WineGecko.swift */; };
 		A1000E01 /* EpicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E01 /* EpicLibrary.swift */; };
 		A1000E02 /* EpicGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E02 /* EpicGames.swift */; };
 		A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E03 /* EpicAPI.swift */; };
@@ -173,6 +174,8 @@
 		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
 		A1000213 /* LibraryBCD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000213 /* LibraryBCD.swift */; };
 		A1007C01 /* GPUCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007C01 /* GPUCards.swift */; };
+		A1007D02 /* LaunchCheckView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007D02 /* LaunchCheckView.swift */; };
+		A1007D01 /* LaunchCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007D01 /* LaunchCheck.swift */; };
 		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1000991 /* GameDllOverrides.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000991 /* GameDllOverrides.swift */; };
@@ -289,6 +292,7 @@
 		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
 		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
 		A2000711 /* WineMono.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineMono.swift"; sourceTree = "<group>"; };
+		A2007D03 /* WineGecko.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineGecko.swift"; sourceTree = "<group>"; };
 		A2000E01 /* EpicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicLibrary.swift"; sourceTree = "<group>"; };
 		A2000E02 /* EpicGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicGames.swift"; sourceTree = "<group>"; };
 		A2000E03 /* EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicAPI.swift"; sourceTree = "<group>"; };
@@ -429,6 +433,8 @@
 		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPSOverlay.swift; sourceTree = "<group>"; };
 		A2000213 /* LibraryBCD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBCD.swift; sourceTree = "<group>"; };
 		A2007C01 /* GPUCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUCards.swift; sourceTree = "<group>"; };
+		A2007D02 /* LaunchCheckView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchCheckView.swift; sourceTree = "<group>"; };
+		A2007D01 /* LaunchCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchCheck.swift; sourceTree = "<group>"; };
 		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2000991 /* GameDllOverrides.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameDllOverrides.swift; sourceTree = "<group>"; };
@@ -576,6 +582,7 @@
 				A2000921 /* ExternalStorage.swift */,
 				A2000710 /* SavesAndShortcuts.swift */,
 				A2000711 /* WineMono.swift */,
+				A2007D03 /* WineGecko.swift */,
 				A2000E01 /* EpicLibrary.swift */,
 				A2000E02 /* EpicGames.swift */,
 				A2000E03 /* EpicAPI.swift */,
@@ -637,6 +644,8 @@
 				A2000202 /* FPSOverlay.swift */,
 				A2000213 /* LibraryBCD.swift */,
 				A2007C01 /* GPUCards.swift */,
+				A2007D02 /* LaunchCheckView.swift */,
+				A2007D01 /* LaunchCheck.swift */,
 				A2000914 /* LibraryPrefs.swift */,
 				A2000990 /* GameIniFiles.swift */,
 				A2000991 /* GameDllOverrides.swift */,
@@ -986,6 +995,7 @@
 				A1000921 /* ExternalStorage.swift in Sources */,
 				A1000710 /* SavesAndShortcuts.swift in Sources */,
 				A1000711 /* WineMono.swift in Sources */,
+				A1007D03 /* WineGecko.swift in Sources */,
 				A1000E01 /* EpicLibrary.swift in Sources */,
 				A1000E02 /* EpicGames.swift in Sources */,
 				A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */,
@@ -1044,6 +1054,8 @@
 				A1000202 /* FPSOverlay.swift in Sources */,
 				A1000213 /* LibraryBCD.swift in Sources */,
 				A1007C01 /* GPUCards.swift in Sources */,
+				A1007D02 /* LaunchCheckView.swift in Sources */,
+				A1007D01 /* LaunchCheck.swift in Sources */,
 				A1000914 /* LibraryPrefs.swift in Sources */,
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1000991 /* GameDllOverrides.swift in Sources */,

@@ -1,0 +1,83 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index a52070a..fcc0d9e 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -102,6 +102,62 @@ extern void ios_frame_limiter(unsigned long long ns);
+  * chunk_ongoing counter is PE-side emulated state. */
+ static _Atomic uint64_t g_madeira_cmdbuf_inflight;
+ extern int ios_frame_stats_on;
++
++/* Madeira: no Metal work while the app is not active (madeira.cfg
++ * background-pause, default 1). iOS refuses GPU work from an app in the
++ * background ("Insufficient Permission (to submit GPU work from background)",
++ * MTLCommandBufferErrorDomain code 7): every frame fails from then on and the
++ * game can lose its device, so a game switched away from (a call, a text, the
++ * app switcher) came back broken. Its threads wait here instead, at the start
++ * of a frame (nextDrawable) and at every commit, from WillResignActive until
++ * DidBecomeActive: the game stands still and carries on where it was. The
++ * OpenGL path does the same (app/Madeira/Winios/WiniosGL.m). The main thread
++ * never waits: it delivers the notification that ends the wait. */
++#if TARGET_OS_IOS
++#include <pthread.h>
++static pthread_mutex_t g_bg_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t g_bg_cond = PTHREAD_COND_INITIALIZER;
++static int g_bg_inactive;
++static int g_bg_on;
++
++static void madeira_bg_set(int inactive) {
++  pthread_mutex_lock(&g_bg_lock);
++  g_bg_inactive = inactive;
++  pthread_cond_broadcast(&g_bg_cond);
++  pthread_mutex_unlock(&g_bg_lock);
++}
++
++static void madeira_bg_wait(const char *where) {
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    g_bg_on = madeira_cfg_bool("background-pause", 1);
++    fprintf(stderr, "[wmt-bg] pause in the background: %s\n", g_bg_on ? "on" : "off (background-pause = 0)");
++    if (!g_bg_on)
++      return;
++    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
++    [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil
++                usingBlock:^(NSNotification *n) { madeira_bg_set(1); }];
++    [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil
++                usingBlock:^(NSNotification *n) { madeira_bg_set(0); }];
++  });
++  if (!g_bg_on || [NSThread isMainThread])
++    return;
++  pthread_mutex_lock(&g_bg_lock);
++  if (g_bg_inactive) {
++    struct timespec t0, t1;
++    clock_gettime(CLOCK_MONOTONIC, &t0);
++    fprintf(stderr, "[wmt-bg] app inactive: %s waits until Madeira is active again\n", where);
++    while (g_bg_inactive)
++      pthread_cond_wait(&g_bg_cond, &g_bg_lock);
++    clock_gettime(CLOCK_MONOTONIC, &t1);
++    fprintf(stderr, "[wmt-bg] app active: %s resumes after %.1f s\n", where,
++            (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
++  }
++  pthread_mutex_unlock(&g_bg_lock);
++}
++#else
++static inline void madeira_bg_wait(const char *where) { (void)where; }
++#endif
+ extern void ios_frame_pass(unsigned kind, unsigned loads, unsigned stores, unsigned clears);
+ 
+ /* Whether THIS caller's [frame] hooks run: only while the instrument is on
+@@ -574,6 +630,7 @@ static void madeira_gpu_meter_attach(id<MTLCommandBuffer> cmdbuf) {
+ static NTSTATUS
+ _MTLCommandBuffer_commit(void *obj) {
+   struct unixcall_generic_obj_noret *params = obj;
++  madeira_bg_wait("commit");
+   if (wmtr_enabled()) {
+     /* Push guest shadows BEFORE the GPU reads them. The app writes into buffer
+      * contents with no call of its own, so this is the last point at which the
+@@ -3885,6 +3942,7 @@ _MetalDrawable_texture(void *obj) {
+ static NTSTATUS
+ _MetalLayer_nextDrawable(void *obj) {
+   struct unixcall_generic_obj_obj_ret *params = obj;
++  madeira_bg_wait("nextDrawable");
+   if (wmtr_enabled()) {
+     struct rm_ret_drawable r;
+     params->ret = 0;

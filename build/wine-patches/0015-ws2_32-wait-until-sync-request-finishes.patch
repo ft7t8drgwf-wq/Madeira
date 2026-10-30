@@ -1,0 +1,62 @@
+iOS-Madeira: a synchronous recv()/send() waits until its request has really
+finished, instead of failing with WSA_IO_PENDING (997) when the per-thread
+sync event fired early. Seen as the Wine Gecko download stopping at 8%
+("HttpProtocol_on_error Not handling error 997"). Log tag [ws2-sync].
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index f5580cab4e3..74d0506dd96 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -723,6 +723,34 @@ static DWORD wait_event_alertable( HANDLE event )
+     return ret;
+ }
+ 
++/* iOS-Madeira: finish a synchronous (non-overlapped) socket request.
++ *
++ * The callers read piosb->Status as soon as the per-thread sync event was
++ * signalled. A Gecko download (urlmon over wininet) was seen to stop at 8%
++ * with "HttpProtocol_on_error Not handling error 997": a recv() failed with
++ * WSA_IO_PENDING, which is what a still-pending status maps to, so the event
++ * fired before this request had finished (a stale or spurious signal). Wait
++ * again until the status leaves STATUS_PENDING. The event is reset before the
++ * status is read again, and later waits are bounded (50 ms), so a completion
++ * whose signal came before its status write is still seen. */
++static DWORD wait_sync_request( HANDLE event, IO_STATUS_BLOCK *piosb, BOOL alertable )
++{
++    volatile NTSTATUS *status = &piosb->Status;
++    unsigned int rounds = 0;
++    DWORD ret;
++
++    ret = alertable ? wait_event_alertable( event ) : WaitForSingleObject( event, INFINITE );
++    while (ret != WAIT_FAILED && *status == STATUS_PENDING)
++    {
++        if (!rounds++) ERR( "[ws2-sync] event signalled while the request is still pending, waiting again\n" );
++        ResetEvent( event );
++        if (*status != STATUS_PENDING) break;
++        ret = WaitForSingleObjectEx( event, 50, alertable );
++    }
++    if (rounds) ERR( "[ws2-sync] request finished after %u extra wait(s), status %#lx\n", rounds, (long)*status );
++    return ret;
++}
++
+ BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )
+ {
+     switch (reason)
+@@ -1121,7 +1149,7 @@ static int WS2_recv_base( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *
+                                     IOCTL_AFD_WINE_RECVMSG, &params, sizeof(params), NULL, 0 );
+     if (status == STATUS_PENDING && !overlapped)
+     {
+-        if (wait_event_alertable( event ) == WAIT_FAILED)
++        if (wait_sync_request( event, piosb, TRUE ) == WAIT_FAILED)
+             return -1;
+         status = piosb->Status;
+     }
+@@ -1188,7 +1216,7 @@ static int WS2_sendto( SOCKET s, WSABUF *buffers, DWORD buffer_count, DWORD *ret
+                                     IOCTL_AFD_WINE_SENDMSG, &params, sizeof(params), NULL, 0 );
+     if (status == STATUS_PENDING && !overlapped)
+     {
+-        if (WaitForSingleObject( event, INFINITE ) == WAIT_FAILED)
++        if (wait_sync_request( event, piosb, FALSE ) == WAIT_FAILED)
+             return -1;
+         status = piosb->Status;
+     }

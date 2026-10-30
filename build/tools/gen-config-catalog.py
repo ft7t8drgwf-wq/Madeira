@@ -806,6 +806,14 @@ OVERLAY = {
                         "CPU; e.g. 1500 keeps a 60 fps menu near 30-40 fps. [fps-gov] lines every 10 s. "
                         "env.MADEIRA_FPS_GOV_MIN / _MAX (20 / 60) bound the cap, _BAND_MJ (1500) is the energy the "
                         "average may drift before it moves. Needs the [xp] sampler. Read at session start."},
+    # winemetal reads it (dxmt, build/dxmt-patches/0004-pause-metal-in-background.patch).
+    "background-pause": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Pause Metal games in the background",
+                "kind": "bool", "default": "1", "sources": ["build/dxmt-patches/0004-pause-metal-in-background.patch"],
+                "note": "On by default. While Madeira is not the active app (app switcher, a call, Control Center), "
+                        "a Direct3D 9/10/11/12 game's threads wait at their next frame or command buffer instead of "
+                        "sending GPU work iOS refuses in the background, so the game carries on where it was when "
+                        "you come back. [wmt-bg] lines in the log. 0: the game keeps submitting, as before. Read once "
+                        "per session."},
     # madeira-bcd: winemetal reads it (dxmt, build/dxmt-patches/0002-framegen-d3d12-pacing.patch; Tomba247's RDR2 work).
     "env.MADEIRA_FRAMEGEN_STALL_MS": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Frame generation: stall threshold (ms)",
                 "kind": "int", "default": "125", "sources": ["build/dxmt-patches/0002-framegen-d3d12-pacing.patch"],
