@@ -283,6 +283,9 @@ struct LibraryEntry: Codable, Identifiable {
     /// A GOG game (GOGLibrary.swift): its product id. `relativePath` is then its
     /// program inside C:\GOG Games, from the build's goggame-<id>.info.
     var gogProductID: String?
+    /// An itch.io game (ItchLibrary.swift): its game id. `relativePath` is then its
+    /// program inside C:\itch.
+    var itchGameID: Int?
     /// An Epic Games game (EpicLibrary.swift): its app name. `relativePath` is then
     /// its program inside C:\Program Files\Epic Games, and each start adds Epic's
     /// sign-in arguments (EpicLibrary.launchArguments) for that launch only.
@@ -355,7 +358,8 @@ struct LibraryEntry: Codable, Identifiable {
     /// The program's own arguments: Steam's launch configuration for "The game"
     /// followed by the entry's Launch arguments (Steam's own launch options, such as
     /// Garry's Mod's -nochromium), else the entry's Launch arguments; an Epic game's
-    /// sign-in arguments come first while its launch is being prepared.
+    /// sign-in arguments (and Final Fantasy XIV's session) come first while its launch
+    /// is being prepared.
     var programArguments: String {
         let own: String
         if startsSteamGameDirectly {
@@ -364,11 +368,11 @@ struct LibraryEntry: Codable, Identifiable {
         } else {
             own = arguments
         }
-        guard epicAppName != nil, let transient = Self.transientArguments(for: id), !transient.isEmpty else { return own }
+        guard let transient = Self.transientArguments(for: id), !transient.isEmpty else { return own }
         return own.isEmpty ? transient : transient + " " + own
     }
     /// Arguments for the launch being prepared only (an Epic game's one-use sign-in
-    /// code): never part of the saved entry. ContentView sets them before the launch;
+    /// code, Final Fantasy XIV's session): never part of the saved entry. ContentView sets them before the launch;
     /// applyEnvironment clears them once the bridge's command is exported.
     private static let transientLock = NSLock()
     private static var transient: [UUID: String] = [:]
@@ -925,6 +929,7 @@ final class LibraryModel: ObservableObject {
         if let i = next.firstIndex(where: { $0.id == entry.id }) ??
             next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) ??
             next.firstIndex(where: { entry.gogProductID != nil && $0.gogProductID == entry.gogProductID }) ??
+            next.firstIndex(where: { entry.itchGameID != nil && $0.itchGameID == entry.itchGameID }) ??
             next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) {
             // A details sheet may predate an asynchronous metadata refresh.
             if (next[i].metadataChecked ?? .distantPast) > (entry.metadataChecked ?? .distantPast) {
@@ -1000,7 +1005,7 @@ final class LibraryModel: ObservableObject {
         save(entry)
     }
     /// GOG's cover art as a JPEG of at most 1200 pixels, or nil.
-    private static func gogCover(_ url: URL) async -> Data? {
+    static func gogCover(_ url: URL) async -> Data? {
         guard url.scheme == "https", let (data, response) = try? await URLSession.shared.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200, data.count < 20_000_000,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -1014,6 +1019,37 @@ final class LibraryModel: ObservableObject {
     func removeGOG(productID: String) {
         guard entries.contains(where: { $0.gogProductID == productID }) else { return }
         persist(entries.filter { $0.gogProductID != productID })
+    }
+    /// An itch.io download finished (ItchLibrary): the game gets its library entry, or an
+    /// existing one follows the new program and keeps its title, artwork and settings.
+    /// A new entry gets itch.io's cover art as its cover image.
+    @MainActor
+    func upsertItch(_ game: ItchInstalledGame, cover: URL?) async {
+        guard !readOnly else { return }
+        var entry = entries.first { $0.itchGameID == game.gameID } ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        entry.itchGameID = game.gameID
+        entry.relativePath = game.programPath
+        entry.folderBytes = game.installBytes
+        let program = Self.drive.appendingPathComponent(game.programPath)
+        if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI ?? entry.graphicsAPI
+        }
+        if entry.coverFile == nil, let cover, let jpeg = await Self.gogCover(cover) {
+            let dir = Self.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let name = entry.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                entry.coverFile = name
+            }
+        }
+        entry.metadataChecked = nil
+        save(entry)
+    }
+    /// An itch.io game was uninstalled: its entry goes with its files.
+    func removeItch(gameID: Int) {
+        guard entries.contains(where: { $0.itchGameID == gameID }) else { return }
+        persist(entries.filter { $0.itchGameID != gameID })
     }
     /// An Epic download finished (EpicLibrary): the game gets its library entry, or an
     /// existing one follows the new build's program and keeps its title, artwork and
@@ -2936,7 +2972,7 @@ struct LibraryView: View {
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
-        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
+        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && $0.itchGameID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
         if sort == "added" { return visible.reversed() }
         return visible.sorted {
             if sort == "played", $0.lastPlayed != $1.lastPlayed { return ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
@@ -3084,8 +3120,12 @@ struct LibraryView: View {
             if GOGLibrary.enabled, settingsShow("GOG", "GOG Galaxy", "sign in", "account") {
                 GOGSettingsSection(open: { settingsSheet = $0 })
             }
+            if ItchLibrary.enabled, settingsShow("itch.io", "itch", "API key", "sign in", "account") { ItchSettingsSection() }
             if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
                 EpicSettingsSection(open: { settingsSheet = $0 })
+            }
+            if settingsShow("launcher", "Ubisoft", "Uplay", "Battle.net", "Blizzard", "Rockstar", "download", "sign in") {
+                LauncherSupportSettingsSection()
             }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
@@ -3215,7 +3255,7 @@ struct LibraryView: View {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
-                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil }).isEmpty {
+                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && $0.itchGameID == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
@@ -3224,6 +3264,10 @@ struct LibraryView: View {
                 // Game details page, the others their download sheet.
                 if GOGLibrary.enabled {
                     GOGGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
+                }
+                // The account's itch.io games (ItchGames.swift), the same way.
+                if ItchLibrary.enabled {
+                    ItchGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 // The account's Epic Games games (EpicGames.swift): installed ones open their
                 // Game details page, the others their download sheet.
@@ -3535,6 +3579,15 @@ struct LibraryDetail: View {
                 error = "This GOG game is no longer installed. Install it again from the GOG section."; return
             }
         }
+        // An itch.io game starts once its files are complete (ItchLibrary).
+        if let game = entry.itchGameID {
+            if ItchLibrary.shared.downloads[game] != nil {
+                error = "This game's download has not finished. Resume it and wait for it to complete before playing."; return
+            }
+            if ItchLibrary.shared.installed[game] == nil {
+                error = "This itch.io game is no longer installed. Install it again from the itch.io section."; return
+            }
+        }
         // An Epic game starts once its files are complete (EpicLibrary).
         if let app = entry.epicAppName {
             if EpicLibrary.shared.downloads[app] != nil {
@@ -3577,7 +3630,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, gog, library, iniFiles, dllOverrides, advanced
+        case display, controls, launch, compatibility, steam, cloud, gog, itch, library, iniFiles, dllOverrides, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3587,6 +3640,7 @@ struct LibraryDetail: View {
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
             case .gog: return "GOG"
+            case .itch: return "itch.io"
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
             case .dllOverrides: return "DLL overrides"
@@ -3602,6 +3656,7 @@ struct LibraryDetail: View {
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
             case .gog: return "bag"
+            case .itch: return "bag"
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
             case .dllOverrides: return "puzzlepiece.extension"
@@ -3614,7 +3669,7 @@ struct LibraryDetail: View {
     /// or library details; a Steam game has its Steam pages.
     private var pageGroups: [[Page]] {
         let launch = entry.usesLaunchOptions || entry.desktop != true
-        let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID == nil ? [] : [.gog])
+        let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch] : [])
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
         let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .advanced]
@@ -3648,6 +3703,7 @@ struct LibraryDetail: View {
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
             case .gog: GOGEntrySection(entry: $entry) { leaving = true; dismiss() }
+            case .itch: ItchEntrySection(entry: $entry) { leaving = true; dismiss() }
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
             case .dllOverrides: GameDllOverridesSection(windowsPath: entry.windowsPath, gameFolder: overridesGameFolder) { reloadBCD() }

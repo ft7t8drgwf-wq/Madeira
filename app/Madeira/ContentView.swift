@@ -1277,6 +1277,8 @@ struct ContentView: View {
         return false
     }
     @State private var devSheet: SettingsSheet?
+    /// Final Fantasy XIV's sign-in before its Play (FFXIVLaunch.swift).
+    @State private var ffxivSignIn: LibraryEntry?
     @StateObject private var logStore = LogStore.shared
     @StateObject private var jitCoordinator = JITCoordinator.shared
     @State private var jitStatus: JITStatus = .unknown
@@ -1347,6 +1349,9 @@ struct ContentView: View {
                 Button("Later", role: .cancel) { library.jitNotice = nil }
             } message: { Text(library.jitNotice ?? "") }
             .sheet(isPresented: $jitCoordinator.showSetup) { JITSetupView() }
+            .sheet(item: $ffxivSignIn) { entry in
+                FFXIVSignInView(entry: entry) { startLibraryEntry(entry, ffxivReady: true) }
+            }
             // A Steam game's saves may not be the latest (cloudClear).
             .alert(library.cloudNotice?.title ?? "Steam Cloud", isPresented: Binding(get: { library.cloudNotice != nil },
                                                                                      set: { if !$0 { library.cloudNotice = nil } })) {
@@ -2603,9 +2608,15 @@ struct ContentView: View {
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
     /// An Epic game first gets Epic's sign-in arguments with a fresh one-use code
     /// (EpicLibrary.launchArguments), for this launch only.
-    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false) {
+    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false, ffxivReady: Bool = false) {
         guard !EpicCloud.shared.isBusy else {
             library.error = "Wait for Epic Cloud save sync to finish before starting a game."
+            return
+        }
+        // Final Fantasy XIV gets its Square Enix session the same way (FFXIVLaunch.swift):
+        // the sign-in sheet starts the entry again once the session's arguments are set.
+        if !ffxivReady, FFXIVLaunch.installRoot(entry) != nil {
+            ffxivSignIn = entry
             return
         }
         if let app = entry.epicAppName, !epicReady {
@@ -2621,6 +2632,9 @@ struct ContentView: View {
             }
             return
         }
+        // Ubisoft games look for Uplay.exe and the client's registry values, whoever starts
+        // them; nothing happens without Ubisoft Connect installed (LauncherSupport.swift).
+        LauncherSupport.repairUbisoft()
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
@@ -2705,6 +2719,7 @@ struct ContentView: View {
         // before Valve's client signs in with the same account (SteamOwnedLibrary).
         SteamOwnedLibrary.shared.sessionChanged(active: true)
         GOGLibrary.shared.sessionChanged(active: true)
+        ItchLibrary.shared.sessionChanged(active: true)
         EpicLibrary.shared.sessionChanged(active: true)
         /* ml1095: one config file. Written once from any legacy madeira-*.txt. */
         MadeiraConfig.migrateLegacy { self.logStore.log($0) }
@@ -3489,6 +3504,8 @@ struct ContentView: View {
             try profile?.validate()
             guard SteamSignIn.isSignedIn else { throw DockError.message("Sign in to Steam in Madeira before starting Dock.") }
         } catch { fail(error); return }
+        // A Ubisoft game bought on Steam starts Ubisoft Connect for its licence (LauncherSupport.swift).
+        LauncherSupport.repairUbisoft()
         // Only one sign-in of the account may be online: the app's own Steam connection
         // (library, playtime, downloads) logs off and its socket closes before the sign-in
         // is handed to Valve's client, and it stays off until the Dock session has ended
