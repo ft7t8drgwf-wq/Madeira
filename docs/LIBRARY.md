@@ -318,6 +318,15 @@ steamservice, the WoW64 CPU fallback, FEX's code-buffer mprotect note) show in
 grey as "harmless: …" instead of as errors; out of memory (c0000017) never does
 (`tests/host/check-harmless-warnings.py`).
 
+Leaving Madeira during a session (app switcher, a call, Control Center) pauses
+the game: iOS refuses GPU work from an app that is not active, so a game kept
+rendering into errors and could lose its device. OpenGL presents wait in
+`WiniosGL.m`; Direct3D 9 to 12 (winemetal) wait at their next frame and at
+every command buffer commit (`build/dxmt-patches/0004-pause-metal-in-background.patch`,
+`[wmt-bg]` lines in the log), from WillResignActive until DidBecomeActive, and
+carry on where they were. madeira.cfg `background-pause = 0` turns the Metal
+wait off (`tests/host/check-background-pause.py`).
+
 The small menu button (drag to move; it fades after three seconds) opens the
 in-game menu:
 
