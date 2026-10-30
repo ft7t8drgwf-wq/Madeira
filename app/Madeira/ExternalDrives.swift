@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import BackgroundTasks
+import AppIntents
 
 /// Folders the user picked outside the app, usually on a USB or SSD drive.
 ///
@@ -459,7 +460,7 @@ struct ExternalDrivesSection: View {
             }
             if let error { Text(error).foregroundStyle(.red) }
         } header: { Text("External drives") } footer: {
-            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive. If Open does nothing in the picker, drag the folder from the Files app onto Add drive or folder instead.")
+            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive. If Open does nothing in the picker, drag the folder from the Files app onto Add drive or folder, or use the Shortcuts app's Add Drive Folder to Madeira action.")
         }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
@@ -602,6 +603,53 @@ struct ExternalDrivesSection: View {
                 done(url)
             }
         }
+    }
+}
+
+/// Shortcuts › Add Drive Folder to Madeira: a third way to hand Madeira a folder.
+/// On a copy signed with a different App ID neither the picker's Open button nor a
+/// drop from Files gets the folder through (builds 47 to 50), so here the Shortcuts
+/// app picks it in its own process and passes it in. Only the folder itself is
+/// added; a copy Shortcuts made inside Madeira's own storage is refused.
+struct AddDriveFolderIntent: AppIntent {
+    static var title: LocalizedStringResource = "Add Drive Folder to Madeira"
+    static var description = IntentDescription("Adds a folder, usually on a USB drive, to Madeira's External drives.")
+    static var openAppWhenRun = true
+
+    @Parameter(title: "Folder", supportedContentTypes: [.folder])
+    var folder: IntentFile
+
+    struct Failure: Error, CustomLocalizedStringResourceConvertible {
+        let message: String
+        var localizedStringResource: LocalizedStringResource { "\(message)" }
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard let url = folder.fileURL else {
+            LogStore.shared.log("[external] shortcut gave no folder URL (name \(folder.filename))")
+            throw Failure(message: "Shortcuts did not pass Madeira the folder itself.")
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let home = URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path
+        let copied = url.resolvingSymlinksInPath().path.hasPrefix(home + "/")
+        LogStore.shared.log("[external] shortcut gave a folder: scoped=\(scoped ? 1 : 0) copy=\(copied ? 1 : 0)")
+        // A copy would fill this device and is not the drive: only the folder itself will do.
+        guard !copied else { throw Failure(message: "Shortcuts passed a copy of the folder, not the folder on the drive.") }
+        do { try ExternalDrives.shared.add(url) } catch {
+            LogStore.shared.log("[external] shortcut folder not added: \(error.localizedDescription)")
+            throw Failure(message: error.localizedDescription)
+        }
+        SteamGamesModel.shared.refresh()
+        return .result(dialog: "Added \(url.lastPathComponent) to Madeira's External drives.")
+    }
+}
+
+struct MadeiraShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(intent: AddDriveFolderIntent(), phrases: ["Add a drive folder to \(.applicationName)"],
+                    shortTitle: "Add Drive Folder", systemImageName: "externaldrive")
     }
 }
 
