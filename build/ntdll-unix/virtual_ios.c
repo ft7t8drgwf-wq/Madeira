@@ -7762,6 +7762,7 @@ struct file_view
     unsigned int  ios_flags;     /* IOS_VIEW_* */
 };
 #define IOS_VIEW_QUARANTINED 0x4   /* a dead thread's stack held by the stack quarantine */
+#define IOS_VIEW_X64_PLAIN   0x8   /* [x64-rwx]: anonymous RWX memory kept plain read/write for good */
 
 /* per-page protection flags */
 #define VPROT_READ       0x01
@@ -12923,6 +12924,8 @@ static void clear_arm64ec_range( const void *addr, size_t size );
  * are cleared so a reused range starts with a clean call-routing slate. */
 static void ios_sc_grants_owner_died( void *peb );
 
+static void ios_x64_rwx_plain_forget( void *peb );
+
 void ios_jit_reclaim_process( void *peb )
 {
     size_t total = 0;
@@ -12932,6 +12935,7 @@ void ios_jit_reclaim_process( void *peb )
 
     /* madeira-bcd: its Social Club reservations go when the next helper asks */
     ios_sc_grants_owner_died( peb );
+    ios_x64_rwx_plain_forget( peb );   /* [x64-rwx] */
     if (!peb || !rx_base) return;
 
     /* The alias-push callback lives in the emulator of the LAST process that
@@ -17096,6 +17100,157 @@ static int ios_wow_rwx_view_ok( const struct file_view *view )
     return 1;
 }
 
+/* [x64-rwx]: anonymous RWX memory in a 64-bit Java process, code cache included.
+ *
+ * ml1279 above for a 64-bit pseudo-process that runs HotSpot. Project Zomboid
+ * (Zulu 25, C2 only, build 47, 2026-10-30) stalled for a minute while loading:
+ * 4.35 M emulated stores into the JVM code cache, which went through the JIT
+ * pool because ios_guest_anon_rwx_view_ok refuses it twice. HotSpot reserves
+ * it PAGE_READWRITE and commits it PAGE_EXECUTE_READWRITE later (so it was not
+ * ALLOCATED RWX), and its size is a 64 KB multiple. The host never fetches
+ * those bytes: FEX translates them and tracks SMC through
+ * NtProtectVirtualMemory, so as plain memory a page is written freely until
+ * FEX arms it, then faults once and FEX disarms it, as in a 32-bit window.
+ *
+ * Automatic per pseudo-process: on once that process maps jvm.dll
+ * (ios_x64_note_image), keyed by PEB and dropped when it exits.
+ * MADEIRA_X64_RWX_PLAIN=0 never turns it on, =1 turns it on in every 64-bit
+ * process. Same exclusions as ml1279 (EC_CODE requests, the pool, existing
+ * aliases, images, file mappings, ARM64EC and system views) plus the 64 KB
+ * floor of the data-heap rule (native thunk pages).
+ *
+ * The decision is per view and permanent (IOS_VIEW_X64_PLAIN): a page must not
+ * move to the pool later, see the data-heap rule. A marked view stays plain
+ * whichever thread asks, so a protect from another pseudo-process cannot copy
+ * it into the pool. */
+#define IOS_X64_RWX_PLAIN_MAX 16
+static void *ios_x64_rwx_plain_pebs[IOS_X64_RWX_PLAIN_MAX];
+
+static int ios_x64_rwx_plain_mode(void)
+{
+    static int cached = -2;
+    if (cached == -2)
+    {
+        const char *s = getenv( "MADEIRA_X64_RWX_PLAIN" );
+        cached = !s || !*s ? -1 : (*s == '1') ? 1 : 0;
+        dprintf( 2, "[x64-rwx] MADEIRA_X64_RWX_PLAIN=%s -> 64-bit guest RWX memory is %s\n",
+                 s ? s : "(unset)",
+                 cached == 1 ? "plain read/write in every 64-bit process" :
+                 cached == 0 ? "pool-aliased (stores emulated)" :
+                               "plain read/write in a process once jvm.dll is mapped there" );
+    }
+    return cached;
+}
+
+/* Lock-free reads, like the window lookups on this path. */
+static int ios_x64_rwx_plain_current(void)
+{
+    int mode = ios_x64_rwx_plain_mode(), i;
+    void *peb;
+
+    if (mode >= 0) return mode;   /* 0 never, 1 always */
+    if (!(peb = ios_jit_current_peb())) return 0;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+        if (__atomic_load_n( &ios_x64_rwx_plain_pebs[i], __ATOMIC_ACQUIRE ) == peb) return 1;
+    return 0;
+}
+
+static int ios_image_name_is( const UNICODE_STRING *nt_name, const char *want )
+{
+    size_t n = strlen( want ), len, i;
+    const WCHAR *name;
+
+    if (!nt_name || !nt_name->Buffer) return 0;
+    len = nt_name->Length / sizeof(WCHAR);
+    if (len < n) return 0;
+    name = nt_name->Buffer + len - n;
+    if (len > n && name[-1] != '\\' && name[-1] != '/') return 0;
+    for (i = 0; i < n; i++)
+    {
+        WCHAR c = name[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c != (WCHAR)want[i]) return 0;
+    }
+    return 1;
+}
+
+/* Called for every image mapping: notice HotSpot in a 64-bit process. */
+static void ios_x64_note_image( const void *base, const UNICODE_STRING *nt_name )
+{
+    void *peb, *none;
+    int i;
+
+    if (ios_wow_base() || ios_wow_in_window( base )) return;
+    if (!ios_image_name_is( nt_name, "jvm.dll" )) return;
+    if (!(peb = ios_jit_current_peb())) return;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+        if (__atomic_load_n( &ios_x64_rwx_plain_pebs[i], __ATOMIC_ACQUIRE ) == peb) return;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+    {
+        none = NULL;
+        if (__atomic_compare_exchange_n( &ios_x64_rwx_plain_pebs[i], &none, peb, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+            break;
+    }
+    dprintf( 2, "[x64-rwx] jvm.dll mapped at %p in peb=%p: its RWX memory is %s\n", base, peb,
+             i == IOS_X64_RWX_PLAIN_MAX ? "still pool-aliased (table full)" :
+             ios_x64_rwx_plain_mode() ? "plain read/write from now on"
+                                      : "still pool-aliased (MADEIRA_X64_RWX_PLAIN=0)" );
+}
+
+static void ios_x64_rwx_plain_forget( void *peb )
+{
+    int i;
+
+    if (!peb) return;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+    {
+        void *want = peb;
+        __atomic_compare_exchange_n( &ios_x64_rwx_plain_pebs[i], &want, NULL, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE );
+    }
+}
+
+/* Every view the host-page rounded range touches is already plain, or none is
+ * and the current process qualifies: then they are marked plain for good. A
+ * mix keeps the pool path, as before. */
+static int ios_x64_rwx_is_host_data( uintptr_t b, uintptr_t e )
+{
+    uintptr_t a;
+    int marked = 0, unmarked = 0;
+
+    if (ios_wow_base() || ios_wow_in_window( (const void *)b )) return 0;
+    for (a = b; a < e; )
+    {
+        struct file_view *view = find_view( (const void *)a, 1 );
+        if (!view) { a = (a + 0x1000) & ~(uintptr_t)0xfff; continue; }   /* rounding gap */
+        if (view->ios_flags & IOS_VIEW_X64_PLAIN) marked = 1;
+        else if (!ios_wow_rwx_view_ok( view ) || view->size < 0x10000) return 0;
+        else unmarked = 1;
+        a = (uintptr_t)view->base + view->size;
+    }
+    if (marked) return !unmarked;
+    if (!unmarked || !ios_x64_rwx_plain_current()) return 0;
+    for (a = b; a < e; )
+    {
+        struct file_view *view = find_view( (const void *)a, 1 );
+        if (!view) { a = (a + 0x1000) & ~(uintptr_t)0xfff; continue; }
+        if (!(view->ios_flags & IOS_VIEW_X64_PLAIN))
+        {
+            static unsigned x64_views;
+            view->ios_flags |= IOS_VIEW_X64_PLAIN;
+            if (x64_views++ < 32 && !ios_in_mach_exc)
+                dprintf( 2, "[x64-rwx] view %p+0x%lx (allocated %c%c%c) is plain read/write from now on\n",
+                         view->base, (unsigned long)view->size,
+                         (view->protect & VPROT_READ)  ? 'r' : '-',
+                         (view->protect & VPROT_WRITE) ? 'w' : '-',
+                         (view->protect & VPROT_EXEC)  ? 'x' : '-' );
+        }
+        a = (uintptr_t)view->base + view->size;
+    }
+    return 1;
+}
+
 /* The range is host-page rounded (16 KB) and can run past the end of a guest
  * allocation (0x41000 -> 0x44000), so every view it touches must qualify. */
 static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
@@ -17125,6 +17280,13 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
         if (any == 1) return 1;
         any = 0;
     }
+
+    /* [x64-rwx]: before the data-heap rule, so a marked view always answers here */
+    if (!ios_alloc_ec_code && e > b &&
+        !(rx && e > rx && b < rx + ios_jit_pool_size_global) &&
+        !ios_jit_anon_alias_find_cover( (void *)base, size, &cov_rw, &cov_rx ) &&
+        ios_x64_rwx_is_host_data( b, e ))
+        return 1;
 
     if (!ios_guest_rwx_data_enabled() || ios_alloc_ec_code || !arm64ec_view) return 0;
     if (e <= b) return 0;
@@ -23664,6 +23826,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
 #ifdef WINE_IOS
     ios_wow_note_image( view->base, nt_name );   /* ml1282 */
+    ios_x64_note_image( view->base, nt_name );   /* [x64-rwx] */
 #endif
 
     TRACE_(module)( "mapping PE file %s at %p-%p\n", debugstr_us(nt_name), ptr, ptr + total_size );
