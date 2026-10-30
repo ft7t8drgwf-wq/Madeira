@@ -19,10 +19,13 @@ enum SteamSignIn {
 
     /// `env.NAME` from madeira.cfg, then the process environment. "0" is off.
     static func flag(_ name: String, default fallback: Bool) -> Bool {
-        guard let value = MadeiraConfig.get("env." + name) ?? ProcessInfo.processInfo.environment[name] else {
-            return fallback
-        }
+        guard let value = value(name) else { return fallback }
         return value.trimmingCharacters(in: .whitespaces) != "0"
+    }
+
+    /// `env.NAME` from madeira.cfg, then the process environment; nil when neither sets it.
+    static func value(_ name: String) -> String? {
+        MadeiraConfig.get("env." + name) ?? ProcessInfo.processInfo.environment[name]
     }
 
     /// `env.MADEIRA_STEAM_SIGNIN = 0` hides the sign-in button.

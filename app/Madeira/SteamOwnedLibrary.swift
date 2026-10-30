@@ -9,6 +9,7 @@
 
 import CryptoKit
 import Foundation
+import Network
 import UIKit
 
 // The account's owned Steam games and their downloads (docs/STEAM_LIBRARY.md).
@@ -1033,11 +1034,53 @@ final class SteamOwnedLibrary: ObservableObject {
         cloudWaitingFor = appID
         defer { cloudWaitingFor = nil }
         for _ in 0..<600 where cloudBusy.contains(appID) { try? await Task.sleep(nanoseconds: 200_000_000) }
+        await Self.waitForNetwork(appID)
         cloud[appID]?.problem = nil      // a transfer that stops again says so again
         await syncCloud(appID)
         let hold = cloudHold(appID)
         SteamLog.event("[steam-cloud] app=\(appID) before-play sync result=\(hold.map { "\($0)" } ?? "clear")")
         return hold == .stale ? nil : hold
+    }
+
+    /// The network can be off for a moment when Play is pressed (for example while a shortcut
+    /// that enabled JIT puts Cellular Data back): wait for it rather than fail the check.
+    /// `env.MADEIRA_STEAM_CLOUD_NETWORK_WAIT` is the longest wait in seconds (default 15, 0 off).
+    /// Only a network lost in the last 2 minutes is waited for: a device that has been offline
+    /// longer (Airplane Mode, offline play) gets the check's answer at once, as before.
+    private static let networkPath: NWPathMonitor = {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { networkLoss.update(up: $0.status == .satisfied) }
+        monitor.start(queue: DispatchQueue(label: "madeira.steam-cloud.path"))
+        return monitor
+    }()
+    /// When the usable path last went away; nil while it is up, or when it never was up.
+    private final class NetworkLoss: @unchecked Sendable {
+        private let lock = NSLock()
+        private var up = false, lost: Date?
+        func update(up now: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            if now { lost = nil } else if up { lost = Date() }
+            up = now
+        }
+        var since: Date? { lock.lock(); defer { lock.unlock() }; return lost }
+    }
+    private nonisolated static let networkLoss = NetworkLoss()
+    private static let recentLoss: TimeInterval = 120
+    static func startNetworkMonitor() { _ = networkPath }
+    private static func waitForNetwork(_ appID: Int) async {
+        let limit = TimeInterval(Int(SteamSignIn.value("MADEIRA_STEAM_CLOUD_NETWORK_WAIT")?.trimmingCharacters(in: .whitespaces) ?? "") ?? 15)
+        guard limit > 0, networkPath.currentPath.status != .satisfied else { return }
+        guard let lost = networkLoss.since, Date().timeIntervalSince(lost) < recentLoss else {
+            SteamLog.event("[steam-cloud] app=\(appID) no network before the check, offline for a while: not waiting")
+            return
+        }
+        SteamLog.event("[steam-cloud] app=\(appID) no network before the check, waiting up to \(Int(limit)) s")
+        let start = Date()
+        while networkPath.currentPath.status != .satisfied, Date().timeIntervalSince(start) < limit {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let up = networkPath.currentPath.status == .satisfied
+        SteamLog.event("[steam-cloud] app=\(appID) network \(up ? "back" : "still down") after \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
     }
 
     // MARK: Upload and quit

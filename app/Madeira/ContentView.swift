@@ -1384,6 +1384,7 @@ struct ContentView: View {
                 logStore.log("[build] \(BuildStamp.text)")
                 DeviceDiagnostics.logStartup()
                 DockOffline.begin()
+                SteamOwnedLibrary.startNetworkMonitor()
                 FrontendChoice.logStartup()
                 DeviceLoadDiagnostics.start()
                 // Madeira Dock: an unconsumed sign-in transfer from an earlier run goes.

@@ -47,7 +47,10 @@ turns this off):
 - In sync, checked in the last 10 minutes: the game starts.
 - Not checked yet in this app run (Play pressed before the start-up sync got
   to the game), or checked longer ago: the saves are synced first, then the
-  game starts.
+  game starts. If the network went away in the last 2 minutes (for example
+  while a JIT shortcut puts Cellular Data back), that sync first waits up to
+  15 s for it to return (`env.MADEIRA_STEAM_CLOUD_NETWORK_WAIT`, in seconds;
+  0 turns the wait off). A device offline for longer is not held.
 - A check or transfer is running: an alert offers **Wait and sync** (the game
   starts when it finishes) or **Launch anyway**.
 - The check failed (no network, for example): **Try again** or **Launch
