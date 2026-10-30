@@ -33,6 +33,8 @@ code = r'''
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stdlib.h>
+#define ERR(...) ((void)0)
 typedef struct { uint64_t __x[29], __fp, __lr, __sp, __pc; } arm_thread_state64_t;
 typedef struct { __uint128_t __v[32]; } arm_neon_state64_t;
 typedef uintptr_t mach_vm_address_t;
@@ -86,6 +88,9 @@ code += function('static int ios_mach_emulate_casp(uint32_t insn, uintptr_t rw_a
 code += function('static int ios_alias_write_is_trapped( uintptr_t addr )')
 code += function('static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uintptr_t *blocked,\n                            int honor_guest_prot )')
 code += function('static int ios_alias_store_pair( uint32_t insn, uintptr_t addr, uint64_t gpr[32], uintptr_t *blocked,\n                                 int honor_guest_prot )')
+code += function('static int ios_store_split_crossing_ex( uint32_t insn, arm_thread_state64_t *st,\n'
+                 '                                        const arm_neon_state64_t *neon,\n'
+                 '                                        uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked )\n{')
 code += function('int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,')
 code += r'''
 static uintptr_t fex_pool_start, fex_pool_end;
@@ -253,6 +258,8 @@ int main(void)
     memset(backing, 0x5a, 3 * 0x4000);
     assert(ios_store_split_crossing(pair, &state, NULL, 0, 0, 0) == -1);
     assert(backing[0x3fff] == 0x5a && state.__sp == second_rx - 8);
+    /* The refused store names the trapped second page, not the host FAR's first. */
+    assert(ios_store_split_crossing_ex(pair, &state, NULL, 0, 0, 0, &blocked) == -1 && blocked == second_rx);
     trapped_page = 0;
     assert(ios_store_split_crossing(pair, &state, NULL, 0, 0, 0) == 1);
     assert(state.__sp == second_rx + 8);

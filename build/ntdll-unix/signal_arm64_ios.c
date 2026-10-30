@@ -2338,9 +2338,30 @@ static inline void ios_note_guest_delivery( uint64_t thread )
  * (not a crossing store this helper decodes; the per-encoding cases run).
  * ml1292: also called by the thread sampler (server_ios.c) to complete a store
  * the kernel keeps faulting on, with the thread suspended. */
+static int ios_store_split_crossing_ex( uint32_t insn, arm_thread_state64_t *st,
+                                        const arm_neon_state64_t *neon,
+                                        uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked );
+
 int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
                                      const arm_neon_state64_t *neon,
                                      uintptr_t rx, uintptr_t rw, size_t sz )
+{
+    uintptr_t blocked;
+    return ios_store_split_crossing_ex( insn, st, neon, rx, rw, sz, &blocked );
+}
+
+/* madeira-pz: *blocked names the guest page a refused store is waiting on.
+ * A crossing store whose SECOND page FEX protects (cached translations) was
+ * refused here, and the caller then dispatched the host FAR, which lies in
+ * the FIRST page. FEX's handler unprotected that page again (it already was:
+ * NtProtect old=0x40 new=0x40), never the second, and the store faulted the
+ * same way until the 2000-redelivery guard killed the process (Project
+ * Zomboid's JVM, "Unhandled non-JIT atomic", addr ...7ff0 with the next page
+ * at ...8000). Dispatching the blocked page lets FEX invalidate it, as the
+ * CASP path below already does for its spanning stores. */
+static int ios_store_split_crossing_ex( uint32_t insn, arm_thread_state64_t *st,
+                                        const arm_neon_state64_t *neon,
+                                        uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked )
 {
     extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t fault_addr );
     extern void ios_jit_anon_alias_note_write( unsigned long long );
@@ -2355,6 +2376,7 @@ int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
     unsigned bytes, elem, rt2 = (insn >> 10) & 31, parts = 0, done = 0, i, part_len[2];
     uintptr_t part_rw[2];
 
+    *blocked = 0;
     if ((insn & 0x3a000000u) == 0x28000000u)                    /* STP/STNP and SIMD&FP pairs */
     {
         const unsigned mode = (insn >> 23) & 3;              /* 0 stnp, 1 post, 2 offset, 3 pre */
@@ -2423,9 +2445,18 @@ int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
         if (len > 0x4000 - (a & 0x3fff)) len = 0x4000 - (unsigned)(a & 0x3fff);
         part_rw[parts] = (rx && rw && len <= sz && a >= rx && a - rx <= sz - len)
                          ? rw + (a - rx) : ios_write_alias( (uintptr_t)a );
-        if (part_rw[parts] && (ios_write_alias( a + len - 1 ) != part_rw[parts] + len - 1 ||
-            (honor_guest_prot && (ios_alias_write_is_trapped( a ) || ios_alias_write_is_trapped( a + len - 1 )))))
+        if (part_rw[parts] && ios_write_alias( a + len - 1 ) != part_rw[parts] + len - 1)
             return -1;
+        if (part_rw[parts] && honor_guest_prot && ios_alias_write_is_trapped( a ))
+        {
+            *blocked = a;
+            return -1;
+        }
+        if (part_rw[parts] && honor_guest_prot && ios_alias_write_is_trapped( a + len - 1 ))
+        {
+            *blocked = (a + len - 1) & ~(uintptr_t)0xfff;
+            return -1;
+        }
         if (!part_rw[parts])
         {
             /* A page with no alias that is plain writable memory (the aliased page is
@@ -2490,6 +2521,79 @@ static uint8_t exc_peek8( uint64_t addr )
                                 (mach_vm_address_t)(uintptr_t)&v, &got ) != KERN_SUCCESS || got != sizeof(v))
         v = 0xd3;
     return v;
+}
+
+/* madeira-pz: A RESUME THAT NEEDS EVERY REGISTER GOES THROUGH THIS THREAD.
+ *
+ * The syscall dispatcher's fast return needs two scratch registers: it leaves
+ * x16 = pc and x17 = sp. Any other return (NtContinue after FEX handled a
+ * fault in native ARM64EC code) took the SIGUSR2 slowpath, and its x16 did not
+ * survive on device: Project Zomboid's Java main thread was in ucrtbase's
+ * memmove copying 792 bytes into the code cache, in the loop
+ *     subs x16, x16, #4 ... stp q0, q1, [x8, #-16] ... b.ne
+ * The store at iteration 9 hit a page FEX protects for its translations; FEX
+ * unprotected it and resumed at the stp; the counter came back as the stp's
+ * own address, so the copy ran 145KB on, over other code, until it hit
+ * uncommitted memory (hs_err pid 164 at 73 s, writing 0x7042190000).
+ * The slowpath also loses x18 to iOS sigreturn. thread_set_state from this
+ * thread restores everything exactly, so the slowpath traps here with the
+ * frame in x0 and this magic in x1, and resumes straight into the frame. */
+#define IOS_FULL_RETURN_BRK   0xd43e1820u   /* brk #0xf0c1 */
+#define IOS_FULL_RETURN_MAGIC 0x4d41444546554c4cull
+
+static int ios_full_context_return_brk( thread_t thread )
+{
+    arm_thread_state64_t st;
+    mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
+    const struct syscall_frame *frame;
+    uint64_t pc;
+    uint32_t insn = 0;
+    vm_size_t got = sizeof(insn);
+    int i;
+
+    if (thread_get_state( thread, ARM_THREAD_STATE64, (thread_state_t)&st, &n ) != KERN_SUCCESS) return 0;
+    pc = (uint64_t)arm_thread_state64_get_pc( st );
+    if ((pc & 3) || vm_read_overwrite( mach_task_self(), (vm_address_t)pc, sizeof(insn),
+                                       (vm_address_t)&insn, &got ) != KERN_SUCCESS ||
+        insn != IOS_FULL_RETURN_BRK)
+        return 0;
+    frame = (const struct syscall_frame *)(uintptr_t)st.__x[0];
+    if (st.__x[1] != IOS_FULL_RETURN_MAGIC || !frame)
+    {
+        /* not ours after all: step over it, the caller falls back to SIGUSR2 */
+        __darwin_arm_thread_state64_set_pc_fptr( st, (void *)(uintptr_t)(pc + 4) );
+        thread_set_state( thread, ARM_THREAD_STATE64, (thread_state_t)&st, ARM_THREAD_STATE64_COUNT );
+        return 1;
+    }
+    if (frame->restore_flags & 4)   /* CONTEXT_FLOATING_POINT, as the dispatcher tests it */
+    {
+        arm_neon_state64_t ns;
+        mach_msg_type_number_t nn = ARM_NEON_STATE64_COUNT;
+        if (thread_get_state( thread, ARM_NEON_STATE64, (thread_state_t)&ns, &nn ) == KERN_SUCCESS)
+        {
+            memcpy( &ns.__v, frame->v, sizeof(ns.__v) );
+            ns.__fpcr = frame->fpcr;
+            ns.__fpsr = frame->fpsr;
+            thread_set_state( thread, ARM_NEON_STATE64, (thread_state_t)&ns, ARM_NEON_STATE64_COUNT );
+        }
+    }
+    for (i = 0; i < 29; i++) st.__x[i] = frame->x[i];
+    st.__fp = frame->fp;
+    st.__lr = frame->lr;
+    st.__sp = frame->sp;
+    st.__cpsr = (st.__cpsr & ~0xf0000000u) | (frame->cpsr & 0xf0000000u);   /* NZCV, like msr NZCV */
+    __darwin_arm_thread_state64_set_pc_fptr( st, (void *)(uintptr_t)frame->pc );
+    if (thread_set_state( thread, ARM_THREAD_STATE64, (thread_state_t)&st, ARM_THREAD_STATE64_COUNT ) != KERN_SUCCESS)
+        return 0;
+    {
+        static volatile int full_returns;
+        int k = __sync_add_and_fetch( &full_returns, 1 );
+        if (k <= 4 || (k % 10000) == 0)
+            dprintf( STDERR_FILENO, "[full-return] madeira-pz #%d pc=0x%llx x16=0x%llx x17=0x%llx x18=0x%llx\n",
+                     k, (unsigned long long)frame->pc, (unsigned long long)frame->x[16],
+                     (unsigned long long)frame->x[17], (unsigned long long)frame->x[18] );
+    }
+    return 1;
 }
 
 static void *ios_mach_exception_thread( void *arg )
@@ -2592,6 +2696,11 @@ static void *ios_mach_exception_thread( void *arg )
          *
          * Bounded so a suspend-check storm cannot flood the log, but the FIRST
          * ones always print — they are what must line up against a [freeze] GAP. */
+        if (req->exception == EXC_BREAKPOINT && ios_full_context_return_brk( thread ))
+        {
+            handled = 1;
+            goto ios_exc_reply;
+        }
         if (req->exception == EXC_BREAKPOINT)
         {
             static volatile int bp_count;
@@ -4443,8 +4552,8 @@ static void *ios_mach_exception_thread( void *arg )
                      * 16-byte copies are correct. Rn==31 is SP, never __x[31]. */
                     /* ml1289: a store that crosses a 16 KB page is written per page here;
                      * every other store goes on to its per-encoding case below. */
-                    const int split_r = ios_store_split_crossing( insn, &state, have_neon ? &neon_state : NULL,
-                                                                  rx, rw, sz );
+                    const int split_r = ios_store_split_crossing_ex( insn, &state, have_neon ? &neon_state : NULL,
+                                                                     rx, rw, sz, &alias_fault );
                     if (split_r)
                     {
                         if (split_r > 0) emulated = 1;
@@ -7546,6 +7655,7 @@ dispatch_guest_fault:
         }
 
         /* Build reply */
+    ios_exc_reply: ;
         ios_exc_reply_t reply;
         reply.head.msgh_bits = MACH_MSGH_BITS( MACH_MSGH_BITS_REMOTE(req->head.msgh_bits), 0 );
         reply.head.msgh_size = sizeof(reply);
@@ -14994,6 +15104,13 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         PC_sig( context ) += 4;
         return;
     }
+    /* madeira-pz: the dispatcher's full-context BRK when the Mach exception
+     * thread did not take it. Step over; the caller falls back to SIGUSR2. */
+    if (!(PC_sig( context ) & 3) && *(ULONG *)PC_sig( context ) == IOS_FULL_RETURN_BRK)
+    {
+        PC_sig( context ) += 4;
+        return;
+    }
     /* ml481 (#85): a BRK/trap raised by HOST code on a host thread (ml480: the
      * UI thread trapping inside libsystem_malloc) is never a guest exception —
      * adopting it wedged the app. Check before any logging or save_context. */
@@ -15417,8 +15534,24 @@ void signal_init_process(void)
 /***********************************************************************
  *           syscall_dispatcher_return_slowpath
  */
-void syscall_dispatcher_return_slowpath(void)
+void syscall_dispatcher_return_slowpath( struct syscall_frame *frame )
 {
+#ifdef WINE_IOS
+    /* madeira-pz: restore the frame from the Mach exception thread (see
+     * ios_full_context_return_brk); this returns only if it declined. */
+    if (ios_exc_thread_alive)
+    {
+        register struct syscall_frame *x0 __asm__("x0") = frame;
+        register uint64_t x1 __asm__("x1") = IOS_FULL_RETURN_MAGIC;
+        __asm__ volatile( "brk #0xf0c1" : "+r"(x0) : "r"(x1) : "memory" );
+    }
+    {
+        sigset_t usr2;
+        sigemptyset( &usr2 );
+        sigaddset( &usr2, SIGUSR2 );
+        pthread_sigmask( SIG_UNBLOCK, &usr2, NULL );
+    }
+#endif
     raise( SIGUSR2 );
 }
 
@@ -15955,6 +16088,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    "cmp x12, x15\n\t"              /* frame->x16 == frame->pc? */
                    "ccmp x13, x14, #0, eq\n\t"     /* frame->x17 == frame->sp? */
                    "beq 1f\n\t"                    /* take slowpath if unequal */
+                   "mov x0, sp\n\t"                /* frame; x0 is reloaded below */
                    "bl " __ASM_NAME("syscall_dispatcher_return_slowpath") "\n"
                    "1:\tldp x0, x1, [sp, #0x00]\n\t"
                    "ldp x2, x3, [sp, #0x10]\n\t"
