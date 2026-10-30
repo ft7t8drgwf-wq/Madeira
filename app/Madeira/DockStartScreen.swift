@@ -222,6 +222,12 @@ enum DockStartStatus {
         }
         // Steam still counts an earlier session as playing (error 35); the Dock asks again.
         if fields["launch-session-wait"] != nil && fields["launch-client-error"] == "35" {
+            if fields["launch-session-kick"] == "1" {
+                return "Asked Steam to close the game on your other device. Waiting for it to end…"
+            }
+            if fields["launch-session-kick"] == "0" {
+                return "Steam did not take the request to close the other session. Waiting for it to end (up to 3 minutes)…"
+            }
             return "Steam says this account is still playing in another session. Waiting for Steam to end it (up to 3 minutes)…"
         }
         // Right after sign-in Steam may not have the game's configuration yet (22, 23); the Dock asks again.
@@ -295,6 +301,10 @@ final class DockStartScreen: ObservableObject {
     @Published private(set) var holding = false
     /// A window that may need the user is up behind the starting screen.
     @Published private(set) var attention = false
+    /// Steam counts this account as playing elsewhere and the host can end that
+    /// session: the starting screen asks whether to.
+    @Published var askEndOtherSession = false
+    private var askedEndOtherSession = false
 
     private var hold: SteamLaunchHold?
     private var sceneLines = 0
@@ -311,6 +321,7 @@ final class DockStartScreen: ObservableObject {
         endHold(reason: nil)
         winios_window_census_enable(0)
         active = game != nil; appID = game?.id; failure = nil
+        askEndOtherSession = false; askedEndOtherSession = false
         exitObserved = false; hostStarted = false; early = []; started = start
         activity = game.map {
             SteamActivityReader(clientRoot: MadeiraDock.clientRoot,
@@ -328,6 +339,14 @@ final class DockStartScreen: ObservableObject {
         endHold(reason: "session-ended")
         winios_window_census_enable(0)
         active = false; appID = nil; failure = nil; activity = nil
+        askEndOtherSession = false
+    }
+
+    /// The answer to "close the other session?". No keeps waiting, as before.
+    func answerEndOtherSession(_ yes: Bool) {
+        askEndOtherSession = false
+        LogStore.shared.log("[dock-session] end other session: \(yes ? "yes" : "no")")
+        if yes { MadeiraDock.endOtherSession() }
     }
 
     /// Under the status line, once a second: what Steam downloads or installs right now, in words.
@@ -352,6 +371,18 @@ final class DockStartScreen: ObservableObject {
                 }
             }
         }
+        if let fields = report?.fields {
+            let refused = fields["launch-client-error"] == "35"
+            if !askedEndOtherSession, refused, fields["launch-session-kick"] == nil,
+               let slot = fields["launch-session-kick-slot"].flatMap(Int.init), slot >= 0 {
+                askedEndOtherSession = true
+                askEndOtherSession = true
+                LogStore.shared.log("[dock-session] another session is playing; asking whether to end it")
+            } else if askEndOtherSession, !refused {
+                askEndOtherSession = false
+            }
+        }
+        if exitObserved || failure != nil { askEndOtherSession = false }
         guard var hold else { return }
         if !hostStarted {
             hostStarted = DockStartStatus.hostStarted((report ?? MainActor.assumeIsolated { MadeiraDock.pollReport() }).fields)

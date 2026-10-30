@@ -335,6 +335,7 @@ enum MadeiraDock {
         "launch-client-error", "launch-option-index", "launch-option-invalid", "launch-option-missing",
         "launch-update-wait", "launch-update-retry", "launch-update-ready",
         "launch-config-wait", "launch-config-gave-up", "launch-session-wait", "launch-session-gave-up",
+        "launch-session-kick-slot", "launch-session-kick",
         "ceg-request", "ceg-request-result", "ceg-request-busy", "ceg-server-result", "ceg-job-result",
         "ceg-finished-jobs", "ceg-result", "ceg-disabled", "ceg-unsupported-client",
         "ceg-scm", "ceg-scm-started", "ceg-scm-error", "ceg-service-registered", "ceg-service-install", "ceg-service-stop", "ceg-scm-stopped",
@@ -455,6 +456,13 @@ enum MadeiraDock {
         // explorer/cmd command. An empty profile clears any previous game's choice.
         if arguments.isEmpty { unsetenv("MADEIRA_STEAM_HOST_ARGUMENTS") }
         else { setenv("MADEIRA_STEAM_HOST_ARGUMENTS", arguments, 1) }
+        // The user's answer to "end the other session?" (DockStartScreen); a stale one never carries over.
+        try? FileManager.default.removeItem(at: sessionAnswer)
+        if SteamSignIn.flag("MADEIRA_DOCK_SESSION_KICK", default: true) {
+            setenv("MADEIRA_DOCK_SESSION_ANSWER", "C:\\madeira-dock-session.answer", 1)
+        } else {
+            unsetenv("MADEIRA_DOCK_SESSION_ANSWER")
+        }
         // The install record lists per-user executables: Dock asks Valve's client to prepare
         // them before it launches. env.MADEIRA_DOCK_CEG = 0 never asks.
         if game.customExecutables && SteamSignIn.flag("MADEIRA_DOCK_CEG", default: true) {
@@ -484,6 +492,19 @@ enum MadeiraDock {
         if guardMap { setenv("MADEIRA_IMAGE_MAP_GUARD", "1", 1) }
         SteamLog.event("[dock-launch] image-map-guard=\(guardMap ? 1 : 0)")
         DockOffline.configure(appID: game.id)
+    }
+
+    /// Where Madeira tells the host to end the account's playing session on another device.
+    static var sessionAnswer: URL { drive.appendingPathComponent("madeira-dock-session.answer") }
+
+    /// The user agreed: the host asks Valve's client to end the other session.
+    static func endOtherSession() {
+        do {
+            try Data("1".utf8).write(to: sessionAnswer, options: .atomic)
+            SteamLog.event("[dock-session] end-other-session requested")
+        } catch {
+            SteamLog.event("[dock-session] could not write the answer: \(error.localizedDescription)")
+        }
     }
 
     /// Wine's explorer opens a virtual desktop and starts the host in it. With
