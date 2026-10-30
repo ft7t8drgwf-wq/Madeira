@@ -171,6 +171,8 @@
 		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
 		A1000213 /* LibraryBCD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000213 /* LibraryBCD.swift */; };
 		A1007C01 /* GPUCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007C01 /* GPUCards.swift */; };
+		A1007D02 /* LaunchCheckView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007D02 /* LaunchCheckView.swift */; };
+		A1007D01 /* LaunchCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007D01 /* LaunchCheck.swift */; };
 		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1000991 /* GameDllOverrides.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000991 /* GameDllOverrides.swift */; };
@@ -426,6 +428,8 @@
 		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPSOverlay.swift; sourceTree = "<group>"; };
 		A2000213 /* LibraryBCD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBCD.swift; sourceTree = "<group>"; };
 		A2007C01 /* GPUCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUCards.swift; sourceTree = "<group>"; };
+		A2007D02 /* LaunchCheckView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchCheckView.swift; sourceTree = "<group>"; };
+		A2007D01 /* LaunchCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchCheck.swift; sourceTree = "<group>"; };
 		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2000991 /* GameDllOverrides.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameDllOverrides.swift; sourceTree = "<group>"; };
@@ -633,6 +637,8 @@
 				A2000202 /* FPSOverlay.swift */,
 				A2000213 /* LibraryBCD.swift */,
 				A2007C01 /* GPUCards.swift */,
+				A2007D02 /* LaunchCheckView.swift */,
+				A2007D01 /* LaunchCheck.swift */,
 				A2000914 /* LibraryPrefs.swift */,
 				A2000990 /* GameIniFiles.swift */,
 				A2000991 /* GameDllOverrides.swift */,
@@ -1033,6 +1039,8 @@
 				A1000202 /* FPSOverlay.swift in Sources */,
 				A1000213 /* LibraryBCD.swift in Sources */,
 				A1007C01 /* GPUCards.swift in Sources */,
+				A1007D02 /* LaunchCheckView.swift in Sources */,
+				A1007D01 /* LaunchCheck.swift in Sources */,
 				A1000914 /* LibraryPrefs.swift in Sources */,
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1000991 /* GameDllOverrides.swift in Sources */,

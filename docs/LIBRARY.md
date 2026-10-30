@@ -114,7 +114,20 @@ Tapping a game opens its details page; it stays up until the session's
 starting screen takes over (or an error is shown). The Desktop's page has every
 setting below as well; it leaves out only what names or starts one program (title
 and cover, Launch, launch arguments, the Home Screen link and the executable),
-and check-frontend fails if a setting is hidden from it. A profile holds:
+and check-frontend fails if a setting is hidden from it.
+
+**Will it run?** (`LaunchCheck.swift`, `LaunchCheckView.swift`) sits under Play:
+a few plain lines about what is likely to stop this game on this device, read
+when the page opens. It names a missing program, anti-cheat in the game's files
+(Easy Anti-Cheat, BattlEye, Vanguard, ...), DLLs the program imports that
+neither its folder, Wine's system folders nor Madeira's Wine libraries have,
+.NET Framework without Wine Mono (with a Get Wine Mono button), a Steam minimum
+memory above the device's (from the public store, kept 30 days), and less than
+2 GB free. With nothing found it shows one green line. Play stays available: a
+red line asks "Play anyway?" once per game and set of problems. Each read is
+logged as `[will-it-run]`. Tested by `tests/host/check-launch-check.py`.
+
+A profile holds:
 
 - title and cover image;
 - **Resolution**: the size of the Windows screen (the virtual monitor) the game
