@@ -22,6 +22,7 @@
 #import "MemoryHostTest.h"
 #import "MemoryHostProtocol.h"
 #import <mach/mach.h>
+#import <mach/mach_time.h>   // mach_timebase_info, mach_absolute_time: the imports above do not reach it on the iOS 26.6 SDK
 #import <os/proc.h>
 #import <stdio.h>
 #import <sys/sysctl.h>

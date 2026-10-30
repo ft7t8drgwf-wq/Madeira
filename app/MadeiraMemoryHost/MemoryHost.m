@@ -9,6 +9,9 @@
 #import <objc/runtime.h>
 #import <mach/mach.h>
 #import <os/proc.h>
+#import <stdlib.h>   // exit
+#import <string.h>   // memset
+#import <unistd.h>   // getpid
 #import "../Madeira/MemoryHostProtocol.h"
 
 static uint64_t mh_footprint(void) {
