@@ -26,9 +26,9 @@ folder, and each installer by the name it downloads with:
 
 | Program | List |
 |---|---|
-| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` |
+| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v2) |
 | `UbisoftConnectInstaller.exe` | `ubisoft-connect-setup` |
-| `Battle.net\Battle.net Launcher.exe`, `Battle.net.exe` | `battle-net` |
+| `Battle.net\Battle.net Launcher.exe`, `Battle.net.exe` | `battle-net` (v2) |
 | `Battle.net-Setup.exe` | `battle-net-setup` |
 | `Rockstar Games\Launcher\Launcher.exe` | `rockstar-launcher` (125hz) |
 | `Rockstar-Games-Launcher.exe` | `rockstar-launcher-setup` (125hz) |
@@ -37,24 +37,28 @@ folder, and each installer by the name it downloads with:
 
 Every one of them starts in the Wine desktop with Windows services first (the
 lists' `launchMode` and `startServices`): the launchers install services and use
-out-of-process COM. The 64-bit launchers' windows are Chromium (CEF), so the Battle.net
-and Rockstar lists take the lines Social Club and Steam's web helper need: Social Club layout 2
+out-of-process COM. Rockstar's launcher is 64-bit Chromium (CEF), so its list takes the lines Social Club and Steam's web helper need: Social Club layout 2
 (`env.MADEIRA_SC_PA_POOLS = 2`, room for Chromium 128+'s three 32 GB
 reservations), the JIT pool lines for libcef.dll, pure-x64 images uncopied, and
-the swap file for the web helper's idle pages. Ubisoft Connect's and Battle.net's
-lists have no release delay (`MADEIRA_FREE_DELAY_MS`): Chromium's allocator
+the swap file for the web helper's idle pages. No list has a release delay (`MADEIRA_FREE_DELAY_MS`): Chromium's allocator
 reserves, releases and reserves again. The installers get the standard line
 only.
 
-Ubisoft Connect is 32-bit: UbisoftConnect.exe, upc.exe and UplayWebCore.exe each
-need a 4 GB window, so its list (version 2) has none of the 64-bit Chromium lines.
-With them, build 48's upc.exe found no window and the client never opened. The
-extra windows spill into the range the 64-bit Chromium layout would take.
+Ubisoft Connect and Battle.net are 32-bit: UbisoftConnect.exe, upc.exe and
+UplayWebCore.exe, and Battle.net Launcher.exe, Battle.net.exe and Agent.exe, each
+need a 4 GB window, so their lists (version 2) have none of the 64-bit Chromium
+lines. With them, build 48's upc.exe and Battle.net.exe found no window and the
+clients never opened. The extra windows spill into the range the 64-bit Chromium
+layout would take.
+
+When a program raises a Windows error box (NtRaiseHardError), Wine never shows
+it; wine patch 0016 logs its text as `[hard-error]` lines. On build 48, upc.exe
+raised one (status 50000018) and closed with 0xdeadc0de.
 
 Battle.net's list also turns off Windows' location service
 (`env.WINEDLLOVERRIDES = locationapi=d`), which the client stops on under Wine.
 
-The Ubisoft Connect and Battle.net lists are not device-tested yet.
+The Ubisoft Connect and Battle.net version 2 lists are not device-tested yet.
 
 ## Library sections
 

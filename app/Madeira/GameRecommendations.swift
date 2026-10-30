@@ -780,32 +780,28 @@ enum GameRecommendations {
         launchMode: "desktop", startServices: true)
 
     /// Battle.net (LauncherSupport.swift; owner's choice, 2026-10-29): "Battle.net
-    /// Launcher.exe" starts Battle.net.exe, a 64-bit Chromium (CEF) client, and
-    /// Blizzard's Agent.exe, which installs and updates the games. The same Chromium
-    /// lines as Ubisoft Connect; the Wine desktop with Windows services first for the
-    /// Agent's out-of-process COM. Windows' location service is off: the client stops
-    /// on it under Wine (Lutris's Battle.net script turns it off the same way). Not
-    /// device-tested yet.
+    /// Launcher.exe" starts Battle.net.exe, Blizzard's Chromium (CEF) client, and
+    /// Agent.exe, which installs and updates the games. Both the launcher and the
+    /// client are 32-bit, like Ubisoft Connect's: version 1 had the 64-bit Chromium
+    /// lines, and on build 48 Battle.net.exe found no window ("[wow-window] no free
+    /// 4GB-aligned slot") while the launcher held the band's. Version 2 is Ubisoft
+    /// Connect's version 2 (the extra windows spill into the Chromium pool range,
+    /// MADEIRA_WOW_SPILL_CEF), with the Wine desktop with Windows services first for
+    /// the Agent's out-of-process COM. Windows' location service is off: the client
+    /// stops on it under Wine (Lutris's Battle.net script turns it off the same way).
     static let battleNet = GameRecommendation(
-        id: "battle-net", title: "Battle.net", version: 1,
+        id: "battle-net", title: "Battle.net", version: 2,
         config: """
         # Madeira's recommended settings for Battle.net.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         swap-mb = 4096
         swap-min-mb = 1
-        pool-low = 1
-        pool-page-fit = 1
-        pool-split = 1
         env.MADEIRA_SWAP_COVERAGE = broad
-        env.MADEIRA_SC_PA_POOLS = 2
-        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
-        env.MADEIRA_POOL_LOW_IMAGES = 1
-        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
-        env.MADEIRA_X64_IMAGE_NOCOPY = 1
         env.MADEIRA_LOCK_ORPHAN = stamped
         env.MADEIRA_TOUCH_MOUSE = 1
         env.MADEIRA_WOW_MIN_FREE_GB = 2
-        env.DXMT_SMALL_RINGS = Battle.net.exe
+        env.MADEIRA_WOW_PLACEHOLDERS = 1
+        env.DXMT_SMALL_RINGS = Battle.net Launcher.exe;Battle.net.exe;Agent.exe
         env.WINEDLLOVERRIDES = locationapi=d
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,

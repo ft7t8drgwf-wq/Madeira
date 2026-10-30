@@ -1,0 +1,55 @@
+iOS-Madeira: NtRaiseHardError (32-bit and 64-bit) logs its message box's
+strings before returning STATUS_NOT_IMPLEMENTED. Wine never shows that box,
+and a program that raises one (Ubisoft Connect's upc.exe, status 50000018,
+then exit 0xdeadc0de on build 48) closes without saying why. Log tag
+[hard-error]; err channel, so the default WINEDEBUG shows it.
+
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 282ef396396..6808a1be1be 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -4748,7 +4748,19 @@ NTSTATUS WINAPI NtRaiseHardError( NTSTATUS status, ULONG count,
+                                   ULONG params_mask, void **params,
+                                   HARDERROR_RESPONSE_OPTION option, HARDERROR_RESPONSE *response )
+ {
++    ULONG i;
++
+     FIXME( "%#08x %u %#x %p %u %p: stub\n", status, count, params_mask, params, option, response );
++    /* Madeira: the box is never shown, so log its text (see wow64_NtRaiseHardError). */
++    for (i = 0; params && i < count && i < 8; i++)
++    {
++        const UNICODE_STRING *str = (params_mask & (1u << i)) ? params[i] : NULL;
++        if (str && str->Buffer)
++            ERR( "[hard-error] status=%08x param%u=%s\n", status, i,
++                 debugstr_wn( str->Buffer, str->Length / sizeof(WCHAR) ));
++        else if (!str)
++            ERR( "[hard-error] status=%08x param%u=%p\n", status, i, params[i] );
++    }
+     return STATUS_NOT_IMPLEMENTED;
+ }
+ 
+diff --git a/dlls/wow64/system.c b/dlls/wow64/system.c
+index 9428616062d..a1cdaf215b7 100644
+--- a/dlls/wow64/system.c
++++ b/dlls/wow64/system.c
+@@ -724,7 +724,20 @@ NTSTATUS WINAPI wow64_NtRaiseHardError( UINT *args )
+     HARDERROR_RESPONSE_OPTION option = get_ulong( &args );
+     HARDERROR_RESPONSE *response = get_ptr( &args );
+ 
++    ULONG i;
++
+     FIXME( "%08lx %lu %lx %p %u %p: stub\n", status, count, params_mask, params, option, response );
++    /* Madeira: the box is never shown, so log its text; a program that raises one
++     * (STATUS_SERVICE_NOTIFICATION: text, caption, MB_ type) usually exits right after. */
++    for (i = 0; params && i < count && i < 8; i++)
++    {
++        const UNICODE_STRING32 *str = (params_mask & (1u << i)) ? guest_ptr32( params[i] ) : NULL;
++        if (str && str->Buffer)
++            ERR( "[hard-error] status=%08lx param%lu=%s\n", status, i,
++                 debugstr_wn( guest_ptr32( str->Buffer ), str->Length / sizeof(WCHAR) ));
++        else if (!str)
++            ERR( "[hard-error] status=%08lx param%lu=%#lx\n", status, i, params[i] );
++    }
+     return STATUS_NOT_IMPLEMENTED;
+ }
+ 
