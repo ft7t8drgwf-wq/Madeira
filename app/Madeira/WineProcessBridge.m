@@ -877,6 +877,29 @@ static void madeira_link_wbem(NSFileManager *fm, NSString *prefix, NSString *sys
             linked, sizeof(wbem) / sizeof(wbem[0]));
 }
 
+/* <system_dir>\Speech\Common\sapi.dll: the prefix registers every SAPI class
+ * (SpVoice, SpObjectTokenCategory, SpDataKey, SpMMAudioOut ...) there, the way
+ * Windows lays it out, but the farm is flat, so CoCreateInstance failed with
+ * REGDB_E_CLASSNOTREG (0x80040154). Grounded's narration (SpeechSynthWrapper.dll
+ * on System.Speech in Wine Mono) creates SpDataKey while the game loads; the
+ * COMException went unhandled, the game started tearing down, its RHIThread
+ * hit a freed object and the game froze on the loading screen. */
+static void madeira_link_speech(NSFileManager *fm, NSString *prefix, NSString *system_dir, NSString *source)
+{
+    NSString *dir = [[[prefix stringByAppendingPathComponent:@"drive_c/windows"]
+                        stringByAppendingPathComponent:system_dir] stringByAppendingPathComponent:@"Speech/Common"];
+    NSString *src = [source stringByAppendingPathComponent:@"sapi.dll"];
+    NSString *dst = [dir stringByAppendingPathComponent:@"sapi.dll"];
+    BOOL linked = NO;
+
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm removeItemAtPath:dst error:nil];
+    if ([fm fileExistsAtPath:src])
+        linked = [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil];
+    dprintf(STDERR_FILENO, "[WineProc] %s\\Speech\\Common\\sapi.dll: %s\n", system_dir.UTF8String,
+            linked ? "linked" : "not in this farm");
+}
+
 static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
 {
     madeira_link_wbem(fm, prefix, @"syswow64", [bundle stringByAppendingPathComponent:@"i386-windows"]);
@@ -2161,6 +2184,7 @@ static void *wine_process_thread(void *arg) {
             LOG("Symlinked %d DLLs from %{public}s to %{public}s", linked, bundle_subdir, sys32Dir.UTF8String);
             dprintf(STDERR_FILENO, "[WineProc] Symlinked %d DLLs from %s -> sys32\n", linked, bundle_subdir);
             madeira_link_wbem(fm, prefix, @"system32", dllSource);
+            madeira_link_speech(fm, prefix, @"system32", dllSource);
 
             // X3 mixed-mode: also link NON-COLLIDING files from the other
             // bundle arch so cross-arch child exes resolve by Win32 path
@@ -2238,6 +2262,7 @@ static void *wine_process_thread(void *arg) {
             if (has_i386_set) {
                 madeira_link_syswow64(fm, prefix, bundlePath);
                 madeira_link_syswow64_wbem(fm, prefix, bundlePath);
+                madeira_link_speech(fm, prefix, @"syswow64", [bundlePath stringByAppendingPathComponent:@"i386-windows"]);
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
             }
             madeira_link_wine_mono(fm, prefix, bundlePath);
