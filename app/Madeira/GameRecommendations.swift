@@ -825,25 +825,30 @@ enum GameRecommendations {
     /// Final Fantasy XIV's launcher (boot\ffxivboot.exe; LauncherSupport.swift), kept
     /// for installing and updating the game: Madeira signs the game itself in
     /// (FFXIVLaunch.swift). Its window is Internet Explorer's engine (mshtml), not
-    /// Chromium, so the Wine desktop and the standard line only. Not device-tested yet.
+    /// Chromium, so the standard line only, in the Wine desktop with Windows services
+    /// first (version 2): its installer only ran that way on build 48. Not
+    /// device-tested yet.
     static let ffxivLauncher = GameRecommendation(
-        id: "ffxiv-launcher", title: "Final Fantasy XIV launcher", version: 1,
+        id: "ffxiv-launcher", title: "Final Fantasy XIV launcher", version: 2,
         config: """
         # Madeira's recommended settings for the Final Fantasy XIV launcher.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
-        launchMode: "desktop")
+        launchMode: "desktop", startServices: true)
 
-    /// Final Fantasy XIV's installer (ffxivsetup.exe), which installs the launcher.
+    /// Final Fantasy XIV's installer (ffxivsetup.exe), which installs the launcher
+    /// through InstallShield (ffxivinstaller.exe, ISBEW64.exe). Build 48: started
+    /// directly its window stayed black; in the Wine desktop with Windows services first
+    /// it installed (owner's test, 2026-10-30). Version 2 starts it that way.
     static let ffxivSetup = GameRecommendation(
-        id: "ffxiv-setup", title: "Final Fantasy XIV installer", version: 1,
+        id: "ffxiv-setup", title: "Final Fantasy XIV installer", version: 2,
         config: """
         # Madeira's recommended settings for the Final Fantasy XIV installer.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
-        launchMode: "desktop")
+        launchMode: "desktop", startServices: true)
 
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
     /// the owner tried outside these lists closed at start until the [ec-hook]

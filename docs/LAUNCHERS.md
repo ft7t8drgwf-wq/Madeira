@@ -32,8 +32,8 @@ folder, and each installer by the name it downloads with:
 | `Battle.net-Setup.exe` | `battle-net-setup` |
 | `Rockstar Games\Launcher\Launcher.exe` | `rockstar-launcher` (125hz) |
 | `Rockstar-Games-Launcher.exe` | `rockstar-launcher-setup` (125hz) |
-| `boot\ffxivboot.exe` | `ffxiv-launcher` |
-| `ffxivsetup.exe` | `ffxiv-setup` |
+| `boot\ffxivboot.exe` | `ffxiv-launcher` (v2) |
+| `ffxivsetup.exe` | `ffxiv-setup` (v2) |
 
 Every one of them starts in the Wine desktop with Windows services first (the
 lists' `launchMode` and `startServices`): the launchers install services and use
@@ -69,8 +69,9 @@ Each launcher has its own library section, like Steam's and GOG's
   the one named like the folder; otherwise it asks for + instead.
 
 Final Fantasy XIV's launcher is in the same section, for installing and updating the
-game only: its window is Internet Explorer's engine, so its lists are the Wine
-desktop and the standard line. The game signs in through Madeira (docs/FFXIV.md).
+game only: its window is Internet Explorer's engine, so its lists are the standard
+line in the Wine desktop with services first (its InstallShield installer stayed
+black when started directly on build 48). The game signs in through Madeira (docs/FFXIV.md).
 
 ## Ubisoft repairs
 

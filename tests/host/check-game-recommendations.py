@@ -331,10 +331,12 @@ for ident in ('ubisoft-connect', 'battle-net'):
     assert not any(line.startswith('env.MADEIRA_FREE_DELAY_MS') for line in presets[ident]['lines']), ident
 assert 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist' in presets['rockstar-launcher']['lines']
 assert 'env.WINEDLLOVERRIDES = locationapi=d' in presets['battle-net']['lines'], 'Battle.net without Windows\' location service'
-# Final Fantasy XIV's launcher is Internet Explorer's engine, not Chromium: the Wine desktop and the standard line.
+# Final Fantasy XIV's launcher is Internet Explorer's engine, not Chromium: the standard line, in the Wine
+# desktop with services first (v2: its InstallShield installer only ran that way on build 48).
 for ident in ('ffxiv-launcher', 'ffxiv-setup'):
     p = presets[ident]
-    assert p['tested'] == presets['standard']['tested'] and p['switches'] == 'launchMode: "desktop"', (ident, p)
+    assert p['version'] >= 2 and p['tested'] == presets['standard']['tested'] \
+        and p['switches'] == 'launchMode: "desktop", startServices: true', (ident, p)
 assert 'if let mode = rec.launchMode { entry.launchMode = mode == "desktop" ? mode : nil }' in apply_src
 assert 'if let on = rec.startServices { entry.startServices = on ? true : nil }' in apply_src
 assert 'case "launcher.exe" where Array(parts.dropLast().suffix(2)) == ["rockstar games", "launcher"]:' in lists_src
