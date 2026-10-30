@@ -6026,6 +6026,61 @@ size_t server_init_process_child( int child_fd_socket )
 #endif
 
 
+#ifdef WINE_IOS
+/* Garry's Mod: Chromium's sandbox broker creates each child (gmod.exe
+ * --type=gpu-process, --type=renderer, ...) suspended, writes the sandbox's
+ * variables and its ntdll interceptions into it, and only then resumes it.
+ * With the suspend overridden the child ran ahead of that setup (build 50: the
+ * interceptions were patched into code the child had already run, and every
+ * child then failed to map icudtl.dat and broke at a CHECK).  These children
+ * keep their suspend and wait in wait_suspend() (signal_start_thread) for the
+ * parent's NtResumeThread, as on Windows; system APCs (the broker's remote
+ * VirtualAllocEx/VirtualProtectEx) still run in that wait.  The boot lock is
+ * released before signal_start_thread, so other boots are not held up.
+ * env.MADEIRA_GMOD_CHILD_SUSPEND = 0 restores the override. */
+static BOOL ios_unicode_ends_with( const UNICODE_STRING *str, const char *tail )
+{
+    size_t n = strlen( tail ), len, i;
+
+    if (!str || !str->Buffer) return FALSE;
+    len = str->Length / sizeof(WCHAR);
+    if (len < n) return FALSE;
+    for (i = 0; i < n; i++)
+    {
+        WCHAR c = str->Buffer[len - n + i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c == '/') c = '\\';
+        if (c != (WCHAR)tail[i]) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL ios_unicode_contains( const UNICODE_STRING *str, const char *needle )
+{
+    size_t n = strlen( needle ), len, i, j;
+
+    if (!str || !str->Buffer) return FALSE;
+    len = str->Length / sizeof(WCHAR);
+    for (i = 0; i + n <= len; i++)
+    {
+        for (j = 0; j < n && str->Buffer[i + j] == (WCHAR)needle[j]; j++);
+        if (j == n) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL ios_gmod_child_keeps_suspend(void)
+{
+    const RTL_USER_PROCESS_PARAMETERS *params = peb ? peb->ProcessParameters : NULL;
+    const char *env = getenv( "MADEIRA_GMOD_CHILD_SUSPEND" );
+
+    if (env && env[0] == '0') return FALSE;
+    if (!params) return FALSE;
+    return ios_unicode_ends_with( &params->ImagePathName, "\\gmod.exe" ) &&
+           ios_unicode_contains( &params->CommandLine, "--type=" );
+}
+#endif
+
 /***********************************************************************
  *           server_init_process_done
  */
@@ -6091,7 +6146,9 @@ void server_init_process_done(void)
      * NtResumeThread to unsuspend the child. But since we use thread-based
      * CreateProcess, the resume mechanism may not work correctly.
      * Force suspend=0 so the child proceeds immediately. */
-    if (suspend)
+    if (suspend && ios_gmod_child_keeps_suspend())
+        dprintf(STDERR_FILENO, "[child-suspend] gmod.exe child starts suspended until its parent resumes it\n");
+    else if (suspend)
     {
         dprintf(STDERR_FILENO, "[Wine init_done] overriding suspend=%d → 0 for iOS\n", suspend);
         suspend = 0;
