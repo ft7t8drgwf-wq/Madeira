@@ -29,6 +29,7 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <strings.h>   /* strncasecmp, ds3-coop local-write-target */
 #include <fcntl.h>   /* ml1003: O_RDONLY for the escape-hatch read */
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -1185,6 +1186,53 @@ static int ios_child_write_allowed( const struct process *process )
     return !off;
 }
 
+/* ds3-coop: opt-in local writes for mod launchers, the write side of ml1003.
+ * A mod launcher (DS3 Seamless Co-op) writes its DLL path into the game it
+ * started, then runs LoadLibraryA there; denied, the game gets
+ * LoadLibraryA(".dll").  Off by default: get_process_port() records that
+ * enabling writes for every caller regressed Steam.  Only a target whose exe
+ * is listed in madeira.cfg "local-write-target" (';'-separated names, e.g.
+ * darksoulsiii.exe) gets them, so Steam, CEF, crashpad and debugger attach
+ * keep the ACCESS_DENIED they were tuned to.  Written through
+ * ios_local_child_write, so it never takes the task_suspend fallback. */
+static int ios_local_write_target( const struct process *process )
+{
+    static char targets[256];
+    static int targets_read;
+    char name[64];
+    int n = 0, k, base = 0, len;
+    const char *t;
+
+    if (!current || process->unix_pid != getpid() || !process->image) return 0;
+    if (!targets_read)
+    {
+        targets_read = 1;
+        if (!madeira_cfg_get( "local-write-target", targets, sizeof(targets) )) targets[0] = 0;
+        fprintf( stderr, "ds3-coop: local pseudo-process writes %s%s\n",
+                 targets[0] ? "ENABLED for " : "denied (local-write-target unset)", targets );
+    }
+    if (!targets[0]) return 0;
+    len = process->imagelen / sizeof(WCHAR);
+    for (k = 0; k < len; k++) if (process->image[k] == '\\' || process->image[k] == '/') base = k + 1;
+    for (k = base; k < len && n < (int)sizeof(name) - 1; k++)
+    {
+        WCHAR c = process->image[k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        name[n++] = c < 128 ? (char)c : '?';
+    }
+    name[n] = 0;
+    if (!n) return 0;
+    for (t = targets; *t; )
+    {
+        const char *e = strchr( t, ';' );
+        int tl = e ? (int)(e - t) : (int)strlen( t );
+        if (tl == n && !strncasecmp( t, name, n )) return 1;
+        if (!e) break;
+        t = e + 1;
+    }
+    return 0;
+}
+
 extern int ios_child_write_store( void *dst, const void *src, size_t n ) __attribute__((weak));
 
 static int ios_local_child_write( struct process *process, client_ptr_t ptr, data_size_t size,
@@ -1241,6 +1289,8 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
 
 #ifdef WINE_IOS
     if (!process_port && ios_child_write_allowed( process ))
+        return ios_local_child_write( process, ptr, size, src, written );
+    if (!process_port && ios_local_write_target( process ))
         return ios_local_child_write( process, ptr, size, src, written );
 #endif
     if (!process_port)

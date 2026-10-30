@@ -50,9 +50,14 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     /// Steam states no size.
     var downloadBytes: UInt64?
     var installBytes: UInt64?
+    /// The game has a Steam Workshop (SteamAppInfo.workshopVisible); nil in older caches.
+    var workshop: Bool?
     /// The DLC the account owns for the game (SteamOwnedDLC), by name; nil in
     /// older caches, whose downloads then take no DLC until the next refresh.
     var dlc: [SteamOwnedDLC]?
+    /// Steam's branches of the game, public first (SteamAppInfo.branches), for
+    /// Game details › Steam › Version; nil in older caches.
+    var branches: [SteamAppInfo.Branch]?
 
     init(_ info: SteamAppInfo, ownedDLC: [UInt32: SteamAppInfo] = [:]) {
         id = Int(info.appID)
@@ -74,7 +79,17 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
         let download = info.downloadSize(for: "windows"), install = info.installSize(for: "windows")
         downloadBytes = download > 0 ? download : nil
         installBytes = install > 0 ? install : nil
+        workshop = info.workshopVisible
         dlc = SteamOwnedDLC.list(for: info, owned: ownedDLC)
+        branches = info.branches
+    }
+
+    /// The build Steam lists for a branch of the game: the branch's own, else
+    /// the public build (also for "public", nil and a branch no longer listed).
+    func buildID(branch: String?) -> Int {
+        guard let branch, branch != SteamAppInfo.publicBranch,
+              let entry = branches?.first(where: { $0.name == branch }), entry.buildID > 0 else { return buildID }
+        return Int(entry.buildID)
     }
 
     /// The owned DLC left on whose files an installed game lacks (its record
@@ -548,6 +563,34 @@ final class SteamOwnedLibrary: ObservableObject {
         } catch {
             SteamLog.event("[steam-playtime] unavailable reason=\(Self.reason(error))")
         }
+    }
+
+    // MARK: Steam Workshop (docs/STEAM_WORKSHOP.md)
+
+    /// Off with `env.MADEIRA_STEAM_WORKSHOP = 0`: no Workshop page or area.
+    static var workshopEnabled: Bool { enabled && SteamSignIn.flag("MADEIRA_STEAM_WORKSHOP", default: true) }
+    /// Workshop calls use the app's own connection: signed in, and no game
+    /// session holds the account (Valve's client has it then).
+    var workshopReady: Bool { Self.workshopEnabled && signedIn && !inSession }
+    /// The logged-on account's ID (the low half of its SteamID), as Valve's
+    /// client records it beside an item it keeps for that account.
+    var workshopAccountID: UInt32 { UInt32(truncatingIfNeeded: session.steamID) }
+
+    /// One PublishedFile call (SteamWorkshop.swift). `body` gets the account's SteamID.
+    func workshopCall(_ method: SteamServiceMethod, timeout: TimeInterval = 20,
+                      body: (UInt64) -> Data) async throws -> (eresult: Int32, body: Data) {
+        guard workshopReady else { throw SteamError.disconnected }
+        try await session.ensureConnected()
+        return try await session.callServiceMethodWithResult(method: method, body: body(session.steamID), timeout: timeout)
+    }
+
+    /// Downloads one Workshop item's content into its folder (DepotDownloader).
+    func downloadWorkshopItem(appID: UInt32, itemID: UInt64, manifestGID: UInt64, into folder: URL, journalDir: URL,
+                              progress: @escaping (SteamDownloadProgress) -> Void) async throws -> UInt64 {
+        guard workshopReady else { throw SteamError.disconnected }
+        try await session.ensureConnected()
+        return try await downloader.installWorkshopItem(appID: appID, itemID: itemID, manifestGID: manifestGID,
+                                                        into: folder, journalDir: journalDir, progress: progress)
     }
 
     // MARK: Steam Cloud (docs/STEAM_CLOUD.md)
@@ -1096,6 +1139,7 @@ final class SteamOwnedLibrary: ObservableObject {
             for id in queue { resumeAfterSession.insert(id); downloads[id]?.state = .paused }
             queue.removeAll()
             gate.close()
+            SteamWorkshopModel.shared.stopForSession()
             SteamLog.event("[steam-depot] paused for a game session count=\(resumeAfterSession.count)")
         } else {
             // Madeira Dock may still hold the account (dockEnded() releases it).
@@ -1176,10 +1220,58 @@ final class SteamOwnedLibrary: ObservableObject {
 
     // MARK: Downloads
 
-    /// Whether Steam lists a newer build than the installed record.
-    func updateAvailable(appID: Int, installedBuild: Int?) -> Bool {
-        guard let installedBuild, let latest = game(appID)?.buildID, latest > 0 else { return false }
-        return latest > installedBuild
+    /// Whether Steam lists a newer build than the installed record, on the
+    /// branch the record names (`installedBranch`, `BetaKey`; nil: public).
+    func updateAvailable(appID: Int, installedBuild: Int?, installedBranch: String? = nil) -> Bool {
+        guard let installedBuild, let latest = game(appID)?.buildID(branch: installedBranch), latest > 0 else { return false }
+        return latest != installedBuild && (latest > installedBuild || installedBranch != nil)
+    }
+
+    // MARK: Branches
+
+    /// Apps whose branch list was read again this run (refreshBranches).
+    private var branchesRead = Set<Int>()
+
+    /// Reads a game's branches from Steam once per run (signed in, no session
+    /// running), so Version lists a beta added since the library was cached.
+    func refreshBranches(_ appID: Int) async {
+        guard Self.enabled, signedIn, !inSession, appID > 0, appID <= Int(UInt32.max),
+              branchesRead.insert(appID).inserted else { return }
+        do {
+            guard let info = try await fetcher.fetchAppInfo(appID: UInt32(appID)),
+                  let index = owned.firstIndex(where: { $0.id == appID }) else { return }
+            if owned[index].branches != info.branches {
+                owned[index].branches = info.branches
+                writeCache()
+            }
+            SteamLog.event("[steam-branch] app=\(appID) branches=\(info.branches.count) private=\(info.branches.filter(\.passwordRequired).count)")
+        } catch {
+            branchesRead.remove(appID)
+            handleSessionError(error, context: "branch", report: false)
+        }
+    }
+
+    /// Checks a beta code with Steam (signed in, no session running). A code
+    /// that opens a branch of the game is kept (SteamBranch). Returns the
+    /// branches it opened ([] when Steam does not accept it), or why Steam
+    /// could not be asked.
+    func enterBetaCode(_ code: String, appID: Int) async -> (branches: [String], problem: String?) {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, code.utf8.count <= 256, appID > 0, appID <= Int(UInt32.max) else { return ([], nil) }
+        guard Self.enabled, signedIn else { return ([], "Sign in to Steam to enter a beta code.") }
+        guard !inSession else { return ([], "Close the game first: Steam checks the code over Madeira's own connection.") }
+        do {
+            let opened = try await fetcher.checkBetaCode(appID: UInt32(appID), code: code).keys.sorted()
+            if !opened.isEmpty {
+                SteamBranch.setCode(code, branches: opened, for: appID)
+                branchesRead.remove(appID)
+                await refreshBranches(appID)
+            }
+            return (opened, nil)
+        } catch {
+            handleSessionError(error, context: "branch", report: false)
+            return ([], SteamSignIn.message(error))
+        }
     }
 
     func hasPartialDownload(_ appID: Int) -> Bool {
@@ -1310,6 +1402,8 @@ final class SteamOwnedLibrary: ObservableObject {
             // Courier's Stash). Steam still refuses a key for anything not owned.
             let ownedApps = Self.dlcEnabled ? Set((game(appID)?.dlc ?? []).map { UInt32($0.id) }) : []
             let dlcDepots = Set(info.depots.filter { $0.dlcAppID.map { ownedApps.contains($0) } ?? false }.map(\.depotID))
+            // The version the player picked (SteamBranch); a beta code is checked with Steam again.
+            try await fetcher.applyBranch(&info, branch: SteamBranch.chosen(appID), code: SteamBranch.code(appID))
             let steamApps = try ExternalDrives.nativeURL(library, write: true)
             let common = try ExternalDrives.nativeURL(library + "/common", write: true)
             _ = try ExternalDrives.nativeURL(library + "/common/" + SteamInstallFiles.safeFolderName(info.installDir.isEmpty ? "app_\(appID)" : info.installDir), write: true)
@@ -1370,6 +1464,7 @@ final class SteamOwnedLibrary: ObservableObject {
         case SteamError.depotKeyNotFound: return "depot-key"
         case SteamError.depotNotFound: return "no-windows-depot"
         case SteamError.insufficientDiskSpace: return "disk-space"
+        case SteamError.betaCodeNeeded: return "beta-code"
         case SteamError.checksumMismatch: return "checksum"
         case SteamError.decompressionFailed: return "decompress"
         case SteamError.chunkDecodeFailed(let format): return "decode-\(format)"

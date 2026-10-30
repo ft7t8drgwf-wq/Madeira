@@ -285,6 +285,15 @@ OVERLAY = {
                         "GTA V Enhanced its G-buffer in ~12. Opt-in: the second list's draws no longer wait for the "
                         "whole first pass, an ordering Direct3D 12 does not promise but a game might rely on. Read "
                         "once per game start; [perf] gpu-traffic lines show what it saves."},
+    "table-reuse": {"category": "Direct3D 12", "title": "Experiment: reuse a stage's argument tables",
+                "kind": "bool", "default": "0", "sources": ["madeira-d3d12/src/pe/madeira_d3d12.c"],
+                "note": "Default off. 1: a draw or dispatch binds the argument and constant-buffer tables its stage "
+                        "built last in the same command list when no root argument, root constant, root signature "
+                        "or descriptor heap that stage can see was set since, instead of building them again. Red "
+                        "Dead Redemption 2 builds ~5000 a frame, 3.5 ms of the submission thread's ~14 ms. Opt-in: "
+                        "a game that rewrote a descriptor between two such draws of one list (Direct3D 12 forbids "
+                        "it) would see the first value. Read once per game start; [perf] table-reuse lines count "
+                        "the tables whose inputs had not changed, on or off."},
     "rp-discard": {"category": "Direct3D 12", "title": "Experiment: no load after, no store before DiscardResource",
                 "kind": "bool", "default": "0", "sources": ["madeira-d3d12/src/pe/madeira_d3d12.c"],
                 "note": "Default off. 1: after a game discards a whole render target or depth buffer "
@@ -452,6 +461,9 @@ OVERLAY = {
                 "note": "Default off. If the normal JIT image allocation fails, copies up to 16 MB may use "
                         "unallocated region C, preserving 4 MB for code buffers. Requires pool-low; 64-bit "
                         "processes only. Does not shrink live buffers or the pool-low-margin."},
+    "env.MADEIRA_KUSER_NATIVE_ARCH": {"category": "Debugging / logs", "title": "Host CPU type games see in KUSER_SHARED_DATA",
+                "note": "Default empty (ARM64, 12). For diagnosis only: 9 makes KUSER_SHARED_DATA report an AMD64 host, "
+                        "for protected code that takes a Windows-on-ARM path when it sees 12. Logged as [kuser]."},
     "env.MADEIRA_IMAGE_PATCH_TRACE": {"category": "Debugging / logs", "title": "DLL code patch trace", "kind": "bool", "default": "0",
                 "note": "1 logs up to 64 successful 1–16 byte executable-image protection requests and their PE/pool bytes. Read-only, owner-aware diagnostics; does not alter hooks or code."},
     "env.MADEIRA_MOUSE_ROUTING": {"title": "Mouse routing and pointer-lock fixes",
@@ -480,6 +492,7 @@ OVERLAY = {
                 "choices": [("", "Utility (default)"), ("background", "Background"), ("initiated", "User initiated")]},
     "env.MADEIRA_WG_VIDEO": {"title": "Media: MP4 video (32-bit programs)",
                 "note": "0 limits the media parser to MP3/WAV; by default MP4 with H.264/HEVC video decodes through VideoToolbox."},
+    "env.MADEIRA_X64_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 64-bit process's anonymous RWX memory (a Java code cache) is plain read/write to the host once that process maps jvm.dll, so stores into it are not emulated ([x64-rwx]). 1: in every 64-bit process. 0: never (stores go through the JIT pool's alias, as before)."},
     "env.MADEIRA_WOW_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 32-bit window's anonymous RWX memory is plain read/write to the host once Wine Mono's libmono-2.0-x86.dll is mapped there (ml1279/ml1282). 1: in every 32-bit window. 0: never (stores go through the JIT pool's alias, and FEX's Mono bridge stays off)."},
     "env.MADEIRA_WINEMONO_BRIDGE": {"note": "FEX's Mono backpatcher bridge (ml712). On by itself for Wine Mono, 32- and 64-bit (ml1282/ml1286); for the 32-bit runtime in a guest window it also turns SMC detection off once the backpatcher is found (ml1280). 0 keeps it off."},
     "env.MADEIRA_MONO_DEFAULTS": {"category": "Wine libraries", "note": "Wine Mono, 32- and 64-bit: mscoree sets MONO_THREADS_SUSPEND=coop and adds keep-delegates to MONO_DEBUG before Mono loads, and puts the previous values back once Mono has read them (ml1282); values already set win. 0 sets nothing."},
@@ -789,6 +802,13 @@ OVERLAY = {
                         "CPU; e.g. 1500 keeps a 60 fps menu near 30-40 fps. [fps-gov] lines every 10 s. "
                         "env.MADEIRA_FPS_GOV_MIN / _MAX (20 / 60) bound the cap, _BAND_MJ (1500) is the energy the "
                         "average may drift before it moves. Needs the [xp] sampler. Read at session start."},
+    # madeira-bcd: winemetal reads it (dxmt, build/dxmt-patches/0002-framegen-d3d12-pacing.patch; Tomba247's RDR2 work).
+    "env.MADEIRA_FRAMEGEN_STALL_MS": {"category": "Direct3D 9/10/11 (DXMT)", "title": "Frame generation: stall threshold (ms)",
+                "kind": "int", "default": "125", "sources": ["build/dxmt-patches/0002-framegen-d3d12-pacing.patch"],
+                "note": "Only with env.MADEIRA_FRAMEGEN = 1: a gap between two game frames longer than this drops the "
+                        "interpolator's history (no frame is generated from stale frames). Unset: 125, so a game "
+                        "capped at 15 fps (66.7 ms a frame) keeps its generated frames; the lowest value used is "
+                        "16.7. Read at every present."},
     "env.MADEIRA_FPS_GOV_MAX": {"category": "Windows, display & input", "title": "Frame-cap governor: highest cap (fps)",
                 "kind": "int", "default": "60", "sources": ["build/ntdll-unix/server_ios.c"],
                 "note": "Only with env.MADEIRA_FPS_GOV_MW set: the highest frame cap the governor uses, the largest of "

@@ -8,10 +8,10 @@ the pool is one memfd mapped twice (a read-only RX view and the RW alias, so a
 write through the wrong view faults), kernel32's copy holds its linker import
 stubs and AuxiliaryIAT, and its main IAT slots hold ntdll's x64 fast-forward
 thunks as the loader leaves them (ml943). Checks:
-  - kernel32!timeGetTime's two calls (RVA 0x2574c, 0x25754) fault at
+  - kernel32!timeGetTime's two calls (found by its prologue) fault at
     ntdll!RtlQueryPerformanceCounter / RtlQueryPerformanceFrequency: each
     heal stores exactly the redirect's copy address in the stub's
-    AuxiliaryIAT slot (+0x6d0e0, +0x6d0e8), through the RW view only;
+    AuxiliaryIAT slot (the slots its import stubs load), through the RW view only;
   - a slot already healed, or holding anything but the continuation, is left;
   - a copy shared with another process, a thread of another process, a main
     IAT value that does not decode to the faulting pc, a call that is not a
@@ -57,14 +57,43 @@ def layout(pe):
 k32_img, k32_size, k32_text = layout(k32)
 ntd_img, ntd_size, ntd_text = layout(ntd)
 
-# what the fixture relies on, read from the shipped files
-assert struct.unpack_from('<I', k32_img, 0x2574c)[0] >> 26 == 0x25, 'timeGetTime: BL'
-s0, s1, s2 = struct.unpack_from('<III', k32_img, 0x2b2f4)
-assert (s0 & 0x9F00001F) == 0x90000010 and (s1 & 0xFFC003FF) == 0xF9400210 and s2 == 0xD61F0200, 'import stub shape'
-c0, c1 = struct.unpack_from('<II', k32_img, 0x2b300)
-assert (c0 & 0x9F00001F) == 0x9000000B and (c1 & 0xFFC003FF) == 0xF940016B, 'continuation shape'
+# what the fixture relies on, read from the shipped files: timeGetTime's ARM64EC
+# body (sub sp; str x30; add x0, sp, #0x18; bl QPC; add x0, sp, #8; bl QPF), the
+# two import stubs its BLs reach, and the IAT slots the stubs load, so a rebuilt
+# kernel32.dll with other code sizes still fits
+TGT_PROLOGUE = bytes.fromhex('ff8300d1fe0b00f9e0630091')
+tgt = k32_img.find(TGT_PROLOGUE, k32_text[0], k32_text[0] + k32_text[1])
+assert tgt > 0 and k32_img.find(TGT_PROLOGUE, tgt + 1, k32_text[0] + k32_text[1]) < 0, 'timeGetTime body'
+tgt_bl1, tgt_bl2 = tgt + 12, tgt + 20
+assert struct.unpack_from('<I', k32_img, tgt_bl2 - 4)[0] == 0x910023e0, 'timeGetTime: add x0, sp, #8'
+
+
+def bl_target(at):
+    insn = struct.unpack_from('<I', k32_img, at)[0]
+    assert insn >> 26 == 0x25, 'timeGetTime: BL'
+    imm = insn & 0x3ffffff
+    return at + ((imm - (1 << 26) if imm & (1 << 25) else imm) << 2)
+
+
+def adrp_ldr(at, reg):
+    a, l = struct.unpack_from('<II', k32_img, at)
+    assert (a & 0x9F00001F) == 0x90000000 | reg and (l & 0xFFC003FF) == 0xF9400000 | reg << 5 | reg, 'stub shape'
+    page = ((a >> 5 & 0x7ffff) << 2 | a >> 29 & 3) << 12
+    return (at & ~0xfff) + page + ((l >> 10 & 0xfff) << 3)
+
+
+qpc_stub, qpf_stub = bl_target(tgt_bl1), bl_target(tgt_bl2)
+for stub in (qpc_stub, qpf_stub):
+    assert struct.unpack_from('<I', k32_img, stub + 8)[0] == 0xD61F0200, 'import stub shape'
+aux_qpc, aux_qpf = adrp_ldr(qpc_stub, 16), adrp_ldr(qpf_stub, 16)        # what the stub branches through
+main_qpc, main_qpf = adrp_ldr(qpc_stub + 12, 11), adrp_ldr(qpf_stub + 12, 11)   # the continuation's load
+assert aux_qpf == aux_qpc + 8 and main_qpf == main_qpc + 8, 'QPC/QPF slots adjacent'
 assert ntd_img[0x92090:0x9209a] == bytes.fromhex('488bc448895820555de9'), 'RtlQueryPerformanceCounter FFS'
 assert ntd_img[0x920a0:0x920aa] == bytes.fromhex('488bc448895820555de9'), 'RtlQueryPerformanceFrequency FFS'
+# the ARM64EC bodies the two FFS jump to (rel32 of their trailing jmp): read from
+# the shipped ntdll.dll, so a rebuilt one with other code sizes still fits
+qpc_rva = 0x9209a + struct.unpack_from('<i', ntd_img, 0x9209a)[0] + 4
+qpf_rva = 0x920aa + struct.unpack_from('<i', ntd_img, 0x920aa)[0] + 4
 
 begin = virtual.index('/* madeira-bcd: aux-IAT heal (begin).')
 heal = virtual[begin:virtual.index('/* madeira-bcd: aux-IAT heal (end) */', begin)]
@@ -113,10 +142,10 @@ static void reset( unsigned char *k32, unsigned char *ntd, int heal_ok )
     /* copies = the images as laid out, slots as the loader and iat-sync leave them */
     memcpy( rw_view + 0x10000, k32, K32_SIZE );
     memcpy( rw_view + 0x10000 + K32_SIZE_ALIGNED, ntd, NTD_SIZE );
-    wr64_rw( K32_COPY + 0x6d0e0, K32_COPY + 0x2b300 );     /* aux: the continuation (copy address) */
-    wr64_rw( K32_COPY + 0x6d0e8, PE_K32 + 0x2b320 );       /* aux: the continuation (PE address) */
-    wr64_rw( K32_COPY + 0x510e0, PE_NTD + 0x92090 );       /* main IAT: x64 FFS of RtlQueryPerformanceCounter */
-    wr64_rw( K32_COPY + 0x510e8, PE_NTD + 0x920a0 );       /* main IAT: x64 FFS of RtlQueryPerformanceFrequency */
+    wr64_rw( K32_COPY + AUX_QPC, K32_COPY + (QPC_STUB + 0xc) );     /* aux: the continuation (copy address) */
+    wr64_rw( K32_COPY + AUX_QPF, PE_K32 + (QPF_STUB + 0xc) );       /* aux: the continuation (PE address) */
+    wr64_rw( K32_COPY + MAIN_QPC, PE_NTD + 0x92090 );       /* main IAT: x64 FFS of RtlQueryPerformanceCounter */
+    wr64_rw( K32_COPY + MAIN_QPF, PE_NTD + 0x920a0 );       /* main IAT: x64 FFS of RtlQueryPerformanceFrequency */
     ios_jit_mapping_count = 2;
     memset( ios_jit_mappings, 0, sizeof(ios_jit_mappings) );
     ios_jit_mappings[0].pe_base = (void *)PE_K32; ios_jit_mappings[0].jit_base = (void *)K32_COPY;
@@ -133,7 +162,7 @@ int main( int argc, char **argv )
     unsigned char *k32 = malloc( K32_SIZE ), *ntd = malloc( NTD_SIZE );
     FILE *f;
     int fd = memfd_create( "pool", 0 );
-    uintptr_t qpc = PE_NTD + 0x71aac, qpf = PE_NTD + 0x71d04;
+    uintptr_t qpc = PE_NTD + QPC_RVA, qpf = PE_NTD + QPF_RVA;
     if (fd < 0 || ftruncate( fd, POOL_SIZE )) return 2;
     rw_view = mmap( NULL, POOL_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
     rx_view = mmap( NULL, POOL_SIZE, PROT_READ, MAP_SHARED, fd, 0 );   /* writes through it fault */
@@ -149,64 +178,64 @@ int main( int argc, char **argv )
     if (argc > 3)   /* MADEIRA_AUX_IAT_HEAL=0 run */
     {
         reset( k32, ntd, 0 );
-        CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
-        CHECK( rd64( K32_COPY + 0x6d0e0 ) == K32_COPY + 0x2b300 );
+        CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
+        CHECK( rd64( K32_COPY + AUX_QPC ) == K32_COPY + (QPC_STUB + 0xc) );
         if (!fails) puts( "PASS: MADEIRA_AUX_IAT_HEAL=0 leaves the slot" );
         return fails != 0;
     }
 
     reset( k32, ntd, 1 );
-    CHECK( (uintptr_t)ios_jit_translate_addr_for_owner( (void *)qpc, PEB_A ) == NTD_COPY + 0x71aac );
-    CHECK( ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) == 1 );
-    CHECK( rd64( K32_COPY + 0x6d0e0 ) == NTD_COPY + 0x71aac );
-    CHECK( ios_jit_heal_aux_iat( qpf, K32_COPY + 0x25758, PEB_A, NTD_COPY + 0x71d04 ) == 1 );
-    CHECK( rd64( K32_COPY + 0x6d0e8 ) == NTD_COPY + 0x71d04 );
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );   /* healed already */
-    CHECK( rd64( K32_COPY + 0x6d0e0 ) == NTD_COPY + 0x71aac );
+    CHECK( (uintptr_t)ios_jit_translate_addr_for_owner( (void *)qpc, PEB_A ) == NTD_COPY + QPC_RVA );
+    CHECK( ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) == 1 );
+    CHECK( rd64( K32_COPY + AUX_QPC ) == NTD_COPY + QPC_RVA );
+    CHECK( ios_jit_heal_aux_iat( qpf, K32_COPY + (TGT_BL2 + 4), PEB_A, NTD_COPY + QPF_RVA ) == 1 );
+    CHECK( rd64( K32_COPY + AUX_QPF ) == NTD_COPY + QPF_RVA );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );   /* healed already */
+    CHECK( rd64( K32_COPY + AUX_QPC ) == NTD_COPY + QPC_RVA );
 
     reset( k32, ntd, 1 );                                                                   /* another process's thread */
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_B, NTD_COPY + 0x71aac ) );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_B, NTD_COPY + QPC_RVA ) );
     reset( k32, ntd, 1 );                                                                   /* the image has a second copy */
     ios_jit_mappings[2] = ios_jit_mappings[0]; ios_jit_mappings[2].owner_peb = PEB_B;
     ios_jit_mappings[2].jit_base = (void *)(NTD_COPY + NTD_SIZE_ALIGNED); ios_jit_mapping_count = 3;
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
     reset( k32, ntd, 1 );                                                                   /* an owned copy of this process */
     ios_jit_mappings[0].owner_peb = PEB_A; ios_jit_mappings[0].map_peb = NULL;
-    CHECK( ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) == 1 );
+    CHECK( ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) == 1 );
     reset( k32, ntd, 1 );                                                                   /* main IAT decodes elsewhere */
-    CHECK( !ios_jit_heal_aux_iat( qpc + 4, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71ab0 ) );
-    CHECK( rd64( K32_COPY + 0x6d0e0 ) == K32_COPY + 0x2b300 );
+    CHECK( !ios_jit_heal_aux_iat( qpc + 4, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + 0x71ab0 ) );
+    CHECK( rd64( K32_COPY + AUX_QPC ) == K32_COPY + (QPC_STUB + 0xc) );
     reset( k32, ntd, 1 );                                                                   /* main IAT holds the target itself */
-    wr64_rw( K32_COPY + 0x510e0, qpc );
-    CHECK( ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) == 1 );
+    wr64_rw( K32_COPY + MAIN_QPC, qpc );
+    CHECK( ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) == 1 );
     reset( k32, ntd, 1 );                                                                   /* slot holds something else */
-    wr64_rw( K32_COPY + 0x6d0e0, NTD_COPY + 0x12340 );
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
-    CHECK( rd64( K32_COPY + 0x6d0e0 ) == NTD_COPY + 0x12340 );
+    wr64_rw( K32_COPY + AUX_QPC, NTD_COPY + 0x12340 );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
+    CHECK( rd64( K32_COPY + AUX_QPC ) == NTD_COPY + 0x12340 );
     reset( k32, ntd, 1 );                                                                   /* lr - 4 is not a BL */
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25748, PEB_A, NTD_COPY + 0x71aac ) );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 - 4), PEB_A, NTD_COPY + QPC_RVA ) );
     reset( k32, ntd, 1 );                                                                   /* redirect target is not the process's copy */
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71ab0 ) );
-    CHECK( rd64( K32_COPY + 0x6d0e0 ) == K32_COPY + 0x2b300 );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + 0x71ab0 ) );
+    CHECK( rd64( K32_COPY + AUX_QPC ) == K32_COPY + (QPC_STUB + 0xc) );
     reset( k32, ntd, 1 );                                                                   /* a stale entry still claims the copy range */
     ios_jit_mappings[2] = ios_jit_mappings[0]; ios_jit_mappings[2].pe_base = (void *)(PE_NTD + NTD_SIZE_ALIGNED * 4);
     ios_jit_mapping_count = 3;
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
     reset( k32, ntd, 1 );                                                                   /* the caller's image is gone (unmapped PE) */
     ios_jit_mappings[0].pe_base = (void *)(PE_NTD + NTD_SIZE_ALIGNED * 4);
-    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
-    CHECK( rd64( K32_COPY + 0x6d0e0 ) == K32_COPY + 0x2b300 );
+    CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
+    CHECK( rd64( K32_COPY + AUX_QPC ) == K32_COPY + (QPC_STUB + 0xc) );
     reset( k32, ntd, 1 );                                                                   /* main slot outside the IAT directory */
     {
         unsigned char *pe = (unsigned char *)PE_K32;
         uint32_t lf; memcpy( &lf, pe + 0x3c, 4 );
         uint32_t save; memcpy( &save, pe + lf + 24 + 112 + 8 * 12, 4 );
         uint32_t moved = save + 0x2000; memcpy( pe + lf + 24 + 112 + 8 * 12, &moved, 4 );
-        CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
+        CHECK( !ios_jit_heal_aux_iat( qpc, K32_COPY + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
         memcpy( pe + lf + 24 + 112 + 8 * 12, &save, 4 );
     }
     reset( k32, ntd, 1 );                                                                   /* lr outside the pool */
-    CHECK( !ios_jit_heal_aux_iat( qpc, PE_K32 + 0x25750, PEB_A, NTD_COPY + 0x71aac ) );
+    CHECK( !ios_jit_heal_aux_iat( qpc, PE_K32 + (TGT_BL1 + 4), PEB_A, NTD_COPY + QPC_RVA ) );
     if (!fails) puts( "PASS: timeGetTime's QPC/QPF stubs healed to the process's ntdll copy through the RW view; "
                       "shared or foreign copies, other targets, other slot values and non-BL calls left alone" );
     return fails != 0;
@@ -220,7 +249,9 @@ def align(x):
 defs = {
     'K32_SIZE': k32_size, 'K32_SIZE_ALIGNED': align(k32_size), 'K32_TEXT': k32_text[0], 'K32_TEXT_SIZE': k32_text[1],
     'NTD_SIZE': ntd_size, 'NTD_SIZE_ALIGNED': align(ntd_size), 'NTD_TEXT': ntd_text[0], 'NTD_TEXT_SIZE': ntd_text[1],
-    'PE_K32': 0x7e3c900000, 'PE_NTD': 0x7e42a00000,
+    'PE_K32': 0x7e3c900000, 'PE_NTD': 0x7e42a00000, 'QPC_RVA': qpc_rva, 'QPF_RVA': qpf_rva,
+    'TGT_BL1': tgt_bl1, 'TGT_BL2': tgt_bl2, 'QPC_STUB': qpc_stub, 'QPF_STUB': qpf_stub,
+    'AUX_QPC': aux_qpc, 'AUX_QPF': aux_qpf, 'MAIN_QPC': main_qpc, 'MAIN_QPF': main_qpf,
 }
 assert 0x10000 + defs['K32_SIZE_ALIGNED'] + 2 * defs['NTD_SIZE_ALIGNED'] <= 0x400000
 

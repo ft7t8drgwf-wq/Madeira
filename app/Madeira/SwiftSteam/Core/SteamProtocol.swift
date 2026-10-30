@@ -40,6 +40,10 @@ enum EMsg: UInt32 {
     case clientPICSAccessTokenResponse = 8906
     case clientGetDepotDecryptionKey = 5438
     case clientGetDepotDecryptionKeyResponse = 5439
+    case clientCheckAppBetaPassword = 5450
+    case clientCheckAppBetaPasswordResponse = 5451
+    case clientPICSPrivateBetaRequest = 8907
+    case clientPICSPrivateBetaResponse = 8908
     case serviceMethod = 146
     case serviceMethodResponse = 147
     case serviceMethodCallFromClient = 151
@@ -63,6 +67,13 @@ enum SteamServiceMethod: String {
     case cloudClientBeginFileUpload = "Cloud.ClientBeginFileUpload#1"
     case cloudClientCommitFileUpload = "Cloud.ClientCommitFileUpload#1"
     case cloudCompleteAppUploadBatch = "Cloud.CompleteAppUploadBatchBlocking#1"
+    /// Steam Workshop (SteamWorkshop.swift): the account's subscribed items,
+    /// browsing and searching an app's items, item details, subscribing.
+    case workshopGetUserFiles = "PublishedFile.GetUserFiles#1"
+    case workshopQueryFiles = "PublishedFile.QueryFiles#1"
+    case workshopGetDetails = "PublishedFile.GetDetails#1"
+    case workshopSubscribe = "PublishedFile.Subscribe#1"
+    case workshopUnsubscribe = "PublishedFile.Unsubscribe#1"
 }
 
 // MARK: - Result codes

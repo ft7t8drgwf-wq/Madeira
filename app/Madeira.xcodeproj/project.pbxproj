@@ -20,8 +20,22 @@
 		A1000531 /* SteamGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000531 /* SteamGames.swift */; };
 		A1006A01 /* GOGLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A01 /* GOGLibrary.swift */; };
 		A1006A02 /* GOGGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A02 /* GOGGames.swift */; };
+		A1007B01 /* LauncherSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B01 /* LauncherSupport.swift */; };
+		A1007B02 /* SwiftItch/ItchAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B02 /* ItchAPI.swift */; };
+		A1007B03 /* SwiftItch/ItchArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B03 /* ItchArchive.swift */; };
+		A1007B04 /* ItchLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B04 /* ItchLibrary.swift */; };
+		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
+		A1007B06 /* SwiftFFXIV/FFXIVLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B06 /* FFXIVLogin.swift */; };
+		A1007B07 /* FFXIVLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B07 /* FFXIVLaunch.swift */; };
 		A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A03 /* GOGAPI.swift */; };
 		A1006A04 /* SwiftGOG/GOGDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A04 /* GOGDownloader.swift */; };
+		A1006B01 /* EALibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B01 /* EALibrary.swift */; };
+		A1006B02 /* EAGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B02 /* EAGames.swift */; };
+		A1006B03 /* SwiftEA/EAAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B03 /* EAAPI.swift */; };
+		A1006B04 /* SwiftEA/EAFormats.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B04 /* EAFormats.swift */; };
+		A1006B05 /* SwiftEA/EADownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B05 /* EADownloader.swift */; };
+		A1006B06 /* SwiftEA/EALicense.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B06 /* EALicense.swift */; };
+		A1006B07 /* SwiftEA/EAService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B07 /* EAService.swift */; };
 		A1000900 /* LiquidMetal.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000900 /* LiquidMetal.metal */; };
 		A1000910 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000910 /* Assets.xcassets */; };
 		A1000902 /* GlassSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000902 /* GlassSkin.swift */; };
@@ -193,6 +207,8 @@
 		A1000F01 /* GestureZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000F01 /* GestureZones.swift */; };
 		A1000246 /* TouchControlPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000246 /* TouchControlPresets.swift */; };
 		A1000993 /* SteamFilesFlag.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000993 /* SteamFilesFlag.swift */; };
+		A1005C0F /* SteamWorkshopFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2005C0F /* SteamWorkshopFiles.swift */; };
+		A1005C0E /* SteamWorkshop.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2005C0E /* SteamWorkshop.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -243,8 +259,22 @@
 		A2000531 /* SteamGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamGames.swift"; sourceTree = "<group>"; };
 		A2006A01 /* GOGLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GOGLibrary.swift"; sourceTree = "<group>"; };
 		A2006A02 /* GOGGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GOGGames.swift"; sourceTree = "<group>"; };
+		A2007B01 /* LauncherSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LauncherSupport.swift"; sourceTree = "<group>"; };
+		A2007B02 /* ItchAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftItch/ItchAPI.swift"; sourceTree = "<group>"; };
+		A2007B03 /* ItchArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftItch/ItchArchive.swift"; sourceTree = "<group>"; };
+		A2007B04 /* ItchLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchLibrary.swift"; sourceTree = "<group>"; };
+		A2007B05 /* ItchGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchGames.swift"; sourceTree = "<group>"; };
+		A2007B06 /* FFXIVLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftFFXIV/FFXIVLogin.swift"; sourceTree = "<group>"; };
+		A2007B07 /* FFXIVLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFXIVLaunch.swift"; sourceTree = "<group>"; };
 		A2006A03 /* GOGAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGAPI.swift"; sourceTree = "<group>"; };
 		A2006A04 /* GOGDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGDownloader.swift"; sourceTree = "<group>"; };
+		A2006B01 /* EALibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EALibrary.swift"; sourceTree = "<group>"; };
+		A2006B02 /* EAGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EAGames.swift"; sourceTree = "<group>"; };
+		A2006B03 /* EAAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAAPI.swift"; sourceTree = "<group>"; };
+		A2006B04 /* EAFormats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAFormats.swift"; sourceTree = "<group>"; };
+		A2006B05 /* EADownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EADownloader.swift"; sourceTree = "<group>"; };
+		A2006B06 /* EALicense.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EALicense.swift"; sourceTree = "<group>"; };
+		A2006B07 /* EAService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAService.swift"; sourceTree = "<group>"; };
 		A2000900 /* LiquidMetal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetal.metal"; sourceTree = "<group>"; };
 		A2000910 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000902 /* GlassSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlassSkin.swift"; sourceTree = "<group>"; };
@@ -432,6 +462,8 @@
 		A2000F01 /* GestureZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureZones.swift; sourceTree = "<group>"; };
 		A2000246 /* TouchControlPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchControlPresets.swift; sourceTree = "<group>"; };
 		A2000993 /* SteamFilesFlag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamFilesFlag.swift; sourceTree = "<group>"; };
+		A2005C0F /* SteamWorkshopFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamWorkshopFiles.swift; sourceTree = "<group>"; };
+		A2005C0E /* SteamWorkshop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamWorkshop.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -513,8 +545,22 @@
 				A2000531 /* SteamGames.swift */,
 				A2006A01 /* GOGLibrary.swift */,
 				A2006A02 /* GOGGames.swift */,
+				A2007B01 /* LauncherSupport.swift */,
+				A2007B02 /* ItchAPI.swift */,
+				A2007B03 /* ItchArchive.swift */,
+				A2007B04 /* ItchLibrary.swift */,
+				A2007B05 /* ItchGames.swift */,
+				A2007B06 /* FFXIVLogin.swift */,
+				A2007B07 /* FFXIVLaunch.swift */,
 				A2006A03 /* GOGAPI.swift */,
 				A2006A04 /* GOGDownloader.swift */,
+				A2006B01 /* EALibrary.swift */,
+				A2006B02 /* EAGames.swift */,
+				A2006B03 /* EAAPI.swift */,
+				A2006B04 /* EAFormats.swift */,
+				A2006B05 /* EADownloader.swift */,
+				A2006B06 /* EALicense.swift */,
+				A2006B07 /* EAService.swift */,
 				A2000900 /* LiquidMetal.metal */,
 				A2000910 /* Assets.xcassets */,
 				A2000902 /* GlassSkin.swift */,
@@ -625,6 +671,8 @@
 				A2000036 /* StikJITHelper.swift */,
 				A2000980 /* JITPoolMeter.swift */,
 				A2000993 /* SteamFilesFlag.swift */,
+				A2005C0F /* SteamWorkshopFiles.swift */,
+				A2005C0E /* SteamWorkshop.swift */,
 				B2000001 /* JITSetup.swift */,
 				B2000050 /* JITNetwork.swift */,
 				B2000002 /* JITBuiltInHost.swift */,
@@ -901,8 +949,22 @@
 				A1000531 /* SteamGames.swift in Sources */,
 				A1006A01 /* GOGLibrary.swift in Sources */,
 				A1006A02 /* GOGGames.swift in Sources */,
+				A1007B01 /* LauncherSupport.swift in Sources */,
+				A1007B02 /* SwiftItch/ItchAPI.swift in Sources */,
+				A1007B03 /* SwiftItch/ItchArchive.swift in Sources */,
+				A1007B04 /* ItchLibrary.swift in Sources */,
+				A1007B05 /* ItchGames.swift in Sources */,
+				A1007B06 /* SwiftFFXIV/FFXIVLogin.swift in Sources */,
+				A1007B07 /* FFXIVLaunch.swift in Sources */,
 				A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */,
 				A1006A04 /* SwiftGOG/GOGDownloader.swift in Sources */,
+				A1006B01 /* EALibrary.swift in Sources */,
+				A1006B02 /* EAGames.swift in Sources */,
+				A1006B03 /* SwiftEA/EAAPI.swift in Sources */,
+				A1006B04 /* SwiftEA/EAFormats.swift in Sources */,
+				A1006B05 /* SwiftEA/EADownloader.swift in Sources */,
+				A1006B06 /* SwiftEA/EALicense.swift in Sources */,
+				A1006B07 /* SwiftEA/EAService.swift in Sources */,
 				A1000900 /* LiquidMetal.metal in Sources */,
 				A1000902 /* GlassSkin.swift in Sources */,
 				A1000903 /* LiquidMetalSkin.metal in Sources */,
@@ -1012,6 +1074,8 @@
 				A1000035 /* StikJITHelper.swift in Sources */,
 				A1000980 /* JITPoolMeter.swift in Sources */,
 				A1000993 /* SteamFilesFlag.swift in Sources */,
+				A1005C0F /* SteamWorkshopFiles.swift in Sources */,
+				A1005C0E /* SteamWorkshop.swift in Sources */,
 				B1000001 /* JITSetup.swift in Sources */,
 				B1000050 /* JITNetwork.swift in Sources */,
 				B1000002 /* JITBuiltInHost.swift in Sources */,

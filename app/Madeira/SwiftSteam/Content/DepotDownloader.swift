@@ -91,7 +91,7 @@ final class DepotDownloader {
         let depots = app.installDepots(ownedDLC: ownedDLC)
         guard !depots.isEmpty else { throw SteamError.depotNotFound(app.appID) }
         // Before the key requests, so a refused depot still has its selection logged.
-        SteamLog.event("[steam-depot] selection app=\(app.appID) build=\(app.buildID) language=\(app.depotLanguage)/\(app.gameLanguage) \(app.depotSelectionSummary(ownedDLC: ownedDLC))")
+        SteamLog.event("[steam-depot] selection app=\(app.appID) build=\(app.branchBuildID) branch=\(app.branch) language=\(app.depotLanguage)/\(app.gameLanguage) \(app.depotSelectionSummary(ownedDLC: ownedDLC))")
 
         let folderName = SteamInstallFiles.safeFolderName(app.installDir.isEmpty ? "app_\(app.appID)" : app.installDir)
         let installURL = steamApps.appendingPathComponent("common", isDirectory: true)
@@ -119,7 +119,7 @@ final class DepotDownloader {
         var accountID: UInt64 = 0
         for depot in depots {
             try Task.checkCancellation()
-            guard let gid = depot.publicManifestID else { continue }
+            guard let gid = depot.manifestID(app.branch) else { continue }
             let key: Data
             do {
                 key = try await depotKey(depotID: depot.depotID, appID: app.appID)
@@ -140,8 +140,10 @@ final class DepotDownloader {
             }
             if session.steamID != 0 { accountID = session.steamID }
             let contentAppID = !app.freeToDownload ? (depot.fromApp ?? app.appID) : app.appID
+            // A beta's own manifest is requested under its branch name.
             let manifest = try await fetchManifest(depotID: depot.depotID, appID: contentAppID,
-                                                   manifestGID: gid, key: key, hosts: hosts)
+                                                   manifestGID: gid, key: key, hosts: hosts,
+                                                   branch: depot.hasOwnManifest(app.branch) ? app.branch : nil)
             var auth: [String: String] = [:]
             for host in pool {
                 auth[host] = await cdnAuthFragment(depotID: depot.depotID, appID: contentAppID, host: host)
@@ -296,11 +298,11 @@ final class DepotDownloader {
         }
         if !custom.isEmpty { SteamLog.event("[steam-record] custom-executables app=\(app.appID) custom=\(custom.count)") }
         try AppManifestWriter.writeManifest(
-            appID: app.appID, name: app.name, installDir: folderName, buildID: app.buildID,
+            appID: app.appID, name: app.name, installDir: folderName, buildID: app.branchBuildID,
             steamID: accountID, sizeOnDisk: prepared.totalUncompressed,
             steamAppsPath: steamApps.path, installedDepots: own,
             sharedDepots: shared.map { ($0.depotID, Int(owners[UInt32($0.depotID)]!)) },
-            customExecutables: custom, language: app.gameLanguage)
+            customExecutables: custom, language: app.gameLanguage, betaKey: app.branch)
         if !shared.isEmpty {
             var written = 0, skipped = 0
             for ownerID in Set(owners.values).sorted() {
@@ -553,15 +555,13 @@ final class DepotDownloader {
             let order = plan.health.order(plan.hosts, seed: seed)
             let host = order[attempt % order.count]
             let url = "\(host)/depot/\(plan.depotID)/chunk/\(chunk.shaHex)\(plan.auth[host] ?? "")"
+            let data: Data
             do {
                 let encrypted = try await download(url)
-                let data = try ContentDecryptor.processChunk(encryptedData: encrypted, depotKey: plan.key,
+                data = try ContentDecryptor.processChunk(encryptedData: encrypted, depotKey: plan.key,
                                                              expectedCRC: chunk.crc,
                                                              expectedSize: Int(chunk.uncompressedSize))
                 guard data.count == Int(chunk.uncompressedSize) else { throw SteamError.checksumMismatch }
-                try write(data, to: path, offset: chunk.offset)
-                plan.health.recordSuccess(host)
-                return
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -570,7 +570,13 @@ final class DepotDownloader {
                 plan.health.recordFailure(host, reason: failureReason(error))
                 SteamLog.trace("chunk attempt \(attempt + 1) failed: \(failureReason(error))")
                 if attempt + 1 < attempts { try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 400_000_000) }
+                continue
             }
+            // A verified chunk proves the CDN worked. Local I/O failures must
+            // propagate without re-downloading it or penalizing the server.
+            plan.health.recordSuccess(host)
+            try write(data, to: path, offset: chunk.offset)
+            return
         }
         throw lastError
     }
@@ -608,8 +614,8 @@ final class DepotDownloader {
     // MARK: - Manifest
 
     private func fetchManifest(depotID: UInt32, appID: UInt32, manifestGID: UInt64,
-                               key: Data, hosts: [String]) async throws -> DepotManifest {
-        let requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID)
+                               key: Data, hosts: [String], branch: String? = nil) async throws -> DepotManifest {
+        let requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID, branch: branch)
         var lastError: Error = SteamError.manifestFetchFailed("No content server returned the manifest.")
         for host in hosts.prefix(6) {
             try Task.checkCancellation()
@@ -737,12 +743,14 @@ final class DepotDownloader {
 
     // MARK: - Manifest Request Code
 
-    private func manifestRequestCode(depotID: UInt32, appID: UInt32, manifestGID: UInt64) async throws -> UInt64 {
+    private func manifestRequestCode(depotID: UInt32, appID: UInt32, manifestGID: UInt64, branch: String? = nil) async throws -> UInt64 {
         try await session.ensureConnected()
         var encoder = ProtobufEncoder()
         encoder.writeUInt32(fieldNumber: 1, value: appID)
         encoder.writeUInt32(fieldNumber: 2, value: depotID)
         encoder.writeUInt64(fieldNumber: 3, value: manifestGID)
+        // app_branch: a beta's manifest is issued under its branch.
+        if let branch, branch != SteamAppInfo.publicBranch { encoder.writeString(fieldNumber: 4, value: branch) }
 
         let responseData = try await session.callServiceMethod(
             method: .getManifestRequestCode,
@@ -971,5 +979,83 @@ extension URL {
         var info = statfs()
         if statfs(url.path, &info) == 0, info.f_bavail > 0 { return Int64(info.f_bavail) * Int64(info.f_bsize) }
         return nil
+    }
+}
+
+// MARK: - Steam Workshop items
+
+extension DepotDownloader {
+    /// Downloads one Steam Workshop item stored as content (its
+    /// `hcontent_file`): Valve's client keeps an app's Workshop items in the
+    /// app's own depot (depot ID = app ID), each item one manifest of it. The
+    /// files go into `folder` (steamapps/workshop/content/<app>/<item>), with
+    /// the same journal, check and chunk path as a game. Returns the item's
+    /// size on disk. SteamWorkshop.swift writes the install record.
+    func installWorkshopItem(appID: UInt32, itemID: UInt64, manifestGID: UInt64, into folder: URL,
+                             journalDir: URL,
+                             progress report: @escaping (SteamDownloadProgress) -> Void) async throws -> UInt64 {
+        var state = SteamDownloadProgress()
+        report(state)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: journalDir, withIntermediateDirectories: true)
+        let hosts: [String]
+        if let provider = contentHosts { hosts = try await provider(appID) } else { hosts = try await contentServers(appID: appID) }
+        guard !hosts.isEmpty else { throw SteamError.chunkDownloadFailed("No content servers are available.") }
+        let key = try await depotKey(depotID: appID, appID: appID)
+        let manifest = try await fetchManifest(depotID: appID, appID: appID, manifestGID: manifestGID, key: key, hosts: hosts)
+        let pool = Array(hosts.prefix(hostPoolSize))
+        var auth: [String: String] = [:]
+        for host in pool { auth[host] = await cdnAuthFragment(depotID: appID, appID: appID, host: host) }
+        let plan = DepotPlan(depotID: appID, manifestGID: manifestGID, key: key, manifest: manifest, hosts: pool, auth: auth,
+                             declaredSize: manifest.totalUncompressedSize, health: ContentHostHealth(), installURL: folder)
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            try Self.prepare(plans: [plan], journalDir: journalDir)
+        }.value
+        state.totalBytes = prepared.totalBytes
+        state.doneBytes = prepared.doneBytes
+        state.phase = .downloading
+        report(state)
+        SteamLog.event("[steam-workshop] download begin app=\(appID) item=\(itemID) files=\(prepared.fileCount) bytes=\(prepared.totalUncompressed)")
+        if let free = folder.freeSpace, UInt64(free) < prepared.remainingUncompressed {
+            throw SteamError.insufficientDiskSpace(needed: prepared.remainingUncompressed, available: UInt64(free))
+        }
+        var work = prepared.pending
+        try await checkExisting(plans: [plan], prepared: prepared, work: &work, state: &state, report: report)
+        let journal = try JournalWriter(url: prepared.journals[0])
+        defer { journal.close() }
+        let items = work[0], paths = prepared.paths[0], attempts = attemptsPerChunk
+        let started = Date(), resumedBytes = state.doneBytes
+        var lastReport = Date.distantPast
+        try await withThrowingTaskGroup(of: (UInt64, UInt64).self) { group in
+            var next = 0
+            func enqueue() {
+                guard next < items.count else { return }
+                let item = items[next]; next += 1
+                let chunk = plan.manifest.files[item.file].chunks[item.chunk]
+                let path = paths[item.file]
+                group.addTask {
+                    try await Self.fetchChunk(chunk, plan: plan, path: path, attempts: attempts, seed: item.file &+ item.chunk)
+                    return (item.key, UInt64(chunk.compressedSize))
+                }
+            }
+            for _ in 0..<min(maxConcurrentChunks, items.count) { enqueue() }
+            for try await (key, bytes) in group {
+                journal.append(key)
+                state.doneBytes += bytes
+                let now = Date()
+                if now.timeIntervalSince(lastReport) >= 0.25 {
+                    lastReport = now
+                    let elapsed = now.timeIntervalSince(started)
+                    if elapsed > 1 { state.bytesPerSecond = Double(state.doneBytes &- resumedBytes) / elapsed }
+                    report(state)
+                }
+                enqueue()
+            }
+        }
+        state.phase = .finishing
+        report(state)
+        try? FileManager.default.removeItem(at: journalDir)
+        SteamLog.event("[steam-workshop] download complete app=\(appID) item=\(itemID) bytes=\(prepared.totalUncompressed) seconds=\(Int(Date().timeIntervalSince(started)))")
+        return prepared.totalUncompressed
     }
 }

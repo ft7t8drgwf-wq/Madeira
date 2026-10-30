@@ -624,6 +624,8 @@ static void mad_skip_at(LONG line) {
     }
 }
 static LONG g_cb_errors, g_cb_retired, g_null_cbv_bound, g_vis_fallback;
+static LONG g_tc_same, g_tc_built;   /* madeira-bcd table-reuse: tables whose inputs had not changed / tables built */
+static int g_table_reuse = -1;   /* madeira-bcd table-reuse, see mad_table_reuse_on */
 /* ml1109: sync census -- what the game does per frame and how long it waits for us */
 static LONGLONG g_perf_ecl_ticks, g_perf_present_ticks;   /* ml1119 */
 static int g_async_submit;   /* ml1120: defined with the worker below */
@@ -1184,6 +1186,7 @@ struct mad_resource {
     unsigned nxview, xview_cap;
     UINT64 reserved_bytes;   /* d3d12-tiled-resources: created by CreateReservedResource (fully backed), its tiles x 64 KB */
     UINT64 metal_bytes;      /* madeira-bcd metal-gap: a standalone texture, as Metal sizes it (0 = not counted) */
+    obj_handle_t shared_base;   /* OpenSharedHandle: the D3D11 texture `texture` is a view of (owned) */
 };
 /* srv_res / uav_res membership, O(1) through the resource's slot (the linear
  * scan it replaces ran over ~15,000 textures on every view creation). */
@@ -1693,6 +1696,11 @@ static int mad_list_type_ok(D3D12_COMMAND_LIST_TYPE t) {
     return t == D3D12_COMMAND_LIST_TYPE_DIRECT || t == D3D12_COMMAND_LIST_TYPE_COMPUTE ||
            t == D3D12_COMMAND_LIST_TYPE_COPY;
 }
+/* Allocators and lists may also be bundles (queues may not): a bundle records
+ * like any list and is replayed inside the direct list that executes it. */
+static int mad_alloc_type_ok(D3D12_COMMAND_LIST_TYPE t) {
+    return mad_list_type_ok(t) || t == D3D12_COMMAND_LIST_TYPE_BUNDLE;
+}
 
 struct mad_alloc {
     ID3D12CommandAllocatorVtbl *vtbl;
@@ -1904,6 +1912,52 @@ static HRESULT STDMETHODCALLTYPE list_Reset(ID3D12GraphicsCommandList *This,
     mad_list_rings_rewind(l);   /* ml1061: only reuses chunks the GPU has finished with */
     return S_OK;
 }
+
+/* ExecuteBundle: the bundle's recorded commands are copied into this list at
+ * this point, so the replay sees them as if they had been recorded here. The
+ * bundle's root-constant, clear-rectangle and latch words are appended to this
+ * list's word store and the copied commands point at the copies. */
+static void STDMETHODCALLTYPE list_ExecuteBundle(ID3D12GraphicsCommandList *This,
+                                                 ID3D12GraphicsCommandList *bundle) {
+    struct mad_list *l = (struct mad_list *)This, *b = (struct mad_list *)bundle;
+    static LONG logged;
+    unsigned i, base;
+    if (!b || b == l || l->closed || !b->closed || b->type != D3D12_COMMAND_LIST_TYPE_BUNDLE ||
+        l->type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        if (InterlockedIncrement(&logged) <= 4)
+            d3d12_log("[madeira-d3d12] ExecuteBundle refused: bundle %p (type %d, %s) into list type %d%s\n",
+                      (void *)b, b ? (int)b->type : -1, b && b->closed ? "closed" : "open", (int)l->type,
+                      l->closed ? ", list closed" : "");
+        return;
+    }
+    if (InterlockedIncrement(&logged) == 1)
+        d3d12_log("[madeira-d3d12] ExecuteBundle: bundles are replayed inline (first: %u commands)\n", b->ncmds);
+    base = l->ncdata;
+    if (b->ncdata) {
+        if (!mad_grow((void **)&l->cdata, &l->cdcap, l->ncdata + b->ncdata, sizeof *l->cdata)) return;
+        memcpy(&l->cdata[l->ncdata], b->cdata, (size_t)b->ncdata * sizeof *l->cdata);
+        l->ncdata += b->ncdata;
+    }
+    for (i = 0; i < b->ncmds; i++) {
+        struct mad_cmd *c = mad_list_push(l, b->cmds[i].kind);
+        if (!c) return;
+        *c = b->cmds[i];
+        switch (c->kind) {
+        case MC_ROOT_CONST: case MC_CROOT_CONST: c->u.rconst.data += base; break;
+        case MC_CLEAR_RT: case MC_CLEAR_DS: if (c->u.clear.nrect) c->u.clear.rect_at += base; break;
+        case MC_CBV_LATCH: c->u.latch.data += base; break;
+        default: break;
+        }
+    }
+    for (i = 0; i < b->nused; i++) mad_list_note_used(l, b->used[i]);
+    /* What the bundle bound stays bound after it, as in D3D12. */
+    for (i = 0; i < 2; i++) if (b->rec_rs[i]) {
+        l->rec_rs[i] = b->rec_rs[i];
+        memcpy(l->rec_tab[i], b->rec_tab[i], sizeof l->rec_tab[i]);
+    }
+    if (b->rec_heap) l->rec_heap = b->rec_heap;
+    memset(l->lat_va, 0, sizeof l->lat_va); memset(l->lat_data, 0, sizeof l->lat_data);
+}
 static D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE list_GetType(ID3D12GraphicsCommandList *This) {
     (void)This;
     return ((struct mad_list *)This)->type;
@@ -2031,8 +2085,15 @@ static ULONG STDMETHODCALLTYPE queue_Release(ID3D12CommandQueue *This) {
     return (ULONG)r;
 }
 /* ---- execution: replaying a list into Metal encoders -------------------- */
+/* madeira-bcd table-reuse: one built argument/constant-buffer table pair and
+ * what it was built from (see mad_air_build_tables_ex). */
+struct mad_tabc {
+    const void *airv, *root; UINT nair, cb_bind, arg_bind, arg_qwords; unsigned vis, g; UINT64 gen; int used;
+    obj_handle_t cbb, argb; UINT64 cbo, argo;
+};
 struct mad_exec {
     int fence_needed;
+    UINT64 tc_gen[3]; int tc_nocache; struct mad_tabc tc[8];   /* madeira-bcd table-reuse: vertex side, pixel, compute */
     obj_handle_t tind_buf; UINT64 tind_off;   /* madeira-bcd: this indirect tessellation draw's mesh dispatch arguments */
     struct mad_resource *wr[64]; unsigned nwr; int wr_all;   /* ml1116: written since the last fence wait (mode 3) */   /* ml1111: fence-chain = 2: a barrier (or list start) was seen since the last wait */
     struct mad_queue *q;
@@ -6538,6 +6599,12 @@ static void mad_rs_report(double presents) {
         pos += snprintf(buf + pos, sizeof buf - pos, " %s %.2f ms (%.0f)", g_rs_names[b], 1000.0 * (double)t / tf / np, n / np);
     }
     d3d12_log("%s\n", buf);
+    {   /* madeira-bcd table-reuse */
+        LONG same = InterlockedExchange(&g_tc_same, 0), built = InterlockedExchange(&g_tc_built, 0);
+        if (same || built)
+            d3d12_log("[perf] table-reuse per frame: %.0f argument tables whose inputs had not changed, %.0f built (madeira.cfg table-reuse = %d)\n",
+                      same / np, built / np, g_table_reuse > 0);
+    }
 }
 
 /* ---- madeira-bcd skin-check (diagnostic, opt-in) ------------------------------
@@ -7321,6 +7388,29 @@ static void mad_skin_present(UINT64 presents) {
               g_skin_full ? "every dispatch logged in the first two" : "only the dispatches that feed such draws are logged");
 }
 
+/* madeira-bcd table-reuse (default 0; opt-in): a draw or dispatch whose
+ * stage tables would come out exactly as the previous build of the same
+ * stage in this command list (no root argument, root constant, root signature
+ * or descriptor heap it can see has been set since) binds that table again
+ * instead of writing a new one. Red Dead Redemption 2 builds ~5000 tables a
+ * frame (3.5 ms of its ~14 ms replay on a throttled CPU). The descriptors are
+ * read when the table is built, as before; reuse keeps the values they had at
+ * that build, which Direct3D 12 already requires to stay unchanged until the
+ * list has run. [perf] table-reuse lines count both, on or off. */
+static int mad_table_reuse_on(void) {
+    if (g_table_reuse < 0) {
+        g_table_reuse = mad_cfg_int_pe("table-reuse", 0) ? 1 : 0;
+        if (g_table_reuse) d3d12_log("[madeira-d3d12] table-reuse = 1: a stage's argument tables are built again only when a root argument, root constant, root signature or heap it can see changed\n");
+    }
+    return g_table_reuse;
+}
+/* A graphics root parameter changed: the tables of the stages it is visible to
+ * are out of date (vertex side: everything but pixel-only parameters). */
+static void exec_tc_bump(struct mad_exec *e, unsigned index) {
+    unsigned v = e->rs && index < e->rs->nparams ? e->rs->params[index].visibility : MADEIRA_IR_VIS_ALL;
+    if (v != MADEIRA_IR_VIS_PIXEL) e->tc_gen[0]++;
+    if (v == MADEIRA_IR_VIS_ALL || v == MADEIRA_IR_VIS_PIXEL || v >= 32) e->tc_gen[1]++;
+}
 static int mad_air_build_tables_ex_body(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root,
                                    const UINT32 (*consts)[64], const struct mad_pso *pso,
                                    UINT cb_bind, UINT arg_bind, UINT arg_qwords, UINT nair,
@@ -7370,6 +7460,7 @@ static int mad_air_build_tables_ex_body(struct mad_exec *e, const struct mad_roo
             const char *why2 = "?";
             if (vis_mask == ~0u || !mad_air_resolve(e, rs, root, consts, rg, ~0u, &de, &direct, &why2)) goto bad;
             InterlockedIncrement(&g_vis_fallback);
+            e->tc_nocache = 1;   /* madeira-bcd table-reuse: it read a parameter of another stage */
         }
         if (e->sk && e->sk->tab_on) mad_skin_tok(e, rg, &de, direct);   /* madeira-bcd skin-check */
 
@@ -7456,8 +7547,38 @@ static int mad_air_build_tables_ex(struct mad_exec *e, const struct mad_rootsig 
                                    obj_handle_t *arg_buf, UINT64 *arg_off) {
     /* madeira-bcd: replay split "of which argument tables" */
     UINT64 t0 = g_replay_split > 0 ? mad_tick() : 0;
-    int ok = mad_air_build_tables_ex_body(e, rs, root, consts, pso, cb_bind, arg_bind, arg_qwords, nair, airv, vis_mask,
-                                          cb_buf, cb_off, arg_buf, arg_off);
+    struct mad_tabc *tc = NULL;
+    unsigned g = 0;
+    int ok;
+    /* madeira-bcd table-reuse: a table is a pure function of the stage's ranges,
+     * the root signature, root arguments and constants and the bound heaps, all
+     * of which bump tc_gen when they change (exec_tc_bump); the ring slots it
+     * was written to live as long as this list's replay. */
+    if (!(e->sk && e->sk->tab_on) && !g_dump_tables &&
+        ((root == e->root && consts == (const UINT32 (*)[64])e->consts) ||
+         (root == e->croot && consts == (const UINT32 (*)[64])e->cconsts))) {
+        g = root == e->croot ? 2 : vis_mask == ((1u << MADEIRA_IR_VIS_ALL) | (1u << MADEIRA_IR_VIS_PIXEL)) ? 1 : 0;
+        tc = &e->tc[((ULONG_PTR)airv >> 4) & 7];
+        if (tc->used && tc->airv == airv && tc->root == root && tc->nair == nair && tc->vis == vis_mask && tc->g == g &&
+            tc->gen == e->tc_gen[g] && tc->cb_bind == cb_bind && tc->arg_bind == arg_bind && tc->arg_qwords == arg_qwords) {
+            InterlockedIncrement(&g_tc_same);
+            if (mad_table_reuse_on()) {
+                *cb_buf = tc->cbb; *cb_off = tc->cbo; *arg_buf = tc->argb; *arg_off = tc->argo;
+                if (t0) mad_rs_step(RS_TABLES, &t0);
+                return 1;
+            }
+        }
+    }
+    e->tc_nocache = 0;
+    ok = mad_air_build_tables_ex_body(e, rs, root, consts, pso, cb_bind, arg_bind, arg_qwords, nair, airv, vis_mask,
+                                      cb_buf, cb_off, arg_buf, arg_off);
+    InterlockedIncrement(&g_tc_built);
+    if (tc) {
+        tc->used = ok && !e->tc_nocache;
+        tc->airv = airv; tc->root = root; tc->nair = nair; tc->vis = vis_mask; tc->g = g; tc->gen = e->tc_gen[g];
+        tc->cb_bind = cb_bind; tc->arg_bind = arg_bind; tc->arg_qwords = arg_qwords;
+        tc->cbb = *cb_buf; tc->cbo = *cb_off; tc->argb = *arg_buf; tc->argo = *arg_off;
+    }
     if (t0) mad_rs_step(RS_TABLES, &t0);
     return ok;
 }
@@ -9876,19 +9997,22 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
         case MC_PSO: if (c->u.pso && c->u.pso->is_compute) e.cpso = c->u.pso; else e.pso = c->u.pso;
             if (g_sd_state > 0 && g_pso_first && c->u.pso && !c->u.pso->first_used) mad_pso_first(c->u.pso);   /* madeira-bcd: pso-first-use */
             break;
-        case MC_CROOTSIG: e.crs = c->u.rootsig; memset(e.lat_va[1], 0, sizeof e.lat_va[1]); break;   /* madeira-bcd static-cbv: latches are per signature */
-        case MC_CROOT: if (c->u.root.index < MAD_ROOT_PARAM_MAX) e.croot[c->u.root.index] = c->u.root.value; break;
+        case MC_CROOTSIG: e.crs = c->u.rootsig; memset(e.lat_va[1], 0, sizeof e.lat_va[1]); e.tc_gen[2]++; break;   /* madeira-bcd static-cbv: latches are per signature */
+        case MC_CROOT: if (c->u.root.index < MAD_ROOT_PARAM_MAX) e.croot[c->u.root.index] = c->u.root.value; e.tc_gen[2]++; break;
         case MC_CROOT_CONST:
+            e.tc_gen[2]++;   /* madeira-bcd table-reuse */
             if (c->u.rconst.index < MAD_ROOT_PARAM_MAX && c->u.rconst.dst + c->u.rconst.n <= 64)
                 memcpy(&e.cconsts[c->u.rconst.index][c->u.rconst.dst], &l->cdata[c->u.rconst.data], c->u.rconst.n * 4);
             break;
         case MC_ROOT:
+            exec_tc_bump(&e, c->u.root.index);   /* madeira-bcd table-reuse */
             if (c->u.root.index < MAD_ROOT_PARAM_MAX) {
                 e.root[c->u.root.index] = c->u.root.value;
                 if (c->u.root.index + 1 > e.nroot) e.nroot = c->u.root.index + 1;
             }
             break;
-        case MC_HEAPS: if (c->u.heaps.srv) e.srv = c->u.heaps.srv; if (c->u.heaps.smp) e.smp = c->u.heaps.smp; break;
+        case MC_HEAPS: if (c->u.heaps.srv) e.srv = c->u.heaps.srv; if (c->u.heaps.smp) e.smp = c->u.heaps.smp;
+            e.tc_gen[0]++; e.tc_gen[1]++; e.tc_gen[2]++; break;   /* madeira-bcd table-reuse */
         case MC_VP: e.vp = c->u.vp; e.has_vp = 1; break;
         case MC_SCISSOR: e.sc = c->u.scissor; e.has_sc = 1; break;
         case MC_TOPO: e.topo = c->u.topo; break;
@@ -9920,9 +10044,10 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
             if (c->u.clear.nrect) exec_clear_rects(&e, l, c);   /* madeira-bcd clear-rects */
             else exec_add_clear(&e, c->u.clear.res, &c->u.clear.v, NULL, c->u.clear.depth, 1, c->u.clear.stencil, c->u.clear.flags);
             break;
-        case MC_ROOTSIG: e.rs = c->u.rootsig; memset(e.lat_va[0], 0, sizeof e.lat_va[0]); break;   /* madeira-bcd static-cbv: latches are per signature */
-        case MC_CBV_LATCH: mad_scbv_replay(&e, c); break;   /* madeira-bcd static-cbv */
+        case MC_ROOTSIG: e.rs = c->u.rootsig; memset(e.lat_va[0], 0, sizeof e.lat_va[0]); e.tc_gen[0]++; e.tc_gen[1]++; break;   /* madeira-bcd static-cbv: latches are per signature */
+        case MC_CBV_LATCH: mad_scbv_replay(&e, c); e.tc_gen[0]++; e.tc_gen[1]++; e.tc_gen[2]++; break;   /* madeira-bcd static-cbv */
         case MC_ROOT_CONST:
+            exec_tc_bump(&e, c->u.rconst.index);   /* madeira-bcd table-reuse */
             if (c->u.rconst.index < MAD_ROOT_PARAM_MAX && c->u.rconst.dst + c->u.rconst.n <= 64)
                 memcpy(&e.consts[c->u.rconst.index][c->u.rconst.dst], &l->cdata[c->u.rconst.data], c->u.rconst.n * 4);
             break;
@@ -11485,7 +11610,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommandAllocator(ID3D12Device *Thi
         D3D12_COMMAND_LIST_TYPE type, REFIID riid, void **out) {
     (void)This;
     if (!out) return E_INVALIDARG;
-    if (!mad_list_type_ok(type)) return E_NOTIMPL;
+    if (!mad_alloc_type_ok(type)) return E_NOTIMPL;
     struct mad_alloc *a = calloc(1, sizeof *a);
     if (!a) return E_OUTOFMEMORY;
     a->type = type;
@@ -11500,7 +11625,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommandList(ID3D12Device *This, UI
         ID3D12PipelineState *pso, REFIID riid, void **out) {
     (void)This; (void)node; (void)pso;
     if (!out || !allocator) return E_INVALIDARG;
-    if (!mad_list_type_ok(type)) return E_NOTIMPL;
+    if (!mad_alloc_type_ok(type)) return E_NOTIMPL;
     if (((struct mad_alloc *)allocator)->type != type) return E_INVALIDARG;
     struct mad_list *l = calloc(1, sizeof *l);
     if (!l) return E_OUTOFMEMORY;
@@ -13350,6 +13475,7 @@ static ULONG STDMETHODCALLTYPE res_Release(ID3D12Resource *This) {
         { unsigned k; for (k = 0; k < r->nview_old; k++) free(r->view_old[k]); free(r->tview); free(r->xview); }
         if (r->buffer) NSObject_release(r->buffer);
         if (r->texture && !r->borrowed) NSObject_release(r->texture);
+        if (r->shared_base) { mad_unresident(r->owner, r->shared_base); NSObject_release(r->shared_base); }
         if (r->resolve_tmp) NSObject_release(r->resolve_tmp);
         if (r->placed_heap) { mad_pl_del(r->placed_heap, r); ID3D12Heap_Release((ID3D12Heap *)r->placed_heap); }   /* ml1145 */
         if (r->own_mem) {   /* ml1154: the GPU may still read it; free after its serial (reclaimed with the ml1148 list) */
@@ -19266,7 +19392,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommandList1(ID3D12Device10 *This,
     (void)node;
     if (!out) return E_INVALIDARG;
     if (flags != D3D12_COMMAND_LIST_FLAG_NONE) return E_INVALIDARG;
-    if (!mad_list_type_ok(type)) return E_NOTIMPL;
+    if (!mad_alloc_type_ok(type)) return E_NOTIMPL;
     struct mad_list *l = calloc(1, sizeof *l);
     if (!l) return E_OUTOFMEMORY;
     l->type = type;
@@ -19530,6 +19656,91 @@ static HRESULT STDMETHODCALLTYPE rootsig_GetDevice(ID3D12RootSignature *This, RE
     (void)This; return mad_child_get_device(NULL, riid, out);
 }
 
+/* ---- OpenSharedHandle ------------------------------------------------------
+ * A texture the application's D3D11 device (DXMT) created with
+ * D3D11_RESOURCE_MISC_SHARED, opened here by its legacy shared handle. DXMT keeps
+ * such textures in a process-local table (iOS has no cross-process Metal
+ * sharing) and d3d11.dll's MadeiraSharedTextureLookup returns the Metal texture.
+ * The resource wraps a full view of it: the view supplies the resource id
+ * descriptors use, and both refer to the same storage, so D3D11 writes are
+ * visible here once the D3D11 work has completed (the application orders that,
+ * as it must on Windows). */
+struct mad_d3d11_tex2d_desc {   /* D3D11_TEXTURE2D_DESC */
+    UINT Width, Height, MipLevels, ArraySize;
+    DXGI_FORMAT Format;
+    DXGI_SAMPLE_DESC SampleDesc;
+    UINT Usage, BindFlags, CPUAccessFlags, MiscFlags;
+};
+typedef BOOL (WINAPI *mad_shared_lookup_fn)(HANDLE, obj_handle_t *, struct mad_d3d11_tex2d_desc *);
+
+static HRESULT STDMETHODCALLTYPE device_OpenSharedHandle(ID3D12Device *This, HANDLE handle, REFIID riid, void **out) {
+    struct mad_device *d = (struct mad_device *)This;
+    static mad_shared_lookup_fn lookup;
+    static unsigned said;
+    struct mad_d3d11_tex2d_desc d11;
+    D3D12_RESOURCE_DESC desc;
+    struct WMTTextureSwizzleChannels sw = { WMTTextureSwizzleRed, WMTTextureSwizzleGreen, WMTTextureSwizzleBlue, WMTTextureSwizzleAlpha };
+    struct mad_resource *r;
+    obj_handle_t base = 0, view;
+    UINT64 id = 0;
+    enum WMTPixelFormat pf;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!lookup) {
+        HMODULE m = GetModuleHandleW(L"d3d11.dll");
+        if (m) lookup = (mad_shared_lookup_fn)(void *)GetProcAddress(m, "MadeiraSharedTextureLookup");
+    }
+    memset(&d11, 0, sizeof d11);
+    if (!lookup || !lookup(handle, &base, &d11) || !base) {
+        if (said++ < 8) d3d12_log("[madeira-d3d12] OpenSharedHandle %p: not a shared D3D11 texture (lookup %s)\n", handle, lookup ? "present" : "absent");
+        return E_INVALIDARG;
+    }
+    pf = MTLTexture_pixelFormat(base);
+    view = MTLTexture_newTextureView(base, pf, d11.ArraySize > 1 ? WMTTextureType2DArray : WMTTextureType2D,
+                                     0, (uint16_t)MTLTexture_mipmapLevelCount(base), 0,
+                                     (uint16_t)(d11.ArraySize ? d11.ArraySize : 1), sw, &id);
+    if (!view) { NSObject_release(base); return mad_creation_failure(d, "shared texture view"); }
+
+    memset(&desc, 0, sizeof desc);
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = d11.Width; desc.Height = d11.Height;
+    desc.DepthOrArraySize = (UINT16)(d11.ArraySize ? d11.ArraySize : 1);
+    desc.MipLevels = (UINT16)MTLTexture_mipmapLevelCount(base);
+    desc.Format = d11.Format;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    if (d11.BindFlags & 0x20 /* D3D11_BIND_RENDER_TARGET */) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (d11.BindFlags & 0x80 /* D3D11_BIND_UNORDERED_ACCESS */) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
+    r = calloc(1, sizeof *r);
+    if (!r) { NSObject_release(view); NSObject_release(base); return E_OUTOFMEMORY; }
+    r->vtbl = &g_res_vtbl; r->refs = 1; r->iid = &IID_ID3D12Resource; r->name = "SharedTexture";
+    r->serial = (unsigned)InterlockedIncrement(&g_res_serial);
+    r->heap = D3D12_HEAP_TYPE_DEFAULT;
+    r->desc = desc;
+    r->owner = d;
+    r->texture = view;
+    r->shared_base = base;   /* the lookup's reference */
+    mad_resident(d, base);
+    r->gpu_resource_id = id;
+    r->width = d11.Width; r->height = d11.Height;
+    r->tex_type = d11.ArraySize > 1 ? WMTTextureType2DArray : WMTTextureType2D;
+    r->tex_pf = pf; r->tex_mips = desc.MipLevels; r->tex_layers = desc.DepthOrArraySize; r->tex_depth = 1;
+    r->samples = 1;
+    EnterCriticalSection(&d->view_lock);
+    mad_vmap_put_locked(d, r->gpu_resource_id, r->tex_layers, 0);
+    LeaveCriticalSection(&d->view_lock);
+    if (said++ < 8)
+        d3d12_log("[madeira-d3d12] OpenSharedHandle %p: %ux%u format %u (pixel format %u) mips %u\n", handle,
+                  d11.Width, d11.Height, (unsigned)d11.Format, (unsigned)pf, (unsigned)desc.MipLevels);
+    hr = res_QI((ID3D12Resource *)r, riid, out);
+    res_Release((ID3D12Resource *)r);
+    return hr;
+}
+
 /* ---- vtable construction ------------------------------------------------- */
 static void build_vtables(void) {
     static LONG done;
@@ -19572,6 +19783,7 @@ static void build_vtables(void) {
     g_device_vtbl.CreateQueryHeap = (void *)device_CreateQueryHeap;
     g_device_vtbl.CreateHeap = (void *)device_CreateHeap;
     g_device_vtbl.CreatePlacedResource = (void *)device_CreatePlacedResource;
+    g_device_vtbl.OpenSharedHandle = (void *)device_OpenSharedHandle;
     g_memheap_vtbl.QueryInterface          = memheap_QI;
     g_memheap_vtbl.AddRef                  = memheap_AddRef;
     g_memheap_vtbl.Release                 = memheap_Release;
@@ -19710,6 +19922,7 @@ static void build_vtables(void) {
     g_list_vtbl.ResourceBarrier         = (void *)list_ResourceBarrier;
     g_list_vtbl.Dispatch                = (void *)list_Dispatch;
     g_list_vtbl.ExecuteIndirect         = (void *)list_ExecuteIndirect;
+    g_list_vtbl.ExecuteBundle           = (void *)list_ExecuteBundle;
     g_list_vtbl.SetGraphicsRootShaderResourceView  = (void *)list_SetGraphicsRootShaderResourceView;
     g_list_vtbl.SetGraphicsRootUnorderedAccessView = (void *)list_SetGraphicsRootUnorderedAccessView;
     g_list_vtbl.SetGraphicsRoot32BitConstant       = (void *)list_SetGraphicsRoot32BitConstant;

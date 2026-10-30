@@ -3,27 +3,29 @@ FEXCore: 32-bit programs on iOS see "Apple Silicon" and no hypervisor bit
 Test for Steam's CEG step (Black Ops 1). On the iOS host FEX reports a
 GenuineIntel CPU whose brand string is "Unknown ARM CPU", with the
 hypervisor bit set. For the WOW64 module only (HostType Wow64), the brand
-is "Apple Silicon" and the hypervisor bit is clear.
+is an Intel name matching leaf 1 (Core i5-10210U) and the hypervisor bit is clear.
 
 Applies on top of 0001. The rebuilt WOW64 module is
 app/Madeira/aarch64-windows/xtajit.dll. Not for FEX-Emu.
 
 diff --git a/FEXCore/Source/Interface/Core/CPUID.cpp b/FEXCore/Source/Interface/Core/CPUID.cpp
-index 5b0ea4a..32f38d3 100644
+index 5b0ea4a..5eb78f3 100644
 --- a/FEXCore/Source/Interface/Core/CPUID.cpp
 +++ b/FEXCore/Source/Interface/Core/CPUID.cpp
-@@ -410,6 +410,18 @@ void CPUIDEmu::SetupHostHybridFlag() {
+@@ -410,6 +410,20 @@ void CPUIDEmu::SetupHostHybridFlag() {
        }
      }
    }
 +
 +#ifdef FEX_IOS_HOST
-+  /* MADEIRA cpu-name test: 32-bit programs on iOS see "Apple Silicon" instead of "Unknown ARM CPU"
-+   * (the iOS host publishes one synthetic MIDR that matches no table entry). Black Ops 1's CEG step. */
++  /* MADEIRA cpu-name test: 32-bit programs on iOS see an Intel brand string instead of "Unknown ARM CPU"
++   * (the iOS host publishes one synthetic MIDR that matches no table entry). The name matches the
++   * family/model leaf 1 reports (06_A6h, Comet Lake-U). Black Ops 1's CEG step. */
 +  if (CTX->HostFeatures.HostType == FEXCore::HostFeatures::HostTypeEnum::Wow64) {
++    static const char IOS_WOW64_NAME[] = "Intel(R) Core(TM) i5-10210U CPU @ 1.60GHz";
 +    for (auto& Data : PerCPUData) {
 +      if (Data.ProductName == ProductNames::ARM_UNKNOWN) {
-+        Data.ProductName = ProductNames::ARM_AppleSilicon;
++        Data.ProductName = IOS_WOW64_NAME;
 +      }
 +    }
 +  }
@@ -31,7 +33,7 @@ index 5b0ea4a..32f38d3 100644
  }
  
  #else
-@@ -454,6 +466,12 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_01h(uint32_t Leaf) const {
+@@ -454,6 +468,12 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_01h(uint32_t Leaf) const {
  
    // Hypervisor bit is normally set but some applications have issues with it.
    uint32_t Hypervisor = HideHypervisorBit() ? 0 : 1;

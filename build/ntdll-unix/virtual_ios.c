@@ -1636,7 +1636,11 @@ static void ios_jit_verify_copy( const char *src, const char *rx, size_t size,
     for (i = 0; i + 8 <= size; i += step)
     {
         uint64_t a, b;
-        memcpy( &a, src + i, 8 );
+        mach_vm_size_t got = 0;
+        /* madeira-bcd copy-readable: the source may hold pages that were never
+         * committed (ios_copy_guest_bytes left them zero); skip, never fault */
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(src + i), 8,
+                                    (mach_vm_address_t)&a, &got ) != KERN_SUCCESS || got != 8) continue;
         memcpy( &b, rx  + i, 8 );
         checked++;
         if (a != b)
@@ -4966,6 +4970,57 @@ void ios_mono_bridge_capture( uint64_t teb, uint64_t frame, uint64_t host_pc, ui
 }
 /* ========================== end ml648 MONO BRIDGE ========================= */
 
+/* madeira-bcd view-alias-drop: env.MADEIRA_VIEW_ALIAS_DROP = 1 (opt-in, per game).
+ * An anon RWX alias is cleared only when its pool range is handed out again or
+ * its process exits, so a SECTION view that is unmapped leaves its executable
+ * copy registered for the guest VA. Black Ops III (2026-10-19, 611924f) maps a
+ * pagefile section at 0x7032eb0000 (0x250000, made executable: a pool copy),
+ * unmaps it and maps a second view of 0xc0000 at the same address: the new
+ * view's exec request found the old alias ([alias-own] ml640 "keeping the pool
+ * dual-map"), so the guest kept running the first copy, still int3 padding
+ * (cc cc ...) where the second view had code, and died on 0x80000003. With the
+ * switch, deleting a non-image section view retires the aliases inside it, so
+ * the next view mapped there gets a copy of its own. Their pool ranges are left
+ * allocated (reclaimed at process exit). Same order as the handout purge:
+ * user_va_end first, then user_va, for the lock-free readers.
+ * (Named apart from ios_jit_anon_alias_retire_range below, which does the same
+ * for NtFreeVirtualMemory(MEM_RELEASE) of a private allocation, always on.) */
+static int ios_view_alias_drop_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_VIEW_ALIAS_DROP" );
+        on = e && e[0] == '1' && !e[1];
+    }
+    return on;
+}
+
+static void ios_jit_view_alias_retire_range( const void *base, size_t size )
+{
+    uintptr_t lo = (uintptr_t)base, hi = lo + size;
+    static int said;
+    int i;
+
+    if (!ios_view_alias_drop_on()) return;
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_jit_anon_alias_count; i++)
+    {
+        uintptr_t va = ios_jit_anon_aliases[i].user_va;
+        if (!va || va < lo || ios_jit_anon_aliases[i].user_va_end > hi) continue;
+        if (said++ < 16)
+            dprintf(2, "[view-alias-drop] section view %p+0x%lx unmapped: alias %p..%p rw=%p retired\n",
+                    base, (unsigned long)size, (void *)va, (void *)ios_jit_anon_aliases[i].user_va_end,
+                    (void *)ios_jit_anon_aliases[i].jit_rw_alias);
+        ios_jit_anon_aliases[i].user_va_end = 0;
+        __sync_synchronize();
+        ios_mono_alias_retire( va );
+        ios_jit_anon_aliases[i].user_va = 0;
+        if (ios_jit_anon_alias_live > 0) ios_jit_anon_alias_live--;
+    }
+    pthread_mutex_unlock( &ios_pool_lock );
+}
+
 int ios_jit_anon_alias_add(void *user_va, size_t size, void *jit_rw_alias)
 {
     int idx = -1, i;
@@ -7707,6 +7762,7 @@ struct file_view
     unsigned int  ios_flags;     /* IOS_VIEW_* */
 };
 #define IOS_VIEW_QUARANTINED 0x4   /* a dead thread's stack held by the stack quarantine */
+#define IOS_VIEW_X64_PLAIN   0x8   /* [x64-rwx]: anonymous RWX memory kept plain read/write for good */
 
 /* per-page protection flags */
 #define VPROT_READ       0x01
@@ -12868,6 +12924,8 @@ static void clear_arm64ec_range( const void *addr, size_t size );
  * are cleared so a reused range starts with a clean call-routing slate. */
 static void ios_sc_grants_owner_died( void *peb );
 
+static void ios_x64_rwx_plain_forget( void *peb );
+
 void ios_jit_reclaim_process( void *peb )
 {
     size_t total = 0;
@@ -12877,6 +12935,7 @@ void ios_jit_reclaim_process( void *peb )
 
     /* madeira-bcd: its Social Club reservations go when the next helper asks */
     ios_sc_grants_owner_died( peb );
+    ios_x64_rwx_plain_forget( peb );   /* [x64-rwx] */
     if (!peb || !rx_base) return;
 
     /* The alias-push callback lives in the emulator of the LAST process that
@@ -14378,6 +14437,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
     if ((view->protect & SEC_IMAGE) && ios_jit_image_retire_enabled())
         ios_jit_retire_image( view->base, view->size );
     if (view->protect & SEC_IMAGE) ios_jit_note_image_unmapped( view->base, view->size );
+    else if (!is_view_valloc( view )) ios_jit_view_alias_retire_range( view->base, view->size );   /* madeira-bcd view-alias-drop */
     ios_swap_release_range( view->base, view->size, 0 );   /* ml1077 */
     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
     if (ios_retire_trace_armed) ios_retire_mark( "D1u\n" );   /* unmap_area done */
@@ -17040,6 +17100,157 @@ static int ios_wow_rwx_view_ok( const struct file_view *view )
     return 1;
 }
 
+/* [x64-rwx]: anonymous RWX memory in a 64-bit Java process, code cache included.
+ *
+ * ml1279 above for a 64-bit pseudo-process that runs HotSpot. Project Zomboid
+ * (Zulu 25, C2 only, build 47, 2026-10-30) stalled for a minute while loading:
+ * 4.35 M emulated stores into the JVM code cache, which went through the JIT
+ * pool because ios_guest_anon_rwx_view_ok refuses it twice. HotSpot reserves
+ * it PAGE_READWRITE and commits it PAGE_EXECUTE_READWRITE later (so it was not
+ * ALLOCATED RWX), and its size is a 64 KB multiple. The host never fetches
+ * those bytes: FEX translates them and tracks SMC through
+ * NtProtectVirtualMemory, so as plain memory a page is written freely until
+ * FEX arms it, then faults once and FEX disarms it, as in a 32-bit window.
+ *
+ * Automatic per pseudo-process: on once that process maps jvm.dll
+ * (ios_x64_note_image), keyed by PEB and dropped when it exits.
+ * MADEIRA_X64_RWX_PLAIN=0 never turns it on, =1 turns it on in every 64-bit
+ * process. Same exclusions as ml1279 (EC_CODE requests, the pool, existing
+ * aliases, images, file mappings, ARM64EC and system views) plus the 64 KB
+ * floor of the data-heap rule (native thunk pages).
+ *
+ * The decision is per view and permanent (IOS_VIEW_X64_PLAIN): a page must not
+ * move to the pool later, see the data-heap rule. A marked view stays plain
+ * whichever thread asks, so a protect from another pseudo-process cannot copy
+ * it into the pool. */
+#define IOS_X64_RWX_PLAIN_MAX 16
+static void *ios_x64_rwx_plain_pebs[IOS_X64_RWX_PLAIN_MAX];
+
+static int ios_x64_rwx_plain_mode(void)
+{
+    static int cached = -2;
+    if (cached == -2)
+    {
+        const char *s = getenv( "MADEIRA_X64_RWX_PLAIN" );
+        cached = !s || !*s ? -1 : (*s == '1') ? 1 : 0;
+        dprintf( 2, "[x64-rwx] MADEIRA_X64_RWX_PLAIN=%s -> 64-bit guest RWX memory is %s\n",
+                 s ? s : "(unset)",
+                 cached == 1 ? "plain read/write in every 64-bit process" :
+                 cached == 0 ? "pool-aliased (stores emulated)" :
+                               "plain read/write in a process once jvm.dll is mapped there" );
+    }
+    return cached;
+}
+
+/* Lock-free reads, like the window lookups on this path. */
+static int ios_x64_rwx_plain_current(void)
+{
+    int mode = ios_x64_rwx_plain_mode(), i;
+    void *peb;
+
+    if (mode >= 0) return mode;   /* 0 never, 1 always */
+    if (!(peb = ios_jit_current_peb())) return 0;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+        if (__atomic_load_n( &ios_x64_rwx_plain_pebs[i], __ATOMIC_ACQUIRE ) == peb) return 1;
+    return 0;
+}
+
+static int ios_image_name_is( const UNICODE_STRING *nt_name, const char *want )
+{
+    size_t n = strlen( want ), len, i;
+    const WCHAR *name;
+
+    if (!nt_name || !nt_name->Buffer) return 0;
+    len = nt_name->Length / sizeof(WCHAR);
+    if (len < n) return 0;
+    name = nt_name->Buffer + len - n;
+    if (len > n && name[-1] != '\\' && name[-1] != '/') return 0;
+    for (i = 0; i < n; i++)
+    {
+        WCHAR c = name[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c != (WCHAR)want[i]) return 0;
+    }
+    return 1;
+}
+
+/* Called for every image mapping: notice HotSpot in a 64-bit process. */
+static void ios_x64_note_image( const void *base, const UNICODE_STRING *nt_name )
+{
+    void *peb, *none;
+    int i;
+
+    if (ios_wow_base() || ios_wow_in_window( base )) return;
+    if (!ios_image_name_is( nt_name, "jvm.dll" )) return;
+    if (!(peb = ios_jit_current_peb())) return;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+        if (__atomic_load_n( &ios_x64_rwx_plain_pebs[i], __ATOMIC_ACQUIRE ) == peb) return;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+    {
+        none = NULL;
+        if (__atomic_compare_exchange_n( &ios_x64_rwx_plain_pebs[i], &none, peb, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+            break;
+    }
+    dprintf( 2, "[x64-rwx] jvm.dll mapped at %p in peb=%p: its RWX memory is %s\n", base, peb,
+             i == IOS_X64_RWX_PLAIN_MAX ? "still pool-aliased (table full)" :
+             ios_x64_rwx_plain_mode() ? "plain read/write from now on"
+                                      : "still pool-aliased (MADEIRA_X64_RWX_PLAIN=0)" );
+}
+
+static void ios_x64_rwx_plain_forget( void *peb )
+{
+    int i;
+
+    if (!peb) return;
+    for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
+    {
+        void *want = peb;
+        __atomic_compare_exchange_n( &ios_x64_rwx_plain_pebs[i], &want, NULL, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE );
+    }
+}
+
+/* Every view the host-page rounded range touches is already plain, or none is
+ * and the current process qualifies: then they are marked plain for good. A
+ * mix keeps the pool path, as before. */
+static int ios_x64_rwx_is_host_data( uintptr_t b, uintptr_t e )
+{
+    uintptr_t a;
+    int marked = 0, unmarked = 0;
+
+    if (ios_wow_base() || ios_wow_in_window( (const void *)b )) return 0;
+    for (a = b; a < e; )
+    {
+        struct file_view *view = find_view( (const void *)a, 1 );
+        if (!view) { a = (a + 0x1000) & ~(uintptr_t)0xfff; continue; }   /* rounding gap */
+        if (view->ios_flags & IOS_VIEW_X64_PLAIN) marked = 1;
+        else if (!ios_wow_rwx_view_ok( view ) || view->size < 0x10000) return 0;
+        else unmarked = 1;
+        a = (uintptr_t)view->base + view->size;
+    }
+    if (marked) return !unmarked;
+    if (!unmarked || !ios_x64_rwx_plain_current()) return 0;
+    for (a = b; a < e; )
+    {
+        struct file_view *view = find_view( (const void *)a, 1 );
+        if (!view) { a = (a + 0x1000) & ~(uintptr_t)0xfff; continue; }
+        if (!(view->ios_flags & IOS_VIEW_X64_PLAIN))
+        {
+            static unsigned x64_views;
+            view->ios_flags |= IOS_VIEW_X64_PLAIN;
+            if (x64_views++ < 32 && !ios_in_mach_exc)
+                dprintf( 2, "[x64-rwx] view %p+0x%lx (allocated %c%c%c) is plain read/write from now on\n",
+                         view->base, (unsigned long)view->size,
+                         (view->protect & VPROT_READ)  ? 'r' : '-',
+                         (view->protect & VPROT_WRITE) ? 'w' : '-',
+                         (view->protect & VPROT_EXEC)  ? 'x' : '-' );
+        }
+        a = (uintptr_t)view->base + view->size;
+    }
+    return 1;
+}
+
 /* The range is host-page rounded (16 KB) and can run past the end of a guest
  * allocation (0x41000 -> 0x44000), so every view it touches must qualify. */
 static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
@@ -17070,6 +17281,13 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
         any = 0;
     }
 
+    /* [x64-rwx]: before the data-heap rule, so a marked view always answers here */
+    if (!ios_alloc_ec_code && e > b &&
+        !(rx && e > rx && b < rx + ios_jit_pool_size_global) &&
+        !ios_jit_anon_alias_find_cover( (void *)base, size, &cov_rw, &cov_rx ) &&
+        ios_x64_rwx_is_host_data( b, e ))
+        return 1;
+
     if (!ios_guest_rwx_data_enabled() || ios_alloc_ec_code || !arm64ec_view) return 0;
     if (e <= b) return 0;
     if (rx && e > rx && b < rx + ios_jit_pool_size_global) return 0;
@@ -17088,6 +17306,59 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
 #endif
 }
 
+
+/* madeira-bcd copy-readable: copy guest bytes into the JIT pool without faulting.
+ * Black Ops III (2026-10-19, build 2cd6f36): after its unpacker made the exe RWX, an
+ * executable protect reached a memcpy in mprotect_exec whose source ran into pages
+ * that were reserved but never committed (a growing buffer at 0x7059f70000); the
+ * READ fault at 0x705a470000 happened on the host stack, the Mach handler could
+ * only deliver it "best-effort on guest stack", and the main thread sat in
+ * _platform_memmove for good while the game drew nothing. mach_vm_read_overwrite
+ * returns an error instead of faulting: a chunk that reads whole is copied, one
+ * that does not is retried page by page and its unreadable pages are left zero,
+ * as an uncommitted page reads on Windows-side bookkeeping. Returns the number of
+ * bytes that could not be read. */
+static size_t ios_copy_guest_bytes( void *dst, const void *src, size_t size )
+{
+    const size_t chunk = 1 << 20, pg = 0x1000;   /* 4 KB: exact on 4 KB and 16 KB pages */
+    size_t off = 0, bad = 0;
+
+    while (off < size)
+    {
+        size_t n = size - off < chunk ? size - off : chunk, p;
+        mach_vm_size_t got = 0;
+
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)((const char *)src + off), n,
+                                    (mach_vm_address_t)((char *)dst + off), &got ) == KERN_SUCCESS && got == n)
+        {
+            off += n;
+            continue;
+        }
+        for (p = 0; p < n; )
+        {
+            uintptr_t a = (uintptr_t)src + off + p;
+            size_t m = pg - (a & (pg - 1));
+            if (m > n - p) m = n - p;
+            got = 0;
+            if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)a, m,
+                                        (mach_vm_address_t)((char *)dst + off + p), &got ) != KERN_SUCCESS || got != m)
+            {
+                memset( (char *)dst + off + p, 0, m );
+                bad += m;
+            }
+            p += m;
+        }
+        off += n;
+    }
+    if (bad)
+    {
+        static int said;
+        if (said++ < 16)
+            dprintf( 2, "[copy-readable] %p+0x%lx: 0x%lx bytes unreadable (reserved, not committed?) left zero "
+                        "instead of faulting in mprotect_exec\n", src, (unsigned long)size, (unsigned long)bad );
+    }
+    return bad;
+}
 
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
@@ -18124,14 +18395,13 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                     const unsigned char *src = (const unsigned char *)base;
                     size_t i;
 
+                    memset( rw_dst, 0, alloc_size );
+                    ios_copy_guest_bytes( rw_dst, src, size );   /* madeira-bcd copy-readable */
                     for (i = 0; i < size; i++)
                     {
-                        ml634_pre_hash = (ml634_pre_hash ^ src[i]) * 1099511628211ull;
-                        if (src[i]) ml634_nonzero++;
+                        ml634_pre_hash = (ml634_pre_hash ^ (unsigned char)rw_dst[i]) * 1099511628211ull;
+                        if (rw_dst[i]) ml634_nonzero++;
                     }
-
-                    memset( rw_dst, 0, alloc_size );
-                    memcpy( rw_dst, src, size );
                     sys_icache_invalidate( rx_dst, alloc_size );
 
                     {
@@ -18383,7 +18653,7 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
              * This preserves ADRP-based PC-relative references between sections. */
             ios_jit_scan_nonexec( "pre-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
-            memcpy((char *)jit_rw_base + offset, image_base, image_size);
+            ios_copy_guest_bytes((char *)jit_rw_base + offset, image_base, image_size);   /* madeira-bcd copy-readable */
             ios_jit_scan_nonexec( "post-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
             sys_icache_invalidate((char *)jit_rx_base + offset, image_size);
@@ -23556,6 +23826,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
 #ifdef WINE_IOS
     ios_wow_note_image( view->base, nt_name );   /* ml1282 */
+    ios_x64_note_image( view->base, nt_name );   /* [x64-rwx] */
 #endif
 
     TRACE_(module)( "mapping PE file %s at %p-%p\n", debugstr_us(nt_name), ptr, ptr + total_size );
@@ -24442,6 +24713,79 @@ done:
 }
 
 
+#ifdef WINE_IOS
+/* madeira-bcd sysx64-image: env.MADEIRA_SYSX64_IMAGE = 1 (opt-in, per game). On
+ * Windows on ARM, system32's DLLs are ARM64X: an x64 program that maps one
+ * itself gets code it can call. Here system32 holds the pure ARM64 builds and
+ * the x64-callable (ARM64EC) builds live in C:\windows\sysx64, where the
+ * loader's mixed-arch fallback finds them -- but a program that maps the file
+ * on its own gets the ARM64 one. Black Ops III (2026-10-19) maps
+ * system32\gdi32.dll that way, without a loader name, and calls its
+ * GdiDllInitialize: ARM64 code decoded as x64, "Invalid instruction in entry
+ * block", c0000005. With the switch, an x64 process's own map of a pure ARM64
+ * system32 image takes the sysx64 file of the same name when there is one.
+ * A map that asks for write access keeps the file it named. Returns a new
+ * image section handle for that file, or 0. */
+static HANDLE ios_sysx64_image_section( const UNICODE_STRING *nt_name, const struct pe_image_info *pi,
+                                         ACCESS_MASK access )
+{
+    static const WCHAR dir[] = {'\\','w','i','n','d','o','w','s','\\','s','y','s','t','e','m','3','2','\\'};
+    static const WCHAR x64[] = {'s','y','s','x','6','4'};
+    static int on = -1, said;
+    const USHORT dlen = ARRAY_SIZE(dir), len = nt_name->Length / sizeof(WCHAR);
+    WCHAR path[MAX_PATH];
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    HANDLE file = 0, section = 0;
+    USHORT i, j, at = 0;
+    NTSTATUS status;
+
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_SYSX64_IMAGE" );
+        on = e && e[0] == '1' && !e[1];
+    }
+    if (!on || NtCurrentTeb()->Tib.ArbitraryUserPointer || (access & SECTION_MAP_WRITE)) return 0;
+    if (pi->machine != IMAGE_FILE_MACHINE_ARM64 || pi->is_hybrid) return 0;
+    if (ios_cur_image_info_machine() != IMAGE_FILE_MACHINE_AMD64) return 0;
+    if (!nt_name->Buffer || len <= dlen || len + 2 >= ARRAY_SIZE(path)) return 0;
+    for (i = 0; i + dlen < len && !at; i++)
+    {
+        for (j = 0; j < dlen; j++)
+        {
+            WCHAR c = nt_name->Buffer[i + j];
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c != dir[j]) break;
+        }
+        if (j == dlen) at = i + 9;   /* index of "system32", after "\windows\" */
+    }
+    if (!at) return 0;
+    for (i = at + 9; i < len; i++) if (nt_name->Buffer[i] == '\\') return 0;   /* a file right in system32 */
+
+    /* the same path with "system32" replaced by "sysx64" */
+    memcpy( path, nt_name->Buffer, at * sizeof(WCHAR) );
+    memcpy( path + at, x64, sizeof(x64) );
+    memcpy( path + at + ARRAY_SIZE(x64), nt_name->Buffer + at + 8, (len - at - 8) * sizeof(WCHAR) );
+    us.Buffer = path;
+    us.Length = us.MaximumLength = (len - 2) * sizeof(WCHAR);
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtOpenFile( &file, GENERIC_READ | GENERIC_EXECUTE | SYNCHRONIZE, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_SYNCHRONOUS_IO_NONALERT );
+    if (!status)
+    {
+        status = NtCreateSection( &section, SECTION_QUERY | SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+                                  NULL, NULL, PAGE_EXECUTE_READ, SEC_IMAGE, file );
+        NtClose( file );
+        if (status) section = 0;
+    }
+    if (said++ < 16)
+        dprintf( 2, "[sysx64-image] x64 map of ARM64 %s: %s %s (status 0x%x)\n", debugstr_us(nt_name),
+                 section ? "mapping" : "keeping it, no", debugstr_us(&us), (unsigned)status );
+    return section;
+}
+#endif
+
 /***********************************************************************
  *             virtual_map_section
  *
@@ -24510,6 +24854,19 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     {
         SECTION_IMAGE_INFORMATION info;
         ULONG64 prev = 0;
+#ifdef WINE_IOS
+        HANDLE sysx64 = ios_sysx64_image_section( &nt_name, image_info, access );
+
+        if (sysx64)   /* madeira-bcd sysx64-image: map the x64-callable build instead */
+        {
+            if (shared_file) NtClose( shared_file );
+            free( image_info );
+            res = virtual_map_section( sysx64, addr_ptr, limit_low, limit_high, commit_size,
+                                       offset_ptr, size_ptr, alloc_type, protect, machine );
+            NtClose( sysx64 );
+            return res;
+        }
+#endif
 
         if (NtCurrentTeb64())
         {
@@ -26594,6 +26951,48 @@ void virtual_init_user_shared_data(void)
     }
 
     init_shared_data_cpuinfo( data );
+
+    /* madeira-bcd: what wineboot.exe's create_user_shared_data() writes. The iOS
+     * prefix is pre-seeded and wineboot.exe never runs (run_wineboot), so these
+     * stayed zero for every guest: NtMajorVersion 0, NtBuildNumber 0, no
+     * NtSystemRoot. GetVersionEx reads the PEB and never noticed, but code that
+     * reads the page directly does: a protected game (The Adventures of Elliot)
+     * read NtMajorVersion ~10,000 times in four seconds ([kuser-read]) and then
+     * faulted on a pointer it had computed. The values are the ones the PEB
+     * carries (init_peb: Windows 10, build 19045), with the product type and
+     * suite mask of Wine's WIN10 entry (dlls/ntdll/version.c). */
+    {
+        static const WCHAR rootW[] = {'C',':','\\','w','i','n','d','o','w','s',0};
+        data->NtBuildNumber      = 19045;
+        data->NtProductType      = NtProductWinNt;   /* VER_NT_WORKSTATION */
+        data->ProductTypeIsValid = TRUE;
+        data->NtMajorVersion     = 10;
+        data->NtMinorVersion     = 0;
+        data->SuiteMask          = VER_SUITE_SINGLEUSERTS;
+        memcpy( data->NtSystemRoot, rootW, sizeof(rootW) );
+    }
+
+    /* madeira-bcd: the same game also read Cookie and BootId ~4,000 times each,
+     * and both were zero. On Windows Cookie is a random per-boot value and BootId
+     * counts boots, so neither is ever zero; give them values of that shape.
+     * MADEIRA_KUSER_NATIVE_ARCH=9 also reports an AMD64 host instead of ARM64
+     * (diagnostic, off by default: protected code may take a Windows-on-ARM path
+     * when it sees 12). Nothing in Wine's PE side reads this field. */
+    {
+        const char *arch = getenv( "MADEIRA_KUSER_NATIVE_ARCH" );
+        /* This runs again for every process started without a parent, on the
+         * same shared page, so keep the first value: Windows keeps one Cookie
+         * per boot, and a process that cached it must not see it change. */
+        if (!data->Cookie) data->Cookie = arc4random() | 1;
+        data->BootId = 7;
+        if (arch && *arch)
+        {
+            data->NativeProcessorArchitecture = (USHORT)atoi( arch );
+            ERR( "[kuser] NativeProcessorArchitecture=%u (MADEIRA_KUSER_NATIVE_ARCH)\n",
+                 data->NativeProcessorArchitecture );
+        }
+    }
+
 #ifdef WINE_IOS
     {
         /* ml1310: with MADEIRA_FEX_AVX=1 FEX runs AVX/AVX2 and its CPUID says so, but
