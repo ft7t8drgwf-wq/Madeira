@@ -745,34 +745,27 @@ enum GameRecommendations {
         """,
         launchMode: "desktop", startServices: true)
 
-    /// Ubisoft Connect (LauncherSupport.swift; owner's choice, 2026-10-29). Like the
-    /// Rockstar launcher a Chromium (CEF) client, UplayWebCore.exe draws its window, so
-    /// it takes the layout Social Club and Steam's web helper need: Chromium 128 and
-    /// later reserves three 32 GB blocks on 32 GB boundaries (chrome_elf's and libcef's
-    /// PartitionAlloc, Oilpan's cage), which only Social Club layout 2 leaves room for,
-    /// plus the pool lines for libcef.dll and pure-x64 images uncopied. Its service and
-    /// out-of-process COM need the service manager, so the Wine desktop with Windows
-    /// services first. The swap file takes the web helper's idle pages, as for Steam's
-    /// Big Picture. No release delay (madeira-bcd's 2000 ms): Chromium's allocator
-    /// reserves, releases and reserves again, which the delay turns into a spin. The
-    /// older 32-bit client gets the launcher chain's 2 GB margin and every window slot
-    /// from the start. Not device-tested yet.
+    /// Ubisoft Connect (LauncherSupport.swift; owner's choice, 2026-10-29). The client
+    /// is 32-bit: UbisoftConnect.exe starts upc.exe and UplayWebCore.exe (a 32-bit
+    /// Chromium), each in its own 4 GB window. Version 1 took the 64-bit Chromium
+    /// layout Social Club and the Rockstar launcher use (Social Club layout 2, the pool
+    /// lines), which fills [0x7400000000, 0x7c00000000) with libcef's reservations; on
+    /// build 48 the second 32-bit process then found no window ("[wow-window] no free
+    /// 4GB-aligned slot", upc.exe exit code 1) and the client never opened. Version 2
+    /// has none of those lines, so the extra windows spill into that range
+    /// (MADEIRA_WOW_SPILL_CEF), and keeps the 2 GB margin, every window slot from the
+    /// start and the small DXMT rings. Its service and out-of-process COM need the
+    /// service manager, so the Wine desktop with Windows services first. The swap
+    /// file takes the web helper's idle pages. No release delay (madeira-bcd's
+    /// 2000 ms): Chromium's allocator reserves, releases and reserves again.
     static let ubisoftConnect = GameRecommendation(
-        id: "ubisoft-connect", title: "Ubisoft Connect", version: 1,
+        id: "ubisoft-connect", title: "Ubisoft Connect", version: 2,
         config: """
         # Madeira's recommended settings for Ubisoft Connect.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         swap-mb = 4096
         swap-min-mb = 1
-        pool-low = 1
-        pool-page-fit = 1
-        pool-split = 1
         env.MADEIRA_SWAP_COVERAGE = broad
-        env.MADEIRA_SC_PA_POOLS = 2
-        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
-        env.MADEIRA_POOL_LOW_IMAGES = 1
-        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
-        env.MADEIRA_X64_IMAGE_NOCOPY = 1
         env.MADEIRA_LOCK_ORPHAN = stamped
         env.MADEIRA_TOUCH_MOUSE = 1
         env.MADEIRA_WOW_MIN_FREE_GB = 2
@@ -794,32 +787,28 @@ enum GameRecommendations {
         launchMode: "desktop", startServices: true)
 
     /// Battle.net (LauncherSupport.swift; owner's choice, 2026-10-29): "Battle.net
-    /// Launcher.exe" starts Battle.net.exe, a 64-bit Chromium (CEF) client, and
-    /// Blizzard's Agent.exe, which installs and updates the games. The same Chromium
-    /// lines as Ubisoft Connect; the Wine desktop with Windows services first for the
-    /// Agent's out-of-process COM. Windows' location service is off: the client stops
-    /// on it under Wine (Lutris's Battle.net script turns it off the same way). Not
-    /// device-tested yet.
+    /// Launcher.exe" starts Battle.net.exe, Blizzard's Chromium (CEF) client, and
+    /// Agent.exe, which installs and updates the games. Both the launcher and the
+    /// client are 32-bit, like Ubisoft Connect's: version 1 had the 64-bit Chromium
+    /// lines, and on build 48 Battle.net.exe found no window ("[wow-window] no free
+    /// 4GB-aligned slot") while the launcher held the band's. Version 2 is Ubisoft
+    /// Connect's version 2 (the extra windows spill into the Chromium pool range,
+    /// MADEIRA_WOW_SPILL_CEF), with the Wine desktop with Windows services first for
+    /// the Agent's out-of-process COM. Windows' location service is off: the client
+    /// stops on it under Wine (Lutris's Battle.net script turns it off the same way).
     static let battleNet = GameRecommendation(
-        id: "battle-net", title: "Battle.net", version: 1,
+        id: "battle-net", title: "Battle.net", version: 2,
         config: """
         # Madeira's recommended settings for Battle.net.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         swap-mb = 4096
         swap-min-mb = 1
-        pool-low = 1
-        pool-page-fit = 1
-        pool-split = 1
         env.MADEIRA_SWAP_COVERAGE = broad
-        env.MADEIRA_SC_PA_POOLS = 2
-        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
-        env.MADEIRA_POOL_LOW_IMAGES = 1
-        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
-        env.MADEIRA_X64_IMAGE_NOCOPY = 1
         env.MADEIRA_LOCK_ORPHAN = stamped
         env.MADEIRA_TOUCH_MOUSE = 1
         env.MADEIRA_WOW_MIN_FREE_GB = 2
-        env.DXMT_SMALL_RINGS = Battle.net.exe
+        env.MADEIRA_WOW_PLACEHOLDERS = 1
+        env.DXMT_SMALL_RINGS = Battle.net Launcher.exe;Battle.net.exe;Agent.exe
         env.WINEDLLOVERRIDES = locationapi=d
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
@@ -839,25 +828,30 @@ enum GameRecommendations {
     /// Final Fantasy XIV's launcher (boot\ffxivboot.exe; LauncherSupport.swift), kept
     /// for installing and updating the game: Madeira signs the game itself in
     /// (FFXIVLaunch.swift). Its window is Internet Explorer's engine (mshtml), not
-    /// Chromium, so the Wine desktop and the standard line only. Not device-tested yet.
+    /// Chromium, so the standard line only, in the Wine desktop with Windows services
+    /// first (version 2): its installer only ran that way on build 48. Not
+    /// device-tested yet.
     static let ffxivLauncher = GameRecommendation(
-        id: "ffxiv-launcher", title: "Final Fantasy XIV launcher", version: 1,
+        id: "ffxiv-launcher", title: "Final Fantasy XIV launcher", version: 2,
         config: """
         # Madeira's recommended settings for the Final Fantasy XIV launcher.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
-        launchMode: "desktop")
+        launchMode: "desktop", startServices: true)
 
-    /// Final Fantasy XIV's installer (ffxivsetup.exe), which installs the launcher.
+    /// Final Fantasy XIV's installer (ffxivsetup.exe), which installs the launcher
+    /// through InstallShield (ffxivinstaller.exe, ISBEW64.exe). Build 48: started
+    /// directly its window stayed black; in the Wine desktop with Windows services first
+    /// it installed (owner's test, 2026-10-30). Version 2 starts it that way.
     static let ffxivSetup = GameRecommendation(
-        id: "ffxiv-setup", title: "Final Fantasy XIV installer", version: 1,
+        id: "ffxiv-setup", title: "Final Fantasy XIV installer", version: 2,
         config: """
         # Madeira's recommended settings for the Final Fantasy XIV installer.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
-        launchMode: "desktop")
+        launchMode: "desktop", startServices: true)
 
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
     /// the owner tried outside these lists closed at start until the [ec-hook]
