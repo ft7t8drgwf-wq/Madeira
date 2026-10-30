@@ -1028,13 +1028,20 @@ final class LibraryModel: ObservableObject {
     }
     /// An itch.io download finished (ItchLibrary): the game gets its library entry, or an
     /// existing one follows the new program and keeps its title, artwork and settings.
-    /// A new entry gets itch.io's cover art as its cover image.
+    /// A new entry gets itch.io's cover art as its cover image. While its program is an
+    /// installer (ItchSetup), the entry starts in the Wine desktop with Windows services
+    /// first; once the installer has installed the game, it starts directly again.
     @MainActor
-    func upsertItch(_ game: ItchInstalledGame, cover: URL?) async {
+    func upsertItch(_ game: ItchInstalledGame, cover: URL?, setupFinished: Bool = false) async {
         guard !readOnly else { return }
         var entry = entries.first { $0.itchGameID == game.gameID } ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
         entry.itchGameID = game.gameID
         entry.relativePath = game.programPath
+        if game.setup != nil {
+            entry.launchMode = "desktop"; entry.startServices = true
+        } else if setupFinished {
+            entry.launchMode = nil; entry.startServices = nil
+        }
         entry.folderBytes = game.installBytes
         let program = Self.drive.appendingPathComponent(game.programPath)
         if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
