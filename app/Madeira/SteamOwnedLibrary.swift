@@ -930,11 +930,15 @@ final class SteamOwnedLibrary: ObservableObject {
             for entry in wanted { begin.writeString(fieldNumber: 3, value: entry.path) }   // files_to_upload
             begin.writeUInt64(fieldNumber: 5, value: Self.cloudClientID)     // client_id
             begin.writeUInt64(fieldNumber: 6, value: UInt64(context.info.buildID))   // app_build_id
-            var batch = ProtobufDecoder(try await session.callServiceMethod(method: .cloudBeginAppUploadBatch, body: begin.data, timeout: 30))
+            let opened = try await session.callServiceMethodWithResult(method: .cloudBeginAppUploadBatch, body: begin.data, timeout: 30)
+            var batch = ProtobufDecoder(opened.body)
             while let tag = try batch.readTag() {
                 if tag.fieldNumber == 1, tag.wireType == .varint { batchID = try batch.readVarint() } else { try batch.skip(wireType: tag.wireType) }
             }
-            guard batchID != 0 else { throw SteamFileError.invalid("Steam did not open an upload for this game.") }
+            guard batchID != 0 else {
+                SteamLog.event("[steam-cloud] app=\(appID) upload batch refused eresult=\(opened.eresult)")
+                throw SteamFileError.invalid("Steam did not open an upload for this game (code \(opened.eresult)).")
+            }
             for entry in wanted {
                 guard !cloudBlocked, Self.cloudEnabled else { throw CancellationError() }
                 guard let place = context.paths.location(cloudPath: entry.path) else { continue }
@@ -953,8 +957,14 @@ final class SteamOwnedLibrary: ObservableObject {
                 request.writeUInt32(fieldNumber: 7, value: 0xFFFF_FFFF)              // platforms_to_sync: all
                 request.writeUInt32(fieldNumber: 9, value: session.cellID)           // cell_id
                 request.writeUInt64(fieldNumber: 13, value: batchID)                 // upload_batch_id
-                let answer = try SteamCloudUploadBlock.parse(
-                    try await session.callServiceMethod(method: .cloudClientBeginFileUpload, body: request.data, timeout: 30))
+                let begun = try await session.callServiceMethodWithResult(method: .cloudClientBeginFileUpload, body: request.data, timeout: 30)
+                // Steam's answer, logged: a refusal (quota, a name it does not
+                // accept) comes back as an EResult with no upload blocks.
+                guard begun.eresult == 1 else {
+                    SteamLog.event("[steam-cloud] app=\(appID) upload file=\(done + 1)/\(wanted.count) bytes=\(file.count) refused begin-eresult=\(begun.eresult) name=\(Self.cloudLogName(entry.path))")
+                    throw SteamFileError.invalid(Self.cloudRefusal(begun.eresult))
+                }
+                let answer = try SteamCloudUploadBlock.parse(begun.body)
                 guard !answer.encrypt else { throw SteamFileError.invalid("Steam asked for an encrypted upload, which is not supported.") }
                 var sent = true
                 var statuses: [Int] = []
@@ -968,12 +978,15 @@ final class SteamOwnedLibrary: ObservableObject {
                 commit.writeBytes(fieldNumber: 3, value: sha)                        // file_sha
                 commit.writeString(fieldNumber: 4, value: entry.path)                // filename
                 var committed = false
-                var reply = ProtobufDecoder(try await session.callServiceMethod(method: .cloudClientCommitFileUpload, body: commit.data, timeout: 30))
-                while let tag = try reply.readTag() {
-                    if tag.fieldNumber == 1, tag.wireType == .varint { committed = try reply.readVarint() != 0 } else { try reply.skip(wireType: tag.wireType) }
+                let reply = try await session.callServiceMethodWithResult(method: .cloudClientCommitFileUpload, body: commit.data, timeout: 30)
+                var replyDecoder = ProtobufDecoder(reply.body)
+                while let tag = try replyDecoder.readTag() {
+                    if tag.fieldNumber == 1, tag.wireType == .varint { committed = try replyDecoder.readVarint() != 0 } else { try replyDecoder.skip(wireType: tag.wireType) }
                 }
-                SteamLog.event("[steam-cloud] app=\(appID) upload file=\(done + 1)/\(wanted.count) bytes=\(file.count) parts=\(answer.blocks.count) http=\(statuses.map(String.init).joined(separator: ",")) committed=\(committed ? 1 : 0)")
-                guard sent, committed else { throw SteamFileError.invalid("Steam did not accept a save file.") }
+                SteamLog.event("[steam-cloud] app=\(appID) upload file=\(done + 1)/\(wanted.count) bytes=\(file.count) parts=\(answer.blocks.count) http=\(statuses.map(String.init).joined(separator: ",")) committed=\(committed ? 1 : 0) commit-eresult=\(reply.eresult)")
+                guard sent, committed else {
+                    throw SteamFileError.invalid(reply.eresult == 1 ? "Steam did not accept a save file." : Self.cloudRefusal(reply.eresult))
+                }
                 done += 1
                 state.phase = .uploading(done: done, of: wanted.count); cloud[appID] = state
             }
@@ -1486,6 +1499,9 @@ final class SteamOwnedLibrary: ObservableObject {
                 SteamLog.event("[steam-depot] failed app=\(appID) reason=drive-missing")
                 outcome = .failed(message)
             } else {
+                // Refused by the content servers: Try again asks Steam for new authorization.
+                if case SteamError.contentHTTP(let status) = error, status == 401 || status == 403 { downloader.forgetAuthorization() }
+                if case SteamError.contentRefused = error { downloader.forgetAuthorization() }
                 downloads[appID]?.state = .failed(SteamSignIn.message(error))
                 SteamLog.event("[steam-depot] failed app=\(appID) reason=\(Self.reason(error))")
                 outcome = .failed(SteamSignIn.message(error))
@@ -1498,6 +1514,23 @@ final class SteamOwnedLibrary: ObservableObject {
     }
 
     // MARK: Messages
+
+    /// What a Steam Cloud refusal means, for the game page.
+    static func cloudRefusal(_ eresult: Int32) -> String {
+        switch eresult {
+        case 25: return "Steam Cloud is full for this game (code 25). Delete old saves in the game, then sync again."
+        case 15: return "Steam Cloud refused this save (code 15: access denied)."
+        case 8: return "Steam Cloud did not accept this save's name (code 8)."
+        default: return "Steam Cloud refused this save (code \(eresult))."
+        }
+    }
+
+    /// A cloud path for the log: the %Root% and the file name, no folders
+    /// (they can hold account IDs).
+    static func cloudLogName(_ path: String) -> String {
+        let root = path.hasPrefix("%") ? path.split(separator: "%", maxSplits: 2, omittingEmptySubsequences: false).dropFirst().first.map { "%\($0)%" } ?? "" : ""
+        return root + "…/" + (path.split(separator: "/").last.map(String.init) ?? path)
+    }
 
     /// Short, credential-free reason for the log.
     static func reason(_ error: Error) -> String {
@@ -1513,6 +1546,8 @@ final class SteamOwnedLibrary: ObservableObject {
         case SteamError.chunkDecodeFailed(let format): return "decode-\(format)"
         case SteamError.manifestFetchFailed: return "manifest"
         case SteamError.chunkDownloadFailed: return "chunk"
+        case SteamError.contentHTTP(let status): return "http-\(status)"
+        case SteamError.contentRefused(let status): return "refused-\(status)"
         case let url as URLError: return "url-\(url.code.rawValue)"
         default: return String(describing: type(of: error))
         }
