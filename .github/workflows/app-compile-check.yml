@@ -1,0 +1,19 @@
+# A few minutes on a Mac: the early compile check alone, for checking a
+# branch before starting the full IPA build.
+name: App compile check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode
+        run: |
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X/Contents/Developer"
+      - name: Early compile check of the app's C and Objective-C files
+        run: tools/ci/early-compile-check.sh

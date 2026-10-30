@@ -32,7 +32,7 @@ fixture = r'''
 import Foundation
 import Darwin
 
-enum SteamError: Error { case chunkDownloadFailed(String), chunkDecodeFailed(String), checksumMismatch }
+enum SteamError: Error { case chunkDownloadFailed(String), chunkDecodeFailed(String), checksumMismatch, contentHTTP(Int) }
 enum SteamLog { static func trace(_ text: String) {}; static func event(_ text: String) {} }
 struct DepotManifest {
     struct ChunkEntry {

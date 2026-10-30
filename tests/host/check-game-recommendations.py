@@ -66,11 +66,11 @@ for m in re.finditer(r'static let (\w+) = GameRecommendation\(\n\s*id: "([^"]+)"
     presets[ident] = dict(name=name, title=title, version=int(version), lines=lines, switches=' '.join((switches or '').split()))
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'ghost-of-tsushima', 'god-of-war',
                         'horizon-zero-dawn', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid',
-                        'rockstar-launcher', 'rockstar-launcher-setup', 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net',
+                        'counter-strike-2', 'escapists-2', 'slay-the-spire-2', 'rockstar-launcher', 'rockstar-launcher-setup', 'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net',
                         'battle-net-setup', 'ffxiv-launcher', 'ffxiv-setup', 'standard'}, sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,\n'
         '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, projectZomboid,\n'
-        '                      rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup,\n'
+        '                      counterStrike2, escapists2, slayTheSpire2, rockstarLauncher, rockstarLauncherSetup, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup,\n'
         '                      ffxivLauncher, ffxivSetup, standard]') in lists_src
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
@@ -87,7 +87,8 @@ for ident, p in presets.items():
     # was tested through Madeira Dock with the standard list's lines.
     # The publishers' launchers' Chromium clients take no release delay (their allocator
     # reserves, releases and reserves again), and their installers the standard line only.
-    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'rockstar-launcher-setup',
+    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'project-zomboid', 'counter-strike-2', 'escapists-2', 'slay-the-spire-2',
+                 'rockstar-launcher-setup',
                  'ubisoft-connect', 'ubisoft-connect-setup', 'battle-net', 'battle-net-setup', 'ffxiv-launcher', 'ffxiv-setup'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
@@ -364,7 +365,7 @@ assert detail.index('// madeira-bcd: always last,') < detail.index('Button("Rese
 # shown with the page's other sections since the Game details pages).
 assert detail.index('Button("Remove from library"') < detail.index('Button("Reset to Recommended"')
 assert 'if let error { Section' in detail
-assert '!remove, !confirmReset else { return }' in detail
+assert '!remove, !confirmReset, !confirmPlayAnyway else { return }' in detail
 launch = block(content, '    private func launchLibraryEntry(_ entry: LibraryEntry) {', '\n    }\n')
 assert launch.index('if GameRecommendations.prepare(&entry, new: isNew) { library.save(entry) }') < launch.index('BCDLaunch.applyLibrary(entry)')
 for name in ('GameRecommendations.swift', 'GameRecommendationsApply.swift'):
@@ -518,6 +519,12 @@ check(id(steam + #"\Call of Duty Black Ops II"#) == "black-ops-2", "Black Ops II
 check(id(steam + #"\Call of Duty Black Ops II\t6zm.exe"#) == "black-ops-2" && id(#"D:\BO2\T6SP.EXE"#) == "black-ops-2",
       "Black Ops II by its programs")
 check(id(steam + #"\Call of Duty Black Ops"#, 42700) == "none", "the first Black Ops is another game")
+check(id(steam + #"\Counter-Strike Global Offensive"#, 730) == "counter-strike-2" && id(steam + #"\Counter-Strike Global Offensive"#) == "counter-strike-2"
+      && id(steam + #"\Counter-Strike Global Offensive\game\bin\win64\cs2.exe"#) == "counter-strike-2", "Counter-Strike 2 by App ID, folder and program")
+check(id(steam + #"\The Escapists 2"#, 641990) == "escapists-2" && id(steam + #"\The Escapists 2"#) == "escapists-2"
+      && id(#"D:\Games\The Escapists 2\TheEscapists2.exe"#) == "escapists-2", "The Escapists 2 by App ID, folder and program")
+check(id(steam + #"\Slay the Spire 2"#, 2868840) == "slay-the-spire-2" && id(steam + #"\Slay the Spire 2"#) == "slay-the-spire-2"
+      && id(#"C:\x\steamapps\common\Slay the Spire 2\SlayTheSpire2.exe"#) == "slay-the-spire-2", "Slay the Spire 2 by App ID, folder and program")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 check(id(steam + #"\Fallout New Vegas"#, 22380) == "fallout-new-vegas" && id(steam + #"\Fallout New Vegas"#) == "fallout-new-vegas",

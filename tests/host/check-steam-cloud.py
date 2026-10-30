@@ -183,6 +183,16 @@ let listed = SteamCloudFile(prefix: "%GameInstall%savedata/\(steamID)/", name: "
                             timestamp: 1, size: UInt64(bytes.count), persistState: 0)
 let both = try! SteamCloudAudit.run(listing: SteamCloudListing(files: [listed]), saveFiles: ufs, paths: paths)
 check(both.entries.count == 1 && both.entries[0].kind == .same, "  and once the cloud lists it under that name, the two are the same file")
+// A save the cloud lists as deleted (the game removed it on another computer) is not sent back up
+// from this device's older copy; a newer save of that name is.
+var gone = listed; gone.persistState = 2
+let removedAudit = try! SteamCloudAudit.run(listing: SteamCloudListing(files: [gone]), saveFiles: ufs, paths: paths)
+check(removedAudit.entries.isEmpty && removedAudit.removedInCloud == 1 && removedAudit.summary.hasSuffix("removed-in-cloud=1"),
+      "a device copy of a save the cloud lists as deleted is not offered for upload")
+var goneOther = gone; goneOther.sha = Data(repeating: 1, count: 20)
+let newer = try! SteamCloudAudit.run(listing: SteamCloudListing(files: [goneOther]), saveFiles: ufs, paths: paths)
+check(newer.entries.count == 1 && newer.entries[0].kind == .localOnly && newer.removedInCloud == 0,
+      "  a newer save of that name is offered")
 // Directory/missing inputs must not become digests; the empty regular file is distinct.
 check(SteamCloudAudit.sha1(of: saves) == nil, "directory input returns no digest")
 check(SteamCloudAudit.sha1(of: saves.appendingPathComponent("absent")) == nil, "open error returns no digest")

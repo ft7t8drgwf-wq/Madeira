@@ -118,6 +118,10 @@ jobs:
           xcodebuild -version
           sysctl -n hw.ncpu
 
+      # Fails in seconds instead of at "Build app", 25 minutes later.
+      - name: Early compile check of the app's C and Objective-C files
+        run: tools/ci/early-compile-check.sh
+
       - name: Install host tools
         run: |
           brew install cmake ninja ccache meson bison flex llvm sevenzip cabextract msitools gnutls pkgconf
@@ -365,9 +369,13 @@ jobs:
           python3 tests/host/check-d3d9-report-nvidia.py
           python3 tests/host/check-d3d9-older-nvidia.py
           python3 tests/host/check-gpu-card.py
+          python3 tests/host/check-launch-check.py
+          python3 tests/host/check-wine-gecko.py
+          python3 tests/host/check-background-pause.py
           python3 tests/host/check-game-recommendations.py --require-swift
           python3 tests/host/check-ini-editor.py --require-swift
           python3 tests/host/check-dll-overrides.py --require-swift
+          python3 tests/host/check-background-run.py --require-swift
           python3 tests/host/check-registry-editor.py --require-swift
           python3 tests/host/check-steam-files-flag.py --require-swift
           python3 tests/host/check-steam-owned-dlc.py
