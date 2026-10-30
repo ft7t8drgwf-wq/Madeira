@@ -3701,6 +3701,7 @@ struct LibraryDetail: View {
             case .compatibility: return "Compatibility"
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
+            case .workshop: return "Steam Workshop"
             case .gog: return "GOG"
             case .itch: return "itch.io"
             case .library: return "Library details"
@@ -3717,6 +3718,7 @@ struct LibraryDetail: View {
             case .compatibility: return "cpu"
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
+            case .workshop: return "square.stack.3d.up"
             case .gog: return "bag"
             case .itch: return "bag"
             case .library: return "info.circle"
@@ -3725,6 +3727,8 @@ struct LibraryDetail: View {
             case .advanced: return "wrench.and.screwdriver"
             }
         }
+        /// A Steam game's Steam Workshop items (SteamWorkshop.swift).
+        case workshop
     }
     @State private var path: [Page] = []
     /// The rows of the details page, in groups. The Desktop entry has no launch options
@@ -3733,9 +3737,16 @@ struct LibraryDetail: View {
         let launch = entry.usesLaunchOptions || entry.desktop != true
         let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch] : [])
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
+                + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
         let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
+    }
+    /// Steam Workshop is offered unless Steam says the game has none
+    /// (SteamOwnedGame.workshop; unknown in older caches).
+    @MainActor private static func showsWorkshop(_ appID: Int?) -> Bool {
+        guard let appID else { return false }
+        return SteamOwnedLibrary.shared.game(appID)?.workshop != false
     }
     /// The value a page's row shows, when one setting sums it up.
     private func summary(_ page: Page) -> String? {
@@ -3764,6 +3775,10 @@ struct LibraryDetail: View {
             case .compatibility: compatibilityPage
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
+            case .workshop:
+                if let appID = entry.steamAppID, appID > 0, appID <= Int(UInt32.max) {
+                    SteamWorkshopSections(appID: UInt32(appID), title: entry.title)
+                }
             case .gog: GOGEntrySection(entry: $entry) { leaving = true; dismiss() }
             case .itch: ItchEntrySection(entry: $entry) { leaving = true; dismiss() }
             case .library: libraryPage
