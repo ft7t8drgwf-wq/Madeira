@@ -1,0 +1,76 @@
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -63,6 +63,38 @@
+ static void     (WINAPI *pNotifyMemoryProtect)(void*,SIZE_T,ULONG,BOOL,NTSTATUS);
+ static void     (WINAPI *pNotifyUnmapViewOfSection)(void*,BOOL,NTSTATUS);
+ static NTSTATUS (WINAPI *pProcessInit)(void);
++
++/* Madeira: the FEX arena holds only the emulator's own allocations (code
++ * buffers, call-return stacks, lookup caches), never guest code. FEX frees
++ * some of them while it holds its code invalidation lock; reporting that free
++ * back to FEX starts a nested invalidation on the same thread, which then
++ * waits forever on a lock it already owns (Stardew Valley: main thread stuck
++ * after "[inval-nested] #2 invalidate 0x7c5c791000", the .NET finalizer
++ * spinning behind it). Frees inside the arena are not reported.
++ * MADEIRA_FEX_ARENA_FREE_NOTIFY=1 reports them again. */
++static ULONG_PTR ios_fex_arena_lo, ios_fex_arena_hi;
++
++static BOOL ios_free_in_fex_arena( void *addr, SIZE_T size )
++{
++    static int notify = -1;
++    ULONG_PTR a = (ULONG_PTR)addr;
++
++    if (notify < 0)
++    {
++        UNICODE_STRING name, value;
++        WCHAR buffer[4];
++
++        RtlInitUnicodeString( &name, L"MADEIRA_FEX_ARENA_FREE_NOTIFY" );
++        value.Buffer = buffer;
++        value.Length = 0;
++        value.MaximumLength = sizeof(buffer);
++        notify = !RtlQueryEnvironmentVariable_U( NULL, &name, &value ) &&
++                 value.Length == sizeof(WCHAR) && buffer[0] == '1';
++    }
++    if (notify || !ios_fex_arena_lo || !ios_fex_arena_hi) return FALSE;
++    if (a < ios_fex_arena_lo || a >= ios_fex_arena_hi) return FALSE;
++    return !size || size <= ios_fex_arena_hi - a;
++}
+ static void     (WINAPI *pProcessTerm)(HANDLE,BOOL,NTSTATUS);
+ static void     (WINAPI *pResetToConsistentState)(EXCEPTION_RECORD*,CONTEXT*,ARM64_NT_CONTEXT*);
+ static NTSTATUS (WINAPI *pThreadInit)(void);
+@@ -730,6 +762,8 @@
+         {
+             ios_fex_arena_base = (ULONG_PTR)arena_params.base;
+             ios_fex_arena_end  = (ULONG_PTR)arena_params.end;
++            ios_fex_arena_lo = ios_fex_arena_base;
++            ios_fex_arena_hi = ios_fex_arena_end;
+         }
+         else
+             ERR( "[fex-arena] ml800 unix_ios_get_fex_arena FAILED -- cannot learn the arena; "
+@@ -1750,20 +1784,23 @@
+ NTSTATUS SYSCALL_API NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
+ {
+     BOOL is_current = RtlIsCurrentProcess( process );
++    BOOL fex_own;
+     NTSTATUS status;
+ 
+     if (!enter_syscall_callback())
+         return syscall_NtFreeVirtualMemory( process, addr_ptr, size_ptr, type );
+ 
++    fex_own = is_current && ios_free_in_fex_arena( *addr_ptr, *size_ptr );
++
+     if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualFree,
+                                                       *addr_ptr, *size_ptr, 2, type, 0 );
+-    else if (pNotifyMemoryFree) pNotifyMemoryFree( *addr_ptr, *size_ptr, type, FALSE, 0 );
++    else if (pNotifyMemoryFree && !fex_own) pNotifyMemoryFree( *addr_ptr, *size_ptr, type, FALSE, 0 );
+ 
+     status = syscall_NtFreeVirtualMemory( process, addr_ptr, size_ptr, type );
+ 
+     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualFree,
+                                                       *addr_ptr, *size_ptr, 2, type, status );
+-    else if (pNotifyMemoryFree) pNotifyMemoryFree( *addr_ptr, *size_ptr, type, TRUE, status );
++    else if (pNotifyMemoryFree && !fex_own) pNotifyMemoryFree( *addr_ptr, *size_ptr, type, TRUE, status );
+ 
+     /* ml386 probe (task #57): same-region free livelock — CEF calls
+      * NtFreeVirtualMemory on ONE 64KB range thousands of times while making no
