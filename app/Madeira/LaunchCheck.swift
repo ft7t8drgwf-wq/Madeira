@@ -351,6 +351,10 @@ enum KnownGames {
         KnownGame(id: "slay-the-spire-2", title: "Slay the Spire 2", appIDs: [2868840],
                   folders: ["slay the spire 2"], programs: ["slaythespire2.exe"],
                   tests: [onIPhone17ProMax(build: 48)], note: "With Madeira's recommended settings."),
+        // The campaign only: multiplayer (10190, iw4mp.exe) shares the folder and is untested.
+        KnownGame(id: "modern-warfare-2-2009", title: "Call of Duty: Modern Warfare 2 (2009)", appIDs: [10180],
+                  folders: [], programs: ["iw4sp.exe"],
+                  tests: [onIPhone17ProMax(build: 48)], note: "The single-player campaign."),
         KnownGame(id: "megabonk", title: "Megabonk", appIDs: [],
                   folders: ["megabonk"], programs: ["megabonk.exe"],
                   tests: [KnownTest(device: nil, os: nil, build: 31, memoryGB: 0)], note: ""),
