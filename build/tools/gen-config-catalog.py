@@ -56,6 +56,12 @@ OVERLAY = {
                         "thread that commits a Metal command buffer waits until Madeira is back, so a game that keeps "
                         "loading in the background (Zink OpenGL, Direct3D, Vulkan) never sends GPU work iOS refuses "
                         "and never loses its device. [metal-bg] lines in the log. 0: not installed. Read at app start."},
+    "background-cpu": {"category": "App & front end", "title": "CPU cap in the background (% of one core)",
+                "kind": "int", "default": "50", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "While Madeira keeps a game or a download running in the background, its CPU use is held under "
+                        "this percent of one core on average (threads are paused for 100 ms at a time when it is over), "
+                        "because iOS ends a background app that averages more than about 80% for a minute. Higher loads "
+                        "faster but risks that. 0: no cap. A game's own config can set it. [bg-cpu] lines in the log."},
     "background-download": {"category": "App & front end", "title": "Keep downloads running in the background (minutes)",
                 "kind": "int", "default": "60", "sources": ["app/Madeira/BackgroundRun.swift"],
                 "note": "Minutes a Steam, Epic, GOG, EA or itch.io download keeps going after you switch apps or lock "

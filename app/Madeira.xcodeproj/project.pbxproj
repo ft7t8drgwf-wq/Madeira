@@ -138,6 +138,7 @@
 		A1000615 /* liblzma.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000615 /* liblzma.tbd */; };
 		A1000701 /* Winios/WiniosGL.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000701 /* Winios/WiniosGL.m */; };
 		A1008B02 /* Winios/MetalBackgroundGate.m in Sources */ = {isa = PBXBuildFile; fileRef = A2008B02 /* Winios/MetalBackgroundGate.m */; };
+		A1008B03 /* Winios/BackgroundCPUCap.c in Sources */ = {isa = PBXBuildFile; fileRef = A2008B03 /* Winios/BackgroundCPUCap.c */; };
 		A1000702 /* OpenGLES.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000702 /* OpenGLES.framework */; };
 		A1000703 /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000703 /* IOSurface.framework */; };
 		A1000704 /* compat in Resources */ = {isa = PBXBuildFile; fileRef = A2000704 /* compat */; };
@@ -392,6 +393,7 @@
 		A2000615 /* liblzma.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = liblzma.tbd; path = usr/lib/liblzma.tbd; sourceTree = SDKROOT; };
 		A2000701 /* Winios/WiniosGL.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/WiniosGL.m; sourceTree = "<group>"; };
 		A2008B02 /* Winios/MetalBackgroundGate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/MetalBackgroundGate.m; sourceTree = "<group>"; };
+		A2008B03 /* Winios/BackgroundCPUCap.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = Winios/BackgroundCPUCap.c; sourceTree = "<group>"; };
 		A2000702 /* OpenGLES.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGLES.framework; path = System/Library/Frameworks/OpenGLES.framework; sourceTree = SDKROOT; };
 		A2000703 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = System/Library/Frameworks/IOSurface.framework; sourceTree = SDKROOT; };
 		A2000704 /* compat */ = {isa = PBXFileReference; lastKnownFileType = folder; path = compat; sourceTree = "<group>"; };
@@ -709,6 +711,7 @@
 				A2000070 /* Winios/Winios.m */,
 				A2000701 /* Winios/WiniosGL.m */,
 				A2008B02 /* Winios/MetalBackgroundGate.m */,
+				A2008B03 /* Winios/BackgroundCPUCap.c */,
 				A2000071 /* Winios/Winios.h */,
 				A2000247 /* PadOutput.m */,
 				C2000F01 /* PhonePointer.m */,
@@ -1077,6 +1080,7 @@
 				A1000070 /* Winios/Winios.m in Sources */,
 				A1000701 /* Winios/WiniosGL.m in Sources */,
 				A1008B02 /* Winios/MetalBackgroundGate.m in Sources */,
+				A1008B03 /* Winios/BackgroundCPUCap.c in Sources */,
 				A1000247 /* PadOutput.m in Sources */,
 				C1000F01 /* PhonePointer.m in Sources */,
 				A1000035 /* StikJITHelper.swift in Sources */,
