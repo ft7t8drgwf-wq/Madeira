@@ -13,6 +13,9 @@ the submodule commits (FEX, its nested rpmalloc fork, wine branch
 (all under github.com/willfaust) do not yet carry them, so a recipient's
 recursive clone fails at the first submodule until every fork is pushed. This document is the
 remediation; steps marked UNVERIFIED have not yet been re-run from scratch.
+A build without `app/Madeira/x86_64-vcruntime` still gets the Visual C++ runtime
+on the device: setup and Settings take the DLLs out of Microsoft's own installers
+there, for 64-bit and 32-bit games (`app/Madeira/VCRedist.swift`, docs/LIBRARY.md).
 
 ## Inputs that are not in the repository
 
@@ -92,12 +95,6 @@ git-ignored and consumed by the app project.
 6. OpenGL and LOVE games:
    - Before step 3, apply the Wine patch: `git -C wine apply ../patches/wine-opengl-winios.patch`. Then rebuild the tracked `opengl32.dll` with `build/wine-pe/build-modules.sh opengl32`.
    - `build/luajit-x64/build.sh` -> `app/Madeira/compat/love/lua51.dll`, needed for LOVE games.
-   - `build/moltenvk-ios/build.sh`, then `build/mesa-ios/build.sh` -> `app/Madeira/gl/`, the desktop OpenGL backend. Optional: without it the app uses OpenGL ES. The script applies every file in `build/mesa-ios/patches` once (a `.madeira-applied-*` marker in the Mesa source records it), so an existing Mesa tree picks up a new patch on the next run.
-   - 32-bit OpenGL games (id Tech 3: Jedi Academy, Jedi Outcast, Quake III) need all of: the regenerated wow64 thunks in `wine-opengl-winios.patch` (from `dlls/opengl32/make_opengl`; to regenerate, run `perl make_opengl` in `wine/dlls/opengl32`, which downloads the pinned Khronos registry files into `~/.cache/wine`), `build/ntdll-unix` rebuilt, and Mesa patch `0004` (Zink on MoltenVK: fragment inputs Metal can link, and no crash when a pipeline fails). They need the desktop OpenGL (Zink) backend; fixed-function OpenGL does not exist in OpenGL ES. A 32-bit process gets `GL_EXTENSIONS` cut to 3072 bytes, because these engines copy it into a fixed buffer; `env.MADEIRA_GL_EXTENSIONS_MAX` in madeira.cfg sets another limit (0 = none).
-   - Each script says what source to download if it is missing. Verified on the development machine.
-   `faultrep.dll` (Windows Error Reporting stubs; Wine's faultrep lacks `WerReportHang`, and Ghost of Tsushima imports it): `build/faultrep/build.sh`.
-6. OpenGL games:
-   - Before step 3, apply the Wine patch: `git -C wine apply ../patches/wine-opengl-winios.patch`. Then rebuild the tracked `opengl32.dll` with `build/wine-pe/build-modules.sh opengl32`.
    - `build/moltenvk-ios/build.sh`, then `build/mesa-ios/build.sh` -> `app/Madeira/gl/`, the desktop OpenGL backend. Optional: without it the app uses OpenGL ES. The script applies every file in `build/mesa-ios/patches` once (a `.madeira-applied-*` marker in the Mesa source records it), so an existing Mesa tree picks up a new patch on the next run.
    - 32-bit OpenGL games (id Tech 3: Jedi Academy, Jedi Outcast, Quake III) need all of: the regenerated wow64 thunks in `wine-opengl-winios.patch` (from `dlls/opengl32/make_opengl`; to regenerate, run `perl make_opengl` in `wine/dlls/opengl32`, which downloads the pinned Khronos registry files into `~/.cache/wine`), `build/ntdll-unix` rebuilt, and Mesa patch `0004` (Zink on MoltenVK: fragment inputs Metal can link, and no crash when a pipeline fails). They need the desktop OpenGL (Zink) backend; fixed-function OpenGL does not exist in OpenGL ES. A 32-bit process gets `GL_EXTENSIONS` cut to 3072 bytes, because these engines copy it into a fixed buffer; `env.MADEIRA_GL_EXTENSIONS_MAX` in madeira.cfg sets another limit (0 = none).
    - Each script says what source to download if it is missing. Verified on the development machine.

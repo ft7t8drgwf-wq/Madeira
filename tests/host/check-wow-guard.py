@@ -56,6 +56,7 @@ typedef struct { int protection, max_protection, shared; } vm_region_basic_info_
 #define IOS_WOW_FEX_BAND_END ((ULONG_PTR)0x8000000000)
 #define IOS_WOW_SPILL_TOP ((ULONG_PTR)0x7b00000000)
 static int ios_wow_spill_walk;
+static int ios_wow_guard_inside(void) { return 0; }   /* MADEIRA_WOW_GUARD_INSIDE=0: the separate guard page this harness lays out */
 static const ULONG_PTR host_page_size = 0x4000;
 struct ios_wow_window { ULONG_PTR base; unsigned dead, leaked, guard_owned; };
 struct ios_wow_placeholder { unsigned adopted, guard_owned; };

@@ -81,6 +81,7 @@ typedef uint64_t mach_vm_address_t, mach_vm_size_t;
 #define MACH_PORT_RIGHT_SEND 0
 struct thread_basic_info { int words[10]; };
 static mach_port_t mach_task_self(void) { return 1; }
+static int ios_thread_suspended_dead(thread_t port, uintptr_t teb) { (void)port; (void)teb; return 0; }   /* [wow-reap]: no suspended dead threads in this harness */
 
 /* fake threads: port FIRST_PORT + n is thread n */
 enum { FIRST_PORT = 0x1003, MAX_PORTS = 40000, TEBS = 1024, TEB_SIZE = 0x2000 };

@@ -67,8 +67,8 @@ check('!g_dev.running && !g_bg_halt' in start, 'a client start does not restart 
 idle = body(driver, 'static void ios_dev_stop_if_idle(void)')
 check('!any && !g_bg_keepalive' in idle, 'the last client stopping keeps a keepalive endpoint running')
 cb = body(driver, 'static OSStatus ios_audio_render_cb(')
-check(cb.index('ios_mix_stream(s, out') < cb.index('g_bg_mute') < cb.index('cb_epoch'),
-      'mute silences after mixing, so rings drain and clocks keep time')
+check(cb.index('ios_mix_stream(s, out') < cb.index('g_bg_mute') < cb.rindex('cb_epoch'),
+      'mute silences after mixing, so rings drain and clocks keep time (the paused early return ticks the epoch too)')
 resume = body(driver, 'void madeira_audio_resume_after_interruption(void)')
 check('AudioOutputUnitStop(g_dev.au);' in resume and 'AudioOutputUnitStart(g_dev.au);' in resume
       and 'g_dev.running' in resume, 'a running endpoint is restarted after an interruption')

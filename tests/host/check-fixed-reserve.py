@@ -60,6 +60,7 @@ static int ios_sc_current_is_helper(void) { return helper_process; }
 static int ios_sc2_route(void *h, SIZE_T s, ULONG t, ULONG p, void **r, SIZE_T *z, NTSTATUS *st) { return 0; }
 static NTSTATUS ios_sc_glued_pools(void **p, SIZE_T *s, ULONG t, ULONG f) { return STATUS_NO_MEMORY; }
 static uintptr_t ios_jumbo_holdback_take(SIZE_T size) { return 0; }
+static int ios_jumbo_aligned_enabled(void) { return 0; }   /* [jumbo-aligned]: off in this harness */
 static NTSTATUS ios_cage_grant(ULONG t, ULONG p, SIZE_T a, void **r, SIZE_T *s, const char *rev) { return STATUS_NO_MEMORY; }
 static int ios_soft_slot_taken(uint64_t slot) { return 0; }
 static void ios_va_gap_probe(const char *s) {}

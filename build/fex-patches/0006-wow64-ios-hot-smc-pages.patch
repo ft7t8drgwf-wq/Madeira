@@ -1,0 +1,47 @@
+From 9d2c04e3fff5e6069b4a64cd388caa6eb0631c33 Mon Sep 17 00:00:00 2001
+From: 125hz <133181124+125hz@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 00:07:20 -0500
+Subject: [PATCH] WOW64 iOS: hot self-modifying-code pages, as in the ARM64EC
+ module
+
+A 32-bit title's protector DLL unpacks code into a page it also executes
+from: its store took the same write fault 2000 times (untrap, invalidate,
+recompile, trap, fault) until the host's redelivery guard ended the whole
+app (device logs 2026-10-25). The ARM64EC module already leaves a page that
+takes 64 write faults within a second writable and has its blocks validate
+their own code (InvalidationTracker::EnableHotSMCPages); the WoW64 module
+never enabled it. Same switch: MADEIRA_SMC_HOT_PAGE (unset = 64, 0 = off).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ Source/Windows/WOW64/Module.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 5c7dd8686..993c1667a 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1289,6 +1289,20 @@ void BTCpuProcessInit() {
+   Context::HandlerConfig.emplace(*CTX);
+   // The tracker speaks host addresses to the OS and converts at its calls into FEXCore.
+   InvalidationTracker.emplace(*CTX, Threads, GuestWindow::Base);
++  {
++    // MADEIRA ml2020: hot SMC pages for the WoW64 module too (InvalidationTracker::EnableHotSMCPages, the
++    // ARM64EC module's rule). Without it a 32-bit title's protector DLL that unpacks code into a page it also
++    // executes from took the same write fault 2000 times (untrap, invalidate, recompile, trap, fault: device
++    // logs 2026-10-25) until the host's redelivery guard ended the whole app. MADEIRA_SMC_HOT_PAGE: unset = 64
++    // write faults within a second, 0 = off (every write to a code page invalidates it), N = threshold.
++    uint32_t HotThreshold = 64;
++    if (const char* Hot = getenv("MADEIRA_SMC_HOT_PAGE"); Hot && *Hot) {
++      HotThreshold = static_cast<uint32_t>(strtoul(Hot, nullptr, 0));
++    }
++    InvalidationTracker->EnableHotSMCPages(HotThreshold);
++    LogMan::Msg::EFmt("[smc-hot] wow64: hot SMC pages {} (threshold {} write faults per second)", HotThreshold ? "on" : "off",
++                      HotThreshold);
++  }
+   ImageTracker.emplace(*CTX, false);
+ 
+   // The 64-bit PEB's ImageBaseAddress is a HOST address: ntdll-unix's init_peb stores the address
+-- 
+2.43.0
+

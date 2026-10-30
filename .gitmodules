@@ -4,12 +4,12 @@
 	branch = ios-port-2607
 [submodule "wine"]
 	path = wine
-	url = https://github.com/willfaust/wine.git
-	branch = madeira-lgpl
+	url = https://github.com/insertfloppy/wine.git
+	branch = claude/project-thread-76gylg
 [submodule "dxmt"]
 	path = dxmt
-	url = https://github.com/willfaust/dxmt.git
-	branch = ios-port
+	url = https://github.com/insertfloppy/dxmt.git
+	branch = claude/project-thread-76gylg
 [submodule "madeira-dock"]
 	path = madeira-dock
 	url = https://github.com/willfaust/madeira-dock.git

@@ -1,8 +1,8 @@
 diff --git a/server/thread.c b/server/thread.c
-index 23d8265..a40fbf1 100644
+index ca832834f8c..63641593381 100644
 --- a/server/thread.c
 +++ b/server/thread.c
-@@ -1773,7 +1773,17 @@ static inline int is_in_apc_wait( struct thread *thread )
+@@ -1773,7 +1773,18 @@ static inline int is_in_apc_wait( struct thread *thread )
   * desktop start, and the taskbar never painted. Only this failure path changes, and only for
   * APC_ASYNC_IO; other system APCs are unchanged. [apc-requeue] logs the first 16 handovers
   * (then every 1024th) with the APC's status and thread ids only.
@@ -17,11 +17,12 @@ index 23d8265..a40fbf1 100644
 + * a system APC does not end are madsync's in-process waits (the Explorer hang above). Without
 + * it, every wait that can last reaches the server with SELECT_INTERRUPTIBLE (fastsync parks for
 + * at most its cap first), where check_wait returns STATUS_KERNEL_APC and the thread runs the
-+ * client half itself. MADEIRA_APC_KEEP=0 drops it again. */
++ * client half itself. MADEIRA_APC_KEEP=0 drops it again (MADEIRA_APC_BUSY_QUEUE=1, the opt-in
++ * form of the same thing from the vulkan-stack branch, keeps it as well). */
+ static int ios_apc_busy_queue_enabled( void );
+ 
  static int ios_apc_requeue_enabled( void )
- {
-     static int enabled = -1;
-@@ -1790,7 +1800,24 @@ static int ios_apc_requeue_enabled( void )
+@@ -1832,7 +1843,24 @@ static int ios_apc_busy_queue_enabled( void )
      return enabled;
  }
  
@@ -47,11 +48,12 @@ index 23d8265..a40fbf1 100644
  static struct thread *ios_apc_requeue_target( struct thread *thread, const struct thread_apc *apc )
  {
      static unsigned int count;
-@@ -1807,6 +1834,7 @@ static struct thread *ios_apc_requeue_target( struct thread *thread, const struc
+@@ -1849,7 +1877,7 @@ static struct thread *ios_apc_requeue_target( struct thread *thread, const struc
          }
      }
-     if (!target && async_can_defer_to_issuer( apc->owner, thread )) target = thread;
-+    if (!target && !thread->alert_sync && ios_apc_keep_enabled()) target = thread;
+     if (!target && (async_can_defer_to_issuer( apc->owner, thread ) ||
+-                    (!thread->alert_sync && ios_apc_busy_queue_enabled()))) target = thread;   /* iOS-Madeira */
++                    (!thread->alert_sync && (ios_apc_busy_queue_enabled() || ios_apc_keep_enabled())))) target = thread;   /* iOS-Madeira */
      count++;
      if (count <= 16 || !(count & 1023))
          fprintf( stderr, "[apc-requeue] #%u async I/O APC status=%08x for busy thread %04x -> %s %04x\n",

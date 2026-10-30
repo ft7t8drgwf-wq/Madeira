@@ -414,12 +414,24 @@ jobs:
           codesign --force --sign - --entitlements app/Madeira/Madeira.entitlements Payload/Madeira.app
           zip -qry "Madeira-build-${{ github.run_number }}.ipa" Payload
           ls -lh "Madeira-build-${{ github.run_number }}.ipa"
+          # The memory-host app extension (swap tier donor pool) is a second bundle with its own
+          # app ID. A signing profile that covers one app ID only cannot sign it, so the same
+          # build also ships without it; the app runs without the donor pool then.
+          if [ -d Payload/Madeira.app/PlugIns/MadeiraMemoryHost.appex ]; then
+            rm -rf Payload/Madeira.app/PlugIns/MadeiraMemoryHost.appex
+            rmdir Payload/Madeira.app/PlugIns 2>/dev/null || true
+            codesign --force --sign - --entitlements app/Madeira/Madeira.entitlements Payload/Madeira.app
+            zip -qry "Madeira-build-${{ github.run_number }}-no-memoryhost.ipa" Payload
+            ls -lh "Madeira-build-${{ github.run_number }}-no-memoryhost.ipa"
+          fi
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Madeira-build-${{ github.run_number }}
-          path: Madeira-build-${{ github.run_number }}.ipa
+          # This branch is the experimental 125hz vulkan-stack merge: its artifacts are named
+          # apart from the main build line's "Madeira-build-<run>".
+          name: Madeira-vulkan-stack-${{ github.run_number }}
+          path: Madeira-build-${{ github.run_number }}*.ipa
           retention-days: 14
 
       - name: Print compiler errors

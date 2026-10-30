@@ -155,6 +155,17 @@ static int mach_vm_region( mach_port_t task, mach_vm_address_t *a, mach_vm_size_
     return 1;   /* no region: the map dump stops at once */
 }
 void abort_thread( int status ) { }
+
+/* stand-ins for the [fault-progress] hook (MADEIRA_FAULT_LOOP_GUEST_PROGRESS): off here, so the
+ * block's per-thread counting is what is exercised */
+static uint64_t ios_fault_progress_last;
+static int ios_fault_loop_guest_progress_on( void ) { return 0; }
+static int ios_fault_loop_guest_progress( uint64_t *last, void *teb, int exception, uintptr_t fex_state,
+                                          uint64_t x28, uint64_t rip, uint64_t *previous_rip )
+{
+    (void)last; (void)teb; (void)exception; (void)fex_state; (void)x28; (void)rip; (void)previous_rip;
+    return 0;
+}
 '''
 
 harness_main = r'''
@@ -167,8 +178,14 @@ static void decline( thread_t thread, uintptr_t fault_addr, uint64_t fault_pc_ch
     mach_msg_type_number_t count = 68;
     int handled = 0;
 
+    void *thread_teb = NULL;
+    struct { int exception; } req_storage = { 0 }, *req = &req_storage;
+    uintptr_t fex_state_q = 0;
+    uint64_t state_rip_q = 0;
+
     memset( &state, 0, sizeof(state) );
     state.__sp = 0x70000ff238;
+    (void)thread_teb; (void)req; (void)fex_state_q; (void)state_rip_q;
 BREAKER
     if (handled) diverted++;
 }

@@ -1,0 +1,717 @@
+diff --git a/README.md b/README.md
+index c23dd8f..b85df65 100644
+--- a/README.md
++++ b/README.md
+@@ -72,7 +72,17 @@ nothing else.
+     `steam_api64.dll` talks to a live, signed-in client exactly as it would on a PC. The game,
+     its Steamworks calls and its DRM (SteamStub wrapper, CEG, the game's own checks) run
+     unmodified.
+-13. **Shuts the client down** when the game has ended, with the public `SteamClient021` shutdown
++13. **Holds the session while the game's own programs are still starting or showing something.**
++    Valve's client stops reporting the game as running when the program it started exits, which
++    some games' launchers do while they restart themselves or before they start the game. Dock
++    follows the game's process tree while it runs (`src/hold.c`: the host's descendants, Windows'
++    own images and their children excepted, plus any image named in `MADEIRA_DOCK_KEEP_ALIVE`),
++    only looking: process snapshots, image paths, start times and visible windows. After the
++    report ends, the session is held while a member still shows a window or is younger than 60 s
++    (`launch-keep-alive`, then `launch-keep-alive-held=<seconds>` at the end); a launcher left in
++    the background after the game ends holds nothing. `MADEIRA_DOCK_KEEP_ALIVE=0` ends the
++    session 3 s after the report as before.
++14. **Shuts the client down** when the game has ended, with the public `SteamClient021` shutdown
+     call, releases the user and pipe, and exits with a numeric result.
+ 
+ ## What it does not do
+@@ -174,6 +184,17 @@ client service through the service manager, so that nothing outlives the session
+ (runtime setups from the game's Steam install script). It loads no Steam client: it only makes
+ Wine's service manager reachable, prints one line and exits.
+ 
++A game session gets the same bounded start before the launch when the game needs it
++(`src/launch.c`, `src/scm.c`): some launchers install an automatic-start Windows service of their
++own, and without a service manager every start of it fails (RPC error 1722). With
++`MADEIRA_DOCK_GAME_SCM` unset, Dock counts, read-only, the Win32 services registered in the prefix
++with automatic or on-demand start whose image lies outside the Windows folder (`game-scm-services`;
++Wine's own services never count) and starts the manager only when there is at least one; `1`
++always starts it and `0`
++never does. The step waits at most 20 s (`game-scm=<2 started, 1 already running, 0 off, -1
++failed>` or `game-scm-timeout=1`) and never decides whether the game launches. The manager it
++starts stays for the session, as after `--start-services`.
++
+ ## Limits
+ 
+ - **Windows program, 64-bit session.** The 32-bit build supports only the bootstrap test.
+@@ -226,9 +247,15 @@ Switches that turn a behaviour off (all default on): `MADEIRA_DOCK_CEG=0`,
+ `MADEIRA_DOCK_CONFIG_WAIT=0`, `MADEIRA_DOCK_SESSION_WAIT=0`, `MADEIRA_DOCK_LIST_ENTITLEMENT=0`,
+ `MADEIRA_DOCK_CLIENT_202601=0`, `MADEIRA_DOCK_HANDOFF_DIAGNOSTICS=0`,
+ `MADEIRA_DOCK_INSTALL_SCM=0`, `MADEIRA_DOCK_OFFLINE_LOGON=0` (no offline start, and no
+-`session-offline-*` question). The three waits only ask Valve's client again for a bounded time
+-when it answers "content is still installing", "the game's configuration has not arrived yet" or
+-"another session is playing"; they never turn a refusal into a launch.
++`session-offline-*` question), `MADEIRA_DOCK_KEEP_ALIVE=0` (no hold after the running report
++ends; a `;`-separated list of image names instead adds those programs to the game's tree). The
++three waits only ask Valve's client again for a bounded time when it answers "content is still
++installing", "the game's configuration has not arrived yet" or "another session is playing"; they
++never turn a refusal into a launch. `MADEIRA_DOCK_GAME_SCM` is three-way: `0` never starts a
++service manager for the game session, `1` always does, unset starts one only when the prefix
++registers a startable (automatic or on-demand) service outside Windows (see "Services"). Madeira
++also sets `1` for a game whose own Steam install script recorded a non-Microsoft program, since a
++launcher registers its service only on its first run, through the manager.
+ 
+ The selected launch key is reused on every retry and reported as numeric
+ `launch-option-index`. Invalid input reports `launch-option-invalid=1`. An error 22 whose
+diff --git a/src/hold.c b/src/hold.c
+new file mode 100644
+index 0000000..4d40759
+--- /dev/null
++++ b/src/hold.c
+@@ -0,0 +1,137 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright 2026 125hz
++ * Madeira Converter Exception: see LICENSE-EXCEPTION.md
++ * ml2020: follow the game's process tree and decide whether it still holds
++ * the session (hold.h). Only observation: snapshots, limited process queries
++ * and window enumeration; nothing is created, ended or signalled.
++ */
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <tlhelp32.h>
++#include <wchar.h>
++#include "hold.h"
++#include "validation.h"
++
++void sh_hold_init(struct sh_hold *hold, const wchar_t *listed)
++{
++    memset(hold, 0, sizeof(*hold));
++    hold->self = GetCurrentProcessId();
++    hold->listed = listed && *listed ? listed : NULL;
++    UINT length = GetWindowsDirectoryW(hold->windows_dir, MAX_PATH);
++    if (!length || length >= MAX_PATH) wcscpy(hold->windows_dir, L"C:\\windows");
++}
++
++static struct sh_hold_entry *find_entry(struct sh_hold *hold, uint32_t pid)
++{
++    for (unsigned i = 0; i < hold->count; ++i)
++        if (hold->entries[i].pid == pid) return &hold->entries[i];
++    return NULL;
++}
++
++/* A member's child joins; a Windows image's child (a service, rpcss, a
++ * console host) does not: those belong to Windows, not to the game. */
++static bool parent_is_member(struct sh_hold *hold, uint32_t parent)
++{
++    if (parent == hold->self) return true;
++    const struct sh_hold_entry *entry = find_entry(hold, parent);
++    return entry && !entry->windows_image;
++}
++
++/* The image path and start time of a process this host may query; both are
++ * optional (a process may be gone, or refuse): then the name decides and
++ * the first sighting counts as its birth. */
++static void describe(struct sh_hold *hold, uint32_t pid, const wchar_t *name, uint64_t now,
++                     struct sh_hold_entry *entry)
++{
++    entry->pid = pid;
++    entry->born_ms = now;
++    entry->last_seen_ms = now;
++    entry->windows_image = false;
++    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
++    if (!process) process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
++    static wchar_t path[32768];
++    DWORD length = 32768;
++    if (process && QueryFullProcessImageNameW(process, 0, path, &length) && length && length < 32768)
++        entry->windows_image = sh_image_is_windows(path, hold->windows_dir);
++    else if (name)
++        entry->windows_image = sh_image_is_windows(name, hold->windows_dir);
++    FILETIME created, exited, kernel, user, current;
++    if (process && GetProcessTimes(process, &created, &exited, &kernel, &user)) {
++        GetSystemTimeAsFileTime(&current);
++        uint64_t born = ((uint64_t)created.dwHighDateTime << 32) | created.dwLowDateTime;
++        uint64_t at = ((uint64_t)current.dwHighDateTime << 32) | current.dwLowDateTime;
++        if (at > born) {
++            uint64_t age = (at - born) / 10000ULL;
++            entry->born_ms = age < now ? now - age : 0;
++        }
++    }
++    if (process) CloseHandle(process);
++}
++
++struct window_scan { uint32_t *pids; unsigned count, capacity; };
++
++static BOOL CALLBACK on_window(HWND window, LPARAM parameter)
++{
++    struct window_scan *scan = (struct window_scan *)parameter;
++    if (!IsWindowVisible(window)) return TRUE;
++    DWORD pid = 0;
++    GetWindowThreadProcessId(window, &pid);
++    if (!pid) return TRUE;
++    for (unsigned i = 0; i < scan->count; ++i) if (scan->pids[i] == pid) return TRUE;
++    if (scan->count < scan->capacity) scan->pids[scan->count++] = pid;
++    return TRUE;
++}
++
++bool sh_hold_poll(struct sh_hold *hold, const struct sh_observer *o)
++{
++    uint64_t now = o->now_ms();
++    if (hold->polls && now - hold->polled_at < SH_HOLD_POLL_MS) return hold->holding;
++    hold->polled_at = now;
++    hold->polls++;
++    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
++    if (snapshot == INVALID_HANDLE_VALUE) return hold->holding;
++    PROCESSENTRY32W process = {0};
++    process.dwSize = sizeof(process);
++    /* Two passes over one snapshot: a child listed before its parent joins
++     * in the second. Deeper chains join at the next poll. */
++    for (unsigned pass = 0; pass < 2; ++pass) {
++        if (!Process32FirstW(snapshot, &process)) break;
++        do {
++            uint32_t pid = process.th32ProcessID, parent = process.th32ParentProcessID;
++            if (!pid || pid == hold->self) continue;
++            struct sh_hold_entry *entry = find_entry(hold, pid);
++            if (entry) {
++                entry->last_seen_ms = now;
++                entry->parent = parent;
++                continue;
++            }
++            if (!parent_is_member(hold, parent) && !sh_keep_alive_listed(hold->listed, process.szExeFile)) continue;
++            if (hold->count >= SH_HOLD_ENTRIES) {
++                hold->dropped++;
++                continue;
++            }
++            entry = &hold->entries[hold->count++];
++            describe(hold, pid, process.szExeFile, now, entry);
++            entry->parent = parent;
++        } while (Process32NextW(snapshot, &process));
++    }
++    CloseHandle(snapshot);
++    uint32_t visible[SH_HOLD_ENTRIES];
++    struct window_scan scan = {visible, 0, SH_HOLD_ENTRIES};
++    EnumWindows(on_window, (LPARAM)&scan);
++    unsigned holders = 0, kept = 0;
++    for (unsigned i = 0; i < hold->count; ++i) {
++        struct sh_hold_entry *entry = &hold->entries[i];
++        bool alive = entry->last_seen_ms == now;
++        if (!alive && now - entry->last_seen_ms >= SH_HOLD_FORGET_MS) continue;   /* gone for good; forget it */
++        hold->entries[kept++] = *entry;
++        if (!alive) continue;
++        bool window = false;
++        for (unsigned k = 0; k < scan.count && !window; ++k) window = scan.pids[k] == entry->pid;
++        if (sh_keep_alive_holds(entry->windows_image, window, now - entry->born_ms, SH_KEEP_ALIVE_YOUNG_MS)) holders++;
++    }
++    hold->count = kept;
++    hold->holders = holders;
++    hold->holding = holders > 0;
++    return hold->holding;
++}
+diff --git a/src/hold.h b/src/hold.h
+new file mode 100644
+index 0000000..77d5b12
+--- /dev/null
++++ b/src/hold.h
+@@ -0,0 +1,39 @@
++/* SPDX-License-Identifier: GPL-3.0-or-later
++ * Copyright 2026 125hz
++ * Madeira Converter Exception: see LICENSE-EXCEPTION.md */
++#ifndef MADEIRA_STEAM_HOST_HOLD_H
++#define MADEIRA_STEAM_HOST_HOLD_H
++#include <windows.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include "probe.h"
++/* ml2020: the game's own process tree, followed while the game runs so the
++ * session can be held when Valve's client stops reporting the game as
++ * running although the tree is still starting or showing something
++ * (validation.h, sh_keep_alive_*). Dock only looks: it opens processes for
++ * their image path and start time and enumerates windows; it never ends or
++ * signals any of them.
++ */
++#define SH_HOLD_ENTRIES 256
++#define SH_HOLD_POLL_MS 1000ULL
++#define SH_HOLD_FORGET_MS 30000ULL
++struct sh_hold_entry {
++    uint32_t pid, parent;
++    uint64_t born_ms, last_seen_ms;   /* observer clock; born from the process's own start time when known */
++    bool windows_image;
++};
++struct sh_hold {
++    struct sh_hold_entry entries[SH_HOLD_ENTRIES];
++    unsigned count, holders, polls, dropped;
++    uint64_t polled_at;
++    bool holding;
++    uint32_t self;
++    const wchar_t *listed;            /* MADEIRA_DOCK_KEEP_ALIVE's image names, or NULL */
++    wchar_t windows_dir[MAX_PATH];
++};
++void sh_hold_init(struct sh_hold *hold, const wchar_t *listed);
++/* Called at any rate; at most once per SH_HOLD_POLL_MS it takes a process
++ * snapshot, follows the tree and recomputes whether any member holds the
++ * session. Returns that answer (the last one between polls). */
++bool sh_hold_poll(struct sh_hold *hold, const struct sh_observer *o);
++#endif
+diff --git a/src/launch.c b/src/launch.c
+index b00eba2..331570d 100644
+--- a/src/launch.c
++++ b/src/launch.c
+@@ -5,6 +5,7 @@
+  * entitlement checks. The installed game, API DLLs and DRM remain unchanged.
+  */
+ #include "launch.h"
++#include "hold.h"
+ #include "scm.h"
+ #include "validation.h"
+ #include <stdio.h>
+@@ -308,6 +309,30 @@ int sh_launch(HMODULE module, void *engine, void *client_user,
+         return 41;
+     }
+     o->event("launch-install-directory-verified", 1);
++    /* ml2020: a game whose launcher installed a Windows service of its own
++     * needs a service manager in the game session, which otherwise has none
++     * (RPC 1722 at every start of that service). MADEIRA_DOCK_GAME_SCM: 0
++     * never, 1 always; unset, only when the prefix's registry lists such a
++     * service (an automatic Win32 service outside the Windows folder: a
++     * read-only count, game-scm-services). The start is the --start-services
++     * one, bounded; it never decides whether the game launches.
++     */
++    {
++        wchar_t scm_value[4] = {0};
++        DWORD scm_length = GetEnvironmentVariableW(L"MADEIRA_DOCK_GAME_SCM", scm_value, 4);
++        enum sh_game_scm_mode scm_mode = sh_game_scm_mode(scm_length ? scm_value : NULL);
++        int32_t foreign = 0;
++        if (scm_mode == SH_GAME_SCM_AUTO) {
++            foreign = sh_game_scm_foreign_services();
++            o->event("game-scm-services", foreign);
++        }
++        if (sh_game_scm_wanted(scm_mode, foreign > 0 ? (unsigned)foreign : 0u)) {
++            bool timed_out = false;
++            int32_t outcome = sh_game_scm_start(o, &timed_out);
++            if (timed_out) o->event("game-scm-timeout", 1);
++            else o->event("game-scm", outcome);
++        } else if (scm_mode == SH_GAME_SCM_OFF) o->event("game-scm", SH_INSTALL_SCM_OFF);
++    }
+     HKEY active = NULL, machine = NULL;
+     int result = 42;
+     struct saved_value values[3] = {0};
+@@ -386,6 +411,22 @@ int sh_launch(HMODULE module, void *engine, void *client_user,
+     uint64_t wait_began = 0, retry_at = 0;
+     unsigned retries = 0;
+     int32_t logged_error = INT32_MIN;
++    /* ml2020: Valve's client stops reporting the game as running when the
++     * program it started exits, also when that program only handed over to a
++     * launcher that restarts itself or starts the game later. The game's own
++     * process tree is followed while it runs (hold.c); after the report ends,
++     * the session is held while a member still shows a window or is young.
++     * MADEIRA_DOCK_KEEP_ALIVE=0 ends it 3 s after the report as before; a
++     * `;` list of image names adds programs outside the tree to it.
++     */
++    static wchar_t keep_value[1024];
++    DWORD keep_length = GetEnvironmentVariableW(L"MADEIRA_DOCK_KEEP_ALIVE", keep_value, 1024);
++    if (keep_length >= 1024) keep_value[0] = 0;
++    enum sh_keep_alive_mode keep_mode = sh_keep_alive_mode(keep_length ? keep_value : NULL);
++    static struct sh_hold hold;
++    sh_hold_init(&hold, keep_mode == SH_KEEP_ALIVE_OFF ? NULL : keep_value);
++    uint64_t held_since = 0;
++    bool held = false;
+     result = 44;
+     while (!InterlockedCompareExchange(&interrupted, 0, 0)) {
+         for (unsigned batch = 0; batch < 64; ++batch) {
+@@ -473,10 +514,22 @@ int sh_launch(HMODULE module, void *engine, void *client_user,
+             seen_running = true;
+             retry_at = 0;
+         }
+-        if (running) stopped_at = 0;
++        bool holding = false;
++        if (keep_mode != SH_KEEP_ALIVE_OFF && seen_running) {
++            /* Polled while the game runs too, so the tree is known by the time
++             * the report ends; at most one snapshot a second. */
++            holding = sh_hold_poll(&hold, o) && !running;
++            if (holding && !held) {
++                held = true;
++                held_since = o->now_ms();
++                o->event("launch-keep-alive", (int32_t)hold.holders);
++            }
++        }
++        if (running || holding) stopped_at = 0;
+         else if (seen_running) {
+             if (!stopped_at) stopped_at = o->now_ms();
+             if (o->now_ms() - stopped_at >= 3000) {
++                if (held) o->event("launch-keep-alive-held", (int32_t)((o->now_ms() - held_since) / 1000));
+                 o->event("launch-game-ended", 1);
+                 result = result_received && !result_rejected ? 0 : 46;
+                 break;
+diff --git a/src/main.c b/src/main.c
+index 2ab32ce..6f04ab6 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -26,7 +26,8 @@ static const struct dock_client_layout *client_layout;
+ 
+ static void event(const char *stage, int32_t value)
+ {
+-    const char *round = !strncmp(stage, "install-scm", 11) ? "ml2014" :
++    const char *round = !strncmp(stage, "game-scm", 8) || !strncmp(stage, "launch-keep-alive", 17) ? "ml2020" :
++        !strncmp(stage, "install-scm", 11) ? "ml2014" :
+         !strncmp(stage, "ceg-scm", 7) || !strncmp(stage, "ceg-service-", 12) ? "ml2000" :
+         !strncmp(stage, "ceg-", 4) ? "ml1990" :
+         !strncmp(stage, "launch-update-", 14) ? "ml1970" :
+diff --git a/src/scm.c b/src/scm.c
+index c8bf279..e60474e 100644
+--- a/src/scm.c
++++ b/src/scm.c
+@@ -376,3 +376,77 @@ int32_t sh_install_scm_start(const struct sh_observer *o)
+     o->event("install-scm", outcome);
+     return outcome;
+ }
++
++/* ml2020: the game session's service manager (scm.h). */
++int32_t sh_game_scm_foreign_services(void)
++{
++    wchar_t windows[MAX_PATH];
++    UINT length = GetWindowsDirectoryW(windows, MAX_PATH);
++    if (!length || length >= MAX_PATH) wcscpy(windows, L"C:\\windows");
++    HKEY services = NULL;
++    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services", 0,
++                      KEY_READ, &services) != ERROR_SUCCESS) return -1;
++    int32_t foreign = 0;
++    static wchar_t image[8192], expanded[8192];
++    for (DWORD index = 0; index < 4096; ++index) {
++        wchar_t name[256];
++        DWORD name_length = 256;
++        LSTATUS status = RegEnumKeyExW(services, index, name, &name_length, NULL, NULL, NULL, NULL);
++        if (status == ERROR_NO_MORE_ITEMS) break;
++        if (status != ERROR_SUCCESS) continue;
++        HKEY service = NULL;
++        if (RegOpenKeyExW(services, name, 0, KEY_QUERY_VALUE, &service) != ERROR_SUCCESS) continue;
++        DWORD type = 0, start = 0, size = sizeof(DWORD), kind = 0;
++        bool known = RegQueryValueExW(service, L"Type", NULL, &kind, (BYTE *)&type, &size) == ERROR_SUCCESS &&
++                     kind == REG_DWORD && size == sizeof(DWORD);
++        size = sizeof(DWORD);
++        known = known && RegQueryValueExW(service, L"Start", NULL, &kind, (BYTE *)&start, &size) == ERROR_SUCCESS &&
++                kind == REG_DWORD && size == sizeof(DWORD);
++        /* Only automatic Win32 services need the image read at all. */
++        if (known && (type & 0x30u) && start == 2) {
++            size = sizeof(image) - sizeof(wchar_t);
++            const wchar_t *path = NULL;
++            if (RegQueryValueExW(service, L"ImagePath", NULL, &kind, (BYTE *)image, &size) == ERROR_SUCCESS &&
++                (kind == REG_SZ || kind == REG_EXPAND_SZ) && size >= sizeof(wchar_t)) {
++                image[size / sizeof(wchar_t)] = 0;
++                path = image;
++                if (kind == REG_EXPAND_SZ) {
++                    DWORD got = ExpandEnvironmentStringsW(image, expanded, 8192);
++                    if (got && got < 8192) path = expanded;
++                }
++            }
++            if (sh_service_is_foreign_autostart(type, start, path, windows)) foreign++;
++        }
++        RegCloseKey(service);
++    }
++    RegCloseKey(services);
++    return foreign;
++}
++
++struct game_scm_work { const struct sh_observer *o; volatile LONG outcome; };
++
++/* The worker's events would interleave with the host's after a timeout, so
++ * it reports nothing; the host reports the outcome. */
++static void quiet_event(const char *stage, int32_t value) { (void)stage; (void)value; }
++
++static DWORD WINAPI game_scm_worker(void *parameter)
++{
++    struct game_scm_work *work = parameter;
++    struct sh_observer quiet = {work->o->now_ms, work->o->sleep_ms, quiet_event};
++    InterlockedExchange(&work->outcome, sh_install_scm_start(&quiet));
++    return 0;
++}
++
++int32_t sh_game_scm_start(const struct sh_observer *o, bool *timed_out)
++{
++    /* Static: a timed-out worker may still write to it after this returns. */
++    static struct game_scm_work work;
++    *timed_out = false;
++    work.o = o;
++    InterlockedExchange(&work.outcome, SH_INSTALL_SCM_FAILED);
++    HANDLE worker = CreateThread(NULL, 0, game_scm_worker, &work, 0, NULL);
++    if (!worker) return sh_install_scm_start(o);
++    if (WaitForSingleObject(worker, SH_GAME_SCM_STEP_MS) != WAIT_OBJECT_0) *timed_out = true;
++    CloseHandle(worker);
++    return *timed_out ? SH_INSTALL_SCM_FAILED : InterlockedCompareExchange(&work.outcome, 0, 0);
++}
+diff --git a/src/scm.h b/src/scm.h
+index c809d42..1ea449c 100644
+--- a/src/scm.h
++++ b/src/scm.h
+@@ -4,6 +4,7 @@
+ #ifndef MADEIRA_STEAM_HOST_SCM_H
+ #define MADEIRA_STEAM_HOST_SCM_H
+ #include <windows.h>
++#include <stdbool.h>
+ #include "probe.h"
+ /* ml2000: make Wine's service manager reachable for Valve's client and check
+  * (read-only) that Valve's own client service is registered. If it is not,
+@@ -23,4 +24,18 @@ void sh_ceg_scm_release(const struct sh_observer *o);
+  * (validation.h). MADEIRA_DOCK_INSTALL_SCM=0: no-op (off).
+  */
+ int32_t sh_install_scm_start(const struct sh_observer *o);
++/* ml2020: the game session's own service manager (launch.c). How many
++ * services another program installed in this prefix with automatic start
++ * outside the Windows folder (validation.h, sh_service_is_foreign_autostart):
++ * read-only registry enumeration, bounded; -1 when the key cannot be read.
++ */
++int32_t sh_game_scm_foreign_services(void);
++/* The --start-services start (sh_install_scm_start), on a worker thread
++ * waited for at most SH_GAME_SCM_STEP_MS: a manager that never answers must
++ * not keep the game from starting. On a timeout *timed_out is set and the
++ * worker is left to its blocked call (it reports nothing). Returns enum
++ * sh_install_scm (validation.h), SH_INSTALL_SCM_FAILED on a timeout.
++ */
++#define SH_GAME_SCM_STEP_MS 20000
++int32_t sh_game_scm_start(const struct sh_observer *o, bool *timed_out);
+ #endif
+diff --git a/src/validation.c b/src/validation.c
+index 41f02d9..0efe6da 100644
+--- a/src/validation.c
++++ b/src/validation.c
+@@ -243,3 +243,112 @@ const char *sh_install_scm_word(int32_t outcome)
+     default: return "failed";
+     }
+ }
++
++/* ml2020: the game session's service manager and the hold (validation.h). */
++static wchar_t sh_wide_lower(wchar_t c)
++{
++    return (c >= L'A' && c <= L'Z') ? (wchar_t)(c + (L'a' - L'A')) : c;
++}
++
++/* Case-insensitive, ASCII letters only (image names and Windows paths). */
++static bool sh_wide_prefix(const wchar_t *text, const wchar_t *prefix)
++{
++    if (!text || !prefix) return false;
++    for (; *prefix; ++text, ++prefix)
++        if (sh_wide_lower(*text) != sh_wide_lower(*prefix)) return false;
++    return true;
++}
++
++static bool sh_wide_separator(wchar_t c)
++{
++    return c == L'\\' || c == L'/';
++}
++
++enum sh_game_scm_mode sh_game_scm_mode(const wchar_t *value)
++{
++    if (!value) return SH_GAME_SCM_AUTO;
++    if (value[0] == L'0' && !value[1]) return SH_GAME_SCM_OFF;
++    if (value[0] == L'1' && !value[1]) return SH_GAME_SCM_ON;
++    return SH_GAME_SCM_AUTO;
++}
++
++bool sh_path_in_folder(const wchar_t *path, const wchar_t *folder)
++{
++    if (!path || !folder || !*folder) return false;
++    size_t length = wcslen(folder);
++    while (length && sh_wide_separator(folder[length - 1])) --length;
++    if (!length) return false;
++    for (size_t i = 0; i < length; ++i) {
++        wchar_t a = sh_wide_lower(path[i]), b = sh_wide_lower(folder[i]);
++        if (sh_wide_separator(a) && sh_wide_separator(b)) continue;
++        if (a != b) return false;
++    }
++    return sh_wide_separator(path[length]);
++}
++
++bool sh_image_is_windows(const wchar_t *image, const wchar_t *windows_dir)
++{
++    if (!image) return false;
++    /* Registry forms: a quoted path, an NT prefix, or a path relative to the
++     * Windows folder. The arguments after the image do not matter here. */
++    while (*image == L'"' || *image == L' ') ++image;
++    if (sh_wide_prefix(image, L"\\??\\")) image += 4;
++    if (sh_wide_prefix(image, L"%SystemRoot%") || sh_wide_prefix(image, L"\\SystemRoot") ||
++        sh_wide_prefix(image, L"System32\\") || sh_wide_prefix(image, L"SysWOW64\\") ||
++        sh_wide_prefix(image, L"%windir%")) return true;
++    return sh_path_in_folder(image, windows_dir);
++}
++
++bool sh_service_is_foreign_autostart(uint32_t type, uint32_t start, const wchar_t *image,
++                                     const wchar_t *windows_dir)
++{
++    /* SERVICE_WIN32_*; SERVICE_AUTO_START or SERVICE_DEMAND_START: a program
++     * that registered a demand-start service starts it itself through the
++     * manager, so it needs one as much as an automatic one does. */
++    if (!(type & 0x30u) || (start != 2 && start != 3)) return false;
++    if (!image) return false;
++    while (*image == L'"' || *image == L' ') ++image;
++    if (!*image) return false;
++    return !sh_image_is_windows(image, windows_dir);
++}
++
++bool sh_game_scm_wanted(enum sh_game_scm_mode mode, unsigned foreign_autostart)
++{
++    if (mode == SH_GAME_SCM_OFF) return false;
++    if (mode == SH_GAME_SCM_ON) return true;
++    return foreign_autostart > 0;
++}
++
++enum sh_keep_alive_mode sh_keep_alive_mode(const wchar_t *value)
++{
++    if (value && value[0] == L'0' && !value[1]) return SH_KEEP_ALIVE_OFF;
++    return SH_KEEP_ALIVE_AUTO;
++}
++
++bool sh_keep_alive_listed(const wchar_t *list, const wchar_t *name)
++{
++    if (!list || !name || !*name) return false;
++    size_t length = wcslen(name);
++    const wchar_t *entry = list;
++    for (;;) {
++        while (*entry == L' ' || *entry == L';') ++entry;
++        if (!*entry) return false;
++        const wchar_t *end = entry;
++        while (*end && *end != L';') ++end;
++        const wchar_t *stop = end;
++        while (stop > entry && stop[-1] == L' ') --stop;
++        if ((size_t)(stop - entry) == length) {
++            size_t i = 0;
++            while (i < length && sh_wide_lower(entry[i]) == sh_wide_lower(name[i])) ++i;
++            if (i == length) return true;
++        }
++        if (!*end) return false;
++        entry = end + 1;
++    }
++}
++
++bool sh_keep_alive_holds(bool windows_image, bool visible_window, uint64_t age_ms, uint64_t young_ms)
++{
++    if (windows_image) return false;
++    return visible_window || age_ms < young_ms;
++}
+diff --git a/src/validation.h b/src/validation.h
+index aa98191..db67869 100644
+--- a/src/validation.h
++++ b/src/validation.h
+@@ -6,6 +6,7 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stddef.h>
++#include <wchar.h>
+ /* Extra LaunchApp arguments are one bounded UTF-8 string, never a shell command.
+  * The Swift library profile enforces the same byte/quote/token/control bounds. */
+ #define SH_LAUNCH_ARGUMENTS_CAPACITY 4096u
+@@ -85,4 +86,49 @@ enum sh_install_scm sh_install_scm_outcome(bool enabled, uint32_t first_error,
+                                            bool spawned, bool reachable);
+ /* "started", "already", "off"; "failed" for any other value. */
+ const char *sh_install_scm_word(int32_t outcome);
++
++/* ml2020: a game session's own service manager and the hold while a game's
++ * launcher restarts (launch.c, hold.c). Pure decisions; the Windows calls
++ * stay in the host files so the native sanitizer tests cover these.
++ *
++ * MADEIRA_DOCK_GAME_SCM: "0" never starts a service manager for the game
++ * session, "1" always does; unset (or any other value) starts one only when
++ * a program installed an automatic-start Windows service of its own in this
++ * prefix, which only a running service manager can start.
++ */
++enum sh_game_scm_mode { SH_GAME_SCM_OFF = 0, SH_GAME_SCM_ON = 1, SH_GAME_SCM_AUTO = 2 };
++enum sh_game_scm_mode sh_game_scm_mode(const wchar_t *value);
++/* A service entry under System\CurrentControlSet\Services that Windows
++ * a program may start and that is not part of Windows: a Win32 service
++ * (type 0x10 or 0x20) with start type 2 (automatic) or 3 (on demand, which
++ * the program that registered it starts itself) whose image is neither
++ * under the Windows folder nor given relative to it (%SystemRoot%,
++ * \SystemRoot, System32\, SysWOW64\). Wine's own services all fail this
++ * test; a launcher's own service passes it.
++ */
++bool sh_service_is_foreign_autostart(uint32_t type, uint32_t start, const wchar_t *image,
++                                     const wchar_t *windows_dir);
++bool sh_game_scm_wanted(enum sh_game_scm_mode mode, unsigned foreign_autostart);
++
++/* MADEIRA_DOCK_KEEP_ALIVE: "0" ends the session as before, 3 s after Valve's
++ * client stops reporting the game as running. Unset, empty or a `;`-separated
++ * list of image file names: the end is postponed while a process of the
++ * game's own tree (descended from this host, Windows images and their
++ * children excepted) or with a listed image name still shows a window or is
++ * younger than SH_KEEP_ALIVE_YOUNG_MS. A launcher that restarts itself is
++ * young; the game it then starts shows a window; a launcher left behind in
++ * the background after the game ends is neither, so the session ends.
++ */
++#define SH_KEEP_ALIVE_YOUNG_MS 60000ULL
++enum sh_keep_alive_mode { SH_KEEP_ALIVE_OFF = 0, SH_KEEP_ALIVE_AUTO = 1 };
++enum sh_keep_alive_mode sh_keep_alive_mode(const wchar_t *value);
++/* `name` (an image file name) is one of the `;`-separated entries, no case. */
++bool sh_keep_alive_listed(const wchar_t *list, const wchar_t *name);
++/* `path` lies inside `folder` (no case; a separator must follow the folder). */
++bool sh_path_in_folder(const wchar_t *path, const wchar_t *folder);
++/* `image` is Windows' own: inside windows_dir, or given relative to it. */
++bool sh_image_is_windows(const wchar_t *image, const wchar_t *windows_dir);
++/* One tracked process holds the session while it is not a Windows image and
++ * either shows a window or is younger than young_ms. */
++bool sh_keep_alive_holds(bool windows_image, bool visible_window, uint64_t age_ms, uint64_t young_ms);
+ #endif
+diff --git a/tests/test-validation.c b/tests/test-validation.c
+index b788658..1590039 100644
+--- a/tests/test-validation.c
++++ b/tests/test-validation.c
+@@ -172,6 +172,53 @@ int main(void)
+     assert(!strcmp(sh_install_scm_word(SH_INSTALL_SCM_OFF), "off"));
+     assert(!strcmp(sh_install_scm_word(SH_INSTALL_SCM_FAILED), "failed"));
+     assert(!strcmp(sh_install_scm_word(7), "failed"));
+-    puts("steam-host: launch-option, launch-arguments, entitlement-list, launch-result, content-wait, config-wait, session-wait, CEG, service-manager "
+-         "and install-service-manager validation cases passed");
++    /* ml2020: the game session's service manager (auto: a foreign automatic service). */
++    assert(sh_game_scm_mode(NULL) == SH_GAME_SCM_AUTO && sh_game_scm_mode(L"") == SH_GAME_SCM_AUTO);
++    assert(sh_game_scm_mode(L"0") == SH_GAME_SCM_OFF && sh_game_scm_mode(L"1") == SH_GAME_SCM_ON);
++    assert(sh_game_scm_mode(L"01") == SH_GAME_SCM_AUTO && sh_game_scm_mode(L"auto") == SH_GAME_SCM_AUTO);
++    const wchar_t *windows = L"C:\\windows";
++    assert(sh_path_in_folder(L"C:\\windows\\system32\\services.exe", windows));
++    assert(sh_path_in_folder(L"c:/WINDOWS/system32/svchost.exe", L"C:\\Windows\\"));
++    assert(!sh_path_in_folder(L"C:\\windows2\\x.exe", windows));
++    assert(!sh_path_in_folder(L"C:\\windows", windows) && !sh_path_in_folder(L"C:\\win", windows));
++    assert(!sh_path_in_folder(NULL, windows) && !sh_path_in_folder(L"C:\\windows\\a", NULL) &&
++           !sh_path_in_folder(L"C:\\windows\\a", L"\\"));
++    assert(sh_image_is_windows(L"%SystemRoot%\\system32\\svchost.exe -k netsvcs", windows));
++    assert(sh_image_is_windows(L"\\SystemRoot\\System32\\drivers\\mountmgr.sys", windows));
++    assert(sh_image_is_windows(L"System32\\DRIVERS\\x.sys", windows));
++    assert(sh_image_is_windows(L"\\??\\C:\\windows\\system32\\drivers\\y.sys", windows));
++    assert(sh_image_is_windows(L"\"C:\\windows\\system32\\msiexec.exe\" /V", windows));
++    assert(!sh_image_is_windows(L"\"C:\\Program Files\\Publisher\\Launcher\\Service.exe\"", windows));
++    assert(!sh_image_is_windows(L"C:\\Games\\game\\service.exe", windows) && !sh_image_is_windows(NULL, windows));
++    /* type 0x10 own process, 0x20 shared; start 2 automatic, 3 demand, 4 disabled */
++    assert(sh_service_is_foreign_autostart(0x10, 2, L"\"C:\\Program Files\\Publisher\\Service.exe\"", windows));
++    assert(sh_service_is_foreign_autostart(0x20, 2, L"C:\\Games\\svc.exe --run", windows));
++    assert(sh_service_is_foreign_autostart(0x10, 3, L"C:\\Games\\svc.exe", windows));   /* demand start: the program starts it */
++    assert(!sh_service_is_foreign_autostart(0x10, 4, L"C:\\Games\\svc.exe", windows));  /* disabled */
++    assert(!sh_service_is_foreign_autostart(0x10, 0, L"C:\\Games\\svc.exe", windows) &&
++           !sh_service_is_foreign_autostart(0x10, 1, L"C:\\Games\\svc.exe", windows));  /* boot and system start: drivers */
++    assert(!sh_service_is_foreign_autostart(0x1, 2, L"C:\\Games\\drv.sys", windows));
++    assert(!sh_service_is_foreign_autostart(0x10, 2, L"%SystemRoot%\\system32\\svchost.exe -k x", windows));
++    assert(!sh_service_is_foreign_autostart(0x10, 2, L"C:\\windows\\system32\\spoolsv.exe", windows));
++    assert(!sh_service_is_foreign_autostart(0x10, 2, L"", windows) && !sh_service_is_foreign_autostart(0x10, 2, L"\"\"", windows));
++    assert(!sh_service_is_foreign_autostart(0x10, 2, NULL, windows));
++    assert(!sh_game_scm_wanted(SH_GAME_SCM_OFF, 5) && sh_game_scm_wanted(SH_GAME_SCM_ON, 0));
++    assert(!sh_game_scm_wanted(SH_GAME_SCM_AUTO, 0) && sh_game_scm_wanted(SH_GAME_SCM_AUTO, 1));
++    /* ml2020: the hold while a launcher restarts. */
++    assert(sh_keep_alive_mode(NULL) == SH_KEEP_ALIVE_AUTO && sh_keep_alive_mode(L"") == SH_KEEP_ALIVE_AUTO);
++    assert(sh_keep_alive_mode(L"0") == SH_KEEP_ALIVE_OFF && sh_keep_alive_mode(L"1") == SH_KEEP_ALIVE_AUTO);
++    assert(sh_keep_alive_mode(L"Launcher.exe;Game.exe") == SH_KEEP_ALIVE_AUTO);
++    assert(sh_keep_alive_listed(L"Launcher.exe;Game.exe", L"launcher.EXE"));
++    assert(sh_keep_alive_listed(L"Launcher.exe; Game.exe ", L"game.exe"));
++    assert(sh_keep_alive_listed(L";;Game.exe", L"Game.exe") && sh_keep_alive_listed(L"Game.exe", L"Game.exe"));
++    assert(!sh_keep_alive_listed(L"Launcher.exe;Game.exe", L"Game.ex") && !sh_keep_alive_listed(L"Launcher.exe", L"Launcher.exe2"));
++    assert(!sh_keep_alive_listed(L"", L"Game.exe") && !sh_keep_alive_listed(NULL, L"Game.exe") &&
++           !sh_keep_alive_listed(L"Game.exe", L"") && !sh_keep_alive_listed(L"Game.exe", NULL));
++    assert(!sh_keep_alive_listed(L"1", L"Game.exe"));
++    assert(sh_keep_alive_holds(false, true, 10 * 60000ULL, SH_KEEP_ALIVE_YOUNG_MS));
++    assert(sh_keep_alive_holds(false, false, 5000, SH_KEEP_ALIVE_YOUNG_MS));
++    assert(!sh_keep_alive_holds(false, false, SH_KEEP_ALIVE_YOUNG_MS, SH_KEEP_ALIVE_YOUNG_MS));
++    assert(!sh_keep_alive_holds(true, true, 0, SH_KEEP_ALIVE_YOUNG_MS));
++    puts("steam-host: launch-option, launch-arguments, entitlement-list, launch-result, content-wait, config-wait, session-wait, CEG, service-manager, "
++         "install-service-manager, game-service-manager and keep-alive validation cases passed");
+ }
+diff --git a/tools/build.sh b/tools/build.sh
+index 375f9fe..ce99669 100644
+--- a/tools/build.sh
++++ b/tools/build.sh
+@@ -15,7 +15,7 @@ for arch in x86_64 i686; do
+     [[ -x "$compiler" ]] || { echo "Missing cross compiler: $compiler" >&2; exit 1; }
+     "$compiler" -std=c11 -O2 -Wall -Wextra -Werror -Wno-cast-function-type \
+         -static -Wl,--strip-all -o "$output/dockhost-$arch.exe" \
+-        src/main.c src/probe.c src/session.c src/launch.c src/validation.c src/auth.c src/client_layout.c src/scm.c -ladvapi32
++        src/main.c src/probe.c src/session.c src/launch.c src/validation.c src/auth.c src/client_layout.c src/scm.c src/hold.c -ladvapi32 -luser32
+ done
+ echo "Built x86-64 and i386 probes in $output"
+ # Staging is explicit: experimental probes are not a new default launch route.

@@ -1,0 +1,121 @@
+From 82750c0cff73a5a4e855d65b6a74350e8a4ae972 Mon Sep 17 00:00:00 2001
+From: 125hz <133181124+125hz@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 12:59:50 +0300
+Subject: [PATCH] CPUID: MADEIRA_FEX_AVX=2 reports AVX without AVX2 (VAES,
+ VPCLMULQDQ hidden too)
+
+Some programs refuse to start without AVX, while with AVX2 reported a bundled Bink 2 video decoder takes its AVX2 path and
+the first video stops on its first frame (the programs that play Bink video here run with AVX off). The new value keeps AVX
+(and its 128-bit emulation) and only changes what CPUID leaf 7 answers: AVX2, VAES and VPCLMULQDQ read as absent, so
+IsProcessorFeaturePresent(PF_AVX2) follows. MADEIRA_FEX_AVX=1 and unset are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ FEXCore/Source/Interface/Core/CPUID.cpp | 13 ++++++++++---
+ FEXCore/Source/Interface/Core/CPUID.h   |  9 +++++++++
+ Source/Windows/Common/CPUFeatures.cpp   | 14 +++++++++++---
+ 3 files changed, 30 insertions(+), 6 deletions(-)
+
+diff --git a/FEXCore/Source/Interface/Core/CPUID.cpp b/FEXCore/Source/Interface/Core/CPUID.cpp
+index 9c305e887..4d8f29718 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.cpp
++++ b/FEXCore/Source/Interface/Core/CPUID.cpp
+@@ -21,6 +21,7 @@ $end_info$
+ 
+ #include "git_version.h"
+ 
++#include <cstdlib>
+ #include <cstring>
+ 
+ namespace FEXCore {
+@@ -661,7 +662,7 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_07h(uint32_t Leaf) const {
+     // This is due to LRCPC performance on Cortex being abysmal.
+     // Only enable EnhancedREPMOVS if atomic memcpy tso emulation isn't enabled.
+     const uint32_t SupportsEnhancedREPMOVS = CTX->IsMemcpyAtomicTSOEnabled() == false;
+-    const uint32_t SupportsVPCLMULQDQ = CTX->HostFeatures.SupportsPMULL_128Bit && SupportsAVX();
++    const uint32_t SupportsVPCLMULQDQ = CTX->HostFeatures.SupportsPMULL_128Bit && SupportsAVX2();   // iOS-Madeira: 256-bit, hidden with AVX2
+     const uint32_t SupportsWFXT = CTX->HostFeatures.SupportsWFXT;
+ 
+     // Number of subfunctions
+@@ -671,7 +672,7 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_07h(uint32_t Leaf) const {
+               (0 << 2) |                               // SGX
+               (SupportsAVX() << 3) |                   // BMI1
+               (0 << 4) |                               // Intel Hardware Lock Elison
+-              (SupportsAVX() << 5) |                   // AVX2 support
++              (SupportsAVX2() << 5) |                  // AVX2 support (iOS-Madeira: MADEIRA_FEX_AVX=2 hides it)
+               (1 << 6) |                               // FPU data pointer updated only on exception
+               (1 << 7) |                               // SMEP support
+               (SupportsAVX() << 8) |                   // BMI2
+@@ -708,7 +709,7 @@ FEXCore::CPUID::FunctionResults CPUIDEmu::Function_07h(uint32_t Leaf) const {
+               (0 << 6) |                                // AVX512-VBMI2
+               (0 << 7) |                                // CET shadow stack
+               (0 << 8) |                                // GFNI
+-              (CTX->HostFeatures.SupportsAES256 << 9) | // VAES
++              ((CTX->HostFeatures.SupportsAES256 && !HideAVX2) << 9) | // VAES (iOS-Madeira: hidden with AVX2)
+               (SupportsVPCLMULQDQ << 10) |              // VPCLMULQDQ
+               (0 << 11) |                               // AVX512-VNNI
+               (0 << 12) |                               // AVX512-BITALG
+@@ -1361,6 +1362,12 @@ CPUIDEmu::CPUIDEmu(const FEXCore::Context::ContextImpl* ctx)
+ 
+   SetupFeatures();
+ 
++  // iOS-Madeira: MADEIRA_FEX_AVX=2, AVX without AVX2 (see HideAVX2 in CPUID.h). Exactly "2"; "1" and unset are unchanged.
++  if (const char* Avx = getenv("MADEIRA_FEX_AVX"); Avx && Avx[0] == '2' && Avx[1] == '\0' && SupportsAVX()) {
++    HideAVX2 = true;
++    LogMan::Msg::IFmt("[fex-avx] MADEIRA_FEX_AVX=2: CPUID reports AVX, not AVX2 (VAES and VPCLMULQDQ hidden too)");
++  }
++
+ #ifdef ARCHITECTURE_arm64
+   if (SupportsCPUIndexInTPIDRRO) {
+     GetCPUID = GetCPUID_TPIDRRO;
+diff --git a/FEXCore/Source/Interface/Core/CPUID.h b/FEXCore/Source/Interface/Core/CPUID.h
+index d51b45426..1a823a6e5 100644
+--- a/FEXCore/Source/Interface/Core/CPUID.h
++++ b/FEXCore/Source/Interface/Core/CPUID.h
+@@ -155,6 +155,15 @@ private:
+     return (XCR0 & XCR0_AVX) ? 1 : 0;
+   }
+ 
++  /* iOS-Madeira: MADEIRA_FEX_AVX=2 reports AVX but not AVX2 (nor the 256-bit VAES / VPCLMULQDQ that come with it).
++   * A program can refuse to start without AVX while, with AVX2 reported, its Bink 2 video decoder takes its AVX2 path
++   * and the first video stops on its first frame; the programs that play Bink video here run with AVX off (SSE path).
++   * Instructions are not refused: a program that uses AVX2 anyway still runs it; only what CPUID answers changes. */
++  bool HideAVX2 {};
++  uint32_t SupportsAVX2() const {
++    return (SupportsAVX() && !HideAVX2) ? 1 : 0;
++  }
++
+   using FunctionHandler = FEXCore::CPUID::FunctionResults (CPUIDEmu::*)(uint32_t Leaf) const;
+ 
+   struct CPUData {
+diff --git a/Source/Windows/Common/CPUFeatures.cpp b/Source/Windows/Common/CPUFeatures.cpp
+index 4c470d737..57c8125c0 100644
+--- a/Source/Windows/Common/CPUFeatures.cpp
++++ b/Source/Windows/Common/CPUFeatures.cpp
+@@ -163,12 +163,20 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostF
+    * paths), but a game built for AVX dies on its first VEX instruction. The app
+    * sets MADEIRA_FEX_AVX=1 for such a game; FEX then runs AVX through its
+    * 128-bit emulation. CPUID, XCR0 and IsProcessorFeaturePresent all derive
+-   * from SupportsAVX. AVX is unsupported for WOW64, as on other hosts. */
++   * from SupportsAVX. AVX is unsupported for WOW64, as on other hosts.
++   * MADEIRA_FEX_AVX=2 is the same but CPUID reports AVX without AVX2 (VAES,
++   * VPCLMULQDQ hidden too): for a game that demands AVX while its libraries
++   * (Bink 2 video) should keep their pre-AVX2 paths. Set it with the game's own
++   * line env.MADEIRA_FEX_AVX = 2. */
+   if (const char* Avx = getenv("MADEIRA_FEX_AVX");
+-      Avx && Avx[0] == '1' && HostType != FEXCore::HostFeatures::HostTypeEnum::Wow64) {
++      Avx && (Avx[0] == '1' || (Avx[0] == '2' && Avx[1] == '\0')) && HostType != FEXCore::HostFeatures::HostTypeEnum::Wow64) {
+     HostFeatures.SupportsAVX = true;
+     HostFeatures.SupportsAES256 = HostFeatures.SupportsAES;
+-    LogMan::Msg::IFmt("[fex-avx] MADEIRA_FEX_AVX=1: AVX and AVX2 reported and emulated");
++    if (Avx[0] == '1') {
++      LogMan::Msg::IFmt("[fex-avx] MADEIRA_FEX_AVX=1: AVX and AVX2 reported and emulated");
++    } else {
++      LogMan::Msg::IFmt("[fex-avx] MADEIRA_FEX_AVX=2: AVX reported and emulated, AVX2 not reported");
++    }
+   }
+   return HostFeatures;
+ #else
+-- 
+2.43.0
+

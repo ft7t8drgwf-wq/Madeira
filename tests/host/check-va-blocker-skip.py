@@ -109,13 +109,22 @@ static void *find_reserved_area_range( void *limit_low, void *limit_high, size_t
 }
 """ + code + r"""
 
+/* the placement request map_reserved_area_find scans with (the production struct's first four fields) */
+struct ios_reserved_ctx { size_t size; int top_down; int unix_prot; size_t align_mask; };
+static void *map_reserved_area_find( void *limit_low, void *limit_high, struct ios_reserved_ctx *ctx )
+{
+    return find_reserved_area_range( limit_low, limit_high, ctx->size, ctx->top_down, ctx->align_mask );
+}
+static struct ios_reserved_ctx ctx16 = { 0x10000, 0, 3, 0xffff };
+
 /* what map_reserved_area_inner does: one search, one MAP_FIXED, the skip after an ENOMEM */
 static void *place( size_t size, int top_down, size_t align_mask )
 {
+    struct ios_reserved_ctx ctx = { size, top_down, 3, align_mask };
     void *ptr = find_reserved_area_range( (void *)W, (void *)(W + G4), size, top_down, align_mask );
     if (ptr && anon_mmap_fixed( ptr, size, 3, 0 ) != ptr)
     {
-        if (errno == ENOMEM) return ios_va_blocker_skip( ptr, (void *)W, (void *)(W + G4), size, top_down, 3, align_mask );
+        if (errno == ENOMEM) return ios_va_blocker_skip( ptr, (void *)W, (void *)(W + G4), size, top_down, 3, align_mask, &ctx );
         ptr = NULL;
     }
     return ptr;
@@ -181,7 +190,7 @@ int main( int argc, char **argv )
             void *ptr = find_reserved_area_range( (void *)W, (void *)(W + G4), 0x10000, 0, 0xffff );
             nblk = 0;   /* the kernel shows nothing there */
             errno = ENOMEM;
-            p = ios_va_blocker_skip( ptr, (void *)W, (void *)(W + G4), 0x10000, 0, 3, 0xffff );
+            p = ios_va_blocker_skip( ptr, (void *)W, (void *)(W + G4), 0x10000, 0, 3, 0xffff, &ctx16 );
         }
     }
     else if (!strcmp( t, "full" ))
@@ -196,7 +205,7 @@ int main( int argc, char **argv )
         {
             void *ptr = find_reserved_area_range( (void *)W, (void *)(W + G4), 0x10000, 0, 0xffff );
             fail_other = 1;
-            p = ios_va_blocker_skip( ptr, (void *)W, (void *)(W + G4), 0x10000, 0, 3, 0xffff );
+            p = ios_va_blocker_skip( ptr, (void *)W, (void *)(W + G4), 0x10000, 0, 3, 0xffff, &ctx16 );
         }
     }
     else if (!strcmp( t, "cap" ))
