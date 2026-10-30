@@ -14,6 +14,9 @@ import CommonCrypto
 struct SteamDownloadProgress: Equatable, Sendable {
     enum Phase: String, Sendable { case preparing, checking, downloading, finishing }
     var phase: Phase = .preparing
+    /// While preparing: what is being done, for the caption.
+    var step: Step = .start
+    enum Step: Sendable { case start, fileList, files }
     /// Compressed bytes to fetch for the whole install (all selected depots).
     var totalBytes: UInt64 = 0
     /// Compressed bytes already on disk, including chunks resumed from a
@@ -110,6 +113,10 @@ final class DepotDownloader {
         guard !hosts.isEmpty else { throw SteamError.chunkDownloadFailed("No content servers are available.") }
 
         // 1. Keys, manifests and per-host authorization for every depot.
+        state.step = .fileList
+        report(state)
+        let prepStarted = Date()
+        manifestStats = ManifestStats()
         let health = ContentHostHealth()
         let pool = Array(hosts.prefix(hostPoolSize))
         var plans: [DepotPlan] = []
@@ -142,10 +149,7 @@ final class DepotDownloader {
             let contentAppID = !app.freeToDownload ? (depot.fromApp ?? app.appID) : app.appID
             let manifest = try await fetchManifest(depotID: depot.depotID, appID: contentAppID,
                                                    manifestGID: gid, key: key, hosts: hosts)
-            var auth: [String: String] = [:]
-            for host in pool {
-                auth[host] = await cdnAuthFragment(depotID: depot.depotID, appID: contentAppID, host: host)
-            }
+            let auth = await cdnAuthFragments(depotID: depot.depotID, appID: contentAppID, hosts: pool)
             plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
                                    hosts: pool, auth: auth,
                                    declaredSize: depot.publicSizeBytes, health: health, installURL: installURL))
@@ -168,10 +172,7 @@ final class DepotDownloader {
                 catch SteamError.depotKeyNotFound(_) { key = try await depotKey(depotID: depot.depotID, appID: app.appID) }
                 let manifest = try await fetchManifest(depotID: depot.depotID, appID: ownerID,
                                                        manifestGID: gid, key: key, hosts: hosts)
-                var auth: [String: String] = [:]
-                for host in pool {
-                    auth[host] = await cdnAuthFragment(depotID: depot.depotID, appID: ownerID, host: host)
-                }
+                let auth = await cdnAuthFragments(depotID: depot.depotID, appID: ownerID, hosts: pool)
                 try FileManager.default.createDirectory(at: ownerURL, withIntermediateDirectories: true)
                 plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
                                        hosts: pool, auth: auth,
@@ -199,9 +200,19 @@ final class DepotDownloader {
         }
 
         // 2. Prepare files and load journals off the main actor.
+        state.step = .files
+        report(state)
+        let filesStarted = Date()
         let prepared = try await Task.detached(priority: .userInitiated) {
             try Self.prepare(plans: plans, journalDir: journalDir)
         }.value
+        // Where the wait before a check or download goes (a repair of a large
+        // game spent 20 s here with no sign on screen).
+        let stats = manifestStats
+        func ms(_ seconds: TimeInterval) -> Int { Int(seconds * 1000) }
+        SteamLog.event("[steam-depot] prepared app=\(app.appID) depots=\(plans.count) total-ms=\(ms(Date().timeIntervalSince(prepStarted))) "
+            + "manifests-ms=\(ms(stats.fetchSeconds)) manifest-cached=\(stats.cached)/\(stats.cached + stats.fetched) manifest-kb=\(stats.bytes >> 10) "
+            + "parse-ms=\(ms(stats.parseSeconds)) files-ms=\(ms(Date().timeIntervalSince(filesStarted))) files=\(prepared.fileCount)")
         state.totalBytes = prepared.totalBytes
         state.doneBytes = prepared.doneBytes
         state.phase = .downloading
@@ -372,6 +383,13 @@ final class DepotDownloader {
         let fm = FileManager.default
         var result = Prepared()
         var folded: [URL: [String: String]] = [:]   // per folder: lowercased relative dir -> first spelling
+        // Folders made (or found) during this pass: a game with 50,000 files
+        // shares a few thousand folders, and each check is a file system call.
+        var madeFolders: Set<String> = []
+        func makeFolder(_ url: URL) throws {
+            guard madeFolders.insert(url.path).inserted else { return }
+            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+        }
         let journalNames = Set(plans.map { "depot_\($0.depotID)_\($0.manifestGID).journal" })
         // A journal for an older manifest describes different file contents.
         for name in (try? fm.contentsOfDirectory(atPath: journalDir.path)) ?? [] where !journalNames.contains(name) {
@@ -394,14 +412,19 @@ final class DepotDownloader {
                 }
                 let url = plan.installURL.appendingPathComponent(relative)
                 if file.isDirectory {
-                    try fm.createDirectory(at: url, withIntermediateDirectories: true)
+                    try makeFolder(url)
                     paths.append(""); existing.append(false); continue
                 }
-                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try makeFolder(url.deletingLastPathComponent())
                 var before = stat()
-                let hadContent = stat(url.path, &before) == 0 && before.st_size > 0
+                let found = stat(url.path, &before) == 0
+                let hadContent = found && before.st_size > 0
                 existing.append(hadContent)
-                try sizeFile(url.path, to: file.size)
+                // A regular file already at its manifest length (every file of
+                // a repair) needs no open; anything else is created or resized.
+                if !(found && (before.st_mode & S_IFMT) == S_IFREG && UInt64(before.st_size) == file.size) {
+                    try sizeFile(url.path, to: file.size)
+                }
                 paths.append(url.path)
                 result.fileCount += 1
                 result.totalUncompressed += file.size
@@ -607,8 +630,46 @@ final class DepotDownloader {
 
     // MARK: - Manifest
 
+    /// Time and bytes spent getting manifests during one install, for the log.
+    struct ManifestStats { var cached = 0, fetched = 0, bytes = 0, fetchSeconds: TimeInterval = 0, parseSeconds: TimeInterval = 0 }
+    private var manifestStats = ManifestStats()
+
+    /// Manifests already fetched, by depot, manifest and depot key: a repair,
+    /// a resumed install or a second check of the same build reads the file
+    /// list from here instead of asking Steam and a content server again. A
+    /// manifest ID names one immutable file list, so a hit is never stale.
+    /// Madeira's own cache folder, not Valve's depotcache (see below).
+    var manifestCacheFolder: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("SteamManifests", isDirectory: true)
+
+    private nonisolated static func manifestCacheName(depotID: UInt32, manifestGID: UInt64, key: Data) -> String {
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+        key.withUnsafeBytes { _ = CC_SHA1($0.baseAddress, CC_LONG(key.count), &digest) }
+        return "\(depotID)_\(manifestGID)_\(digest.prefix(4).map { String(format: "%02x", $0) }.joined()).manifest"
+    }
+
     private func fetchManifest(depotID: UInt32, appID: UInt32, manifestGID: UInt64,
                                key: Data, hosts: [String]) async throws -> DepotManifest {
+        let cacheFolder = manifestCacheFolder
+        let cacheFile = cacheFolder?.appendingPathComponent(Self.manifestCacheName(depotID: depotID, manifestGID: manifestGID, key: key))
+        if let cacheFile, FileManager.default.fileExists(atPath: cacheFile.path) {
+            let parseStarted = Date()
+            let depotCache = depotCache
+            let manifest = await Task.detached(priority: .userInitiated) { () -> DepotManifest? in
+                guard let cached = try? Data(contentsOf: cacheFile),
+                      let manifest = try? DepotManifest.parse(depotID: depotID, manifestGID: manifestGID, data: cached, depotKey: key),
+                      !manifest.files.isEmpty else { return nil }
+                Self.keepForValve(manifest, payload: cached, depotID: depotID, manifestGID: manifestGID, depotCache: depotCache)
+                return manifest
+            }.value
+            if let manifest {
+                manifestStats.cached += 1
+                manifestStats.parseSeconds += Date().timeIntervalSince(parseStarted)
+                return manifest
+            }
+            try? FileManager.default.removeItem(at: cacheFile)
+        }
+        let fetchStarted = Date()
         let requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID)
         var lastError: Error = SteamError.manifestFetchFailed("No content server returned the manifest.")
         for host in hosts.prefix(6) {
@@ -617,19 +678,27 @@ final class DepotDownloader {
             let code = requestCode == 0 ? "" : "/\(requestCode)"
             do {
                 let raw = try await Self.download("\(host)/depot/\(depotID)/manifest/\(manifestGID)/5\(code)\(auth)")
-                let cache = depotCache
-                return try await Task.detached(priority: .userInitiated) {
+                manifestStats.fetched += 1
+                manifestStats.bytes += raw.count
+                manifestStats.fetchSeconds += Date().timeIntervalSince(fetchStarted)
+                let parseStarted = Date()
+                let depotCache = depotCache
+                let manifest = try await Task.detached(priority: .userInitiated) {
                     let (manifest, payload) = try Self.parseManifestKeepingPayload(raw, depotID: depotID, manifestGID: manifestGID, key: key)
-                    // Valve's client reads a depot's manifest from steamapps/depotcache
-                    // when it prepares a per-user custom executable. Keep it for such depots.
-                    if let cache, manifest.files.contains(where: { $0.flags & DepotManifest.customExecutableFlag != 0 }) {
-                        try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
-                        let file = cache.appendingPathComponent("\(depotID)_\(manifestGID).manifest")
-                        let existing = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
-                        if existing != payload.count { try? payload.write(to: file, options: .atomic) }
+                    Self.keepForValve(manifest, payload: payload, depotID: depotID, manifestGID: manifestGID, depotCache: depotCache)
+                    if let cacheFolder, let cacheFile {
+                        // One manifest per depot is kept: an older build's list is replaced.
+                        let fm = FileManager.default
+                        try? fm.createDirectory(at: cacheFolder, withIntermediateDirectories: true)
+                        for name in (try? fm.contentsOfDirectory(atPath: cacheFolder.path)) ?? [] where name.hasPrefix("\(depotID)_") {
+                            try? fm.removeItem(at: cacheFolder.appendingPathComponent(name))
+                        }
+                        try? payload.write(to: cacheFile, options: .atomic)
                     }
                     return manifest
                 }.value
+                manifestStats.parseSeconds += Date().timeIntervalSince(parseStarted)
+                return manifest
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -638,6 +707,17 @@ final class DepotDownloader {
             }
         }
         throw lastError
+    }
+
+    /// Valve's client reads a depot's manifest from steamapps/depotcache when
+    /// it prepares a per-user custom executable. Keep it for such depots only.
+    private nonisolated static func keepForValve(_ manifest: DepotManifest, payload: Data, depotID: UInt32,
+                                                 manifestGID: UInt64, depotCache: URL?) {
+        guard let depotCache, manifest.files.contains(where: { $0.flags & DepotManifest.customExecutableFlag != 0 }) else { return }
+        try? FileManager.default.createDirectory(at: depotCache, withIntermediateDirectories: true)
+        let file = depotCache.appendingPathComponent("\(depotID)_\(manifestGID).manifest")
+        let existing = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        if existing != payload.count { try? payload.write(to: file, options: .atomic) }
     }
 
     private nonisolated static func parseManifest(_ raw: Data, depotID: UInt32, manifestGID: UInt64, key: Data) throws -> DepotManifest {
@@ -835,6 +915,19 @@ final class DepotDownloader {
             host.hasSuffix(".steampipe.steamcontent.com") || host.hasSuffix(".steamstatic.com")
     }
 
+    /// The authorization fragments for every host of a depot's pool, asked
+    /// for at once rather than one round trip after another.
+    private func cdnAuthFragments(depotID: UInt32, appID: UInt32, hosts: [String]) async -> [String: String] {
+        await withTaskGroup(of: (String, String).self) { group in
+            for host in hosts {
+                group.addTask { @MainActor in (host, await self.cdnAuthFragment(depotID: depotID, appID: appID, host: host)) }
+            }
+            var auth: [String: String] = [:]
+            for await (host, fragment) in group { auth[host] = fragment }
+            return auth
+        }
+    }
+
     /// Unified-service GetCDNAuthToken → "?auth=…" query fragment for this
     /// depot on this host. An empty token is normal outside regional edge
     /// networks. Cached per depot and host.
@@ -996,8 +1089,7 @@ extension DepotDownloader {
         let key = try await depotKey(depotID: appID, appID: appID)
         let manifest = try await fetchManifest(depotID: appID, appID: appID, manifestGID: manifestGID, key: key, hosts: hosts)
         let pool = Array(hosts.prefix(hostPoolSize))
-        var auth: [String: String] = [:]
-        for host in pool { auth[host] = await cdnAuthFragment(depotID: appID, appID: appID, host: host) }
+        let auth = await cdnAuthFragments(depotID: appID, appID: appID, hosts: pool)
         let plan = DepotPlan(depotID: appID, manifestGID: manifestGID, key: key, manifest: manifest, hosts: pool, auth: auth,
                              declaredSize: manifest.totalUncompressedSize, health: ContentHostHealth(), installURL: folder)
         let prepared = try await Task.detached(priority: .userInitiated) {
