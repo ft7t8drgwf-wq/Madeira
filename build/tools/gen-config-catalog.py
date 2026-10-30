@@ -34,7 +34,7 @@ SKIP = ("/host-tests/", "/ffmpeg/", "ConfigCatalog.generated.swift")
 CFG = re.compile(r'\b(madeira_cfg_(?:get|int|bool)|mad_cfg_(?:int|str)_pe|'
                  r'MadeiraConfig\.(?:get|bool|flag))\(\s*"([A-Za-z0-9._-]+)"\s*(?:,\s*([^,)]+))?')
 ENV = re.compile(r'\b(getenv|GetEnvironmentVariable[AW]?|env::getEnvVar|madeiraSwitch|'
-                 r'madeira_switch_for_caller|mad_env_is_zero|flag|envFlag|ios_srv_switch)\(\s*L?"((?:MADEIRA|DXMT|MYTHIC)_[A-Z0-9_]+)"'
+                 r'madeira_switch_for_caller|mad_env_is_zero|flag|envFlag|ios_srv_switch|value)\(\s*L?"((?:MADEIRA|DXMT|MYTHIC)_[A-Z0-9_]+)"'
                  r'\s*(?:,\s*(?:fallback:|default:)?\s*([^,)]+))?')
 BOOL_READERS = {"madeira_cfg_bool", "MadeiraConfig.bool", "MadeiraConfig.flag", "flag", "envFlag",
                 "madeiraSwitch", "madeira_switch_for_caller", "mad_env_is_zero"}
