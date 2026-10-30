@@ -55,6 +55,11 @@ require('static var cloudQuitEnabled: Bool { cloudEnabled &&' in owned and 'if S
 require(owned.count('Self.cloudEnabled else { throw CancellationError() }') == 3
         and 'guard Self.cloudEnabled, !cloudBusy.contains(appID)' in owned,
         'off: a running transfer stops between files and no choice is applied')
+sync = owned[owned.index('func syncCloud('):owned.index('func resolveCloud(')]
+require('quotaFull = begun.eresult == 25' in owned and 'cloudFull[appID, default: []].formUnion(' in owned
+        and 'state.full = "Steam Cloud is full for this game' in owned and '.full' not in hold
+        and 'upload skipped: cloud full' in sync and '.isSubset(of: refused)' in sync,
+        "a full Steam Cloud (EResult 25) is noted on the game's page, does not hold Play, and the same saves are not sent again")
 turned_on = owned[owned.index('func cloudTurnedOn()'):owned.index('func cloudTurnedOff()')]
 require('cloud.removeAll()' in turned_on and 'cloudAudited = false' in turned_on
         and turned_on.index('cloudBusy.isEmpty') < turned_on.index('cloud.removeAll()'),
