@@ -121,7 +121,9 @@ a few plain lines about what is likely to stop this game on this device, read
 when the page opens. It names a missing program, anti-cheat in the game's files
 (Easy Anti-Cheat, BattlEye, Vanguard, ...), DLLs the program imports that
 neither its folder, Wine's system folders nor Madeira's Wine libraries have,
-.NET Framework without Wine Mono (with a Get Wine Mono button), a Steam minimum
+.NET Framework without Wine Mono (with a Get Wine Mono button), a program
+that shows web pages (imports mshtml or ieframe) before Wine Gecko is downloaded
+(an info line with Get Wine Gecko), a Steam minimum
 memory above the device's (from the public store, kept 30 days), and less than
 2 GB free. A game device-tested on Madeira (`KnownGames` in `LaunchCheck.swift`:
 Counter-Strike 2, The Escapists 2, Terraria, Stardew Valley, Slay the Spire 2, Megabonk, Fallout: New Vegas) gets
@@ -445,6 +447,23 @@ configuration.
 **Settings › JIT** and **Settings › Steam** both show **Run setup again**.
 **Settings › .NET Framework** shows Wine Mono's state, with **Download Wine
 Mono** or **Remove Wine Mono** (hidden in a build that carries it).
+**Settings › Web pages in programs** does the same for **Wine Gecko**
+(`app/Madeira/WineGecko.swift`), the HTML engine Wine's mshtml (Internet
+Explorer's web view) loads for installers and launchers such as EA's installer
+and the FFXIV launcher. Wine's own "Wine Gecko Installer" window downloaded it
+through Wine's networking and hung at 8%. Madeira instead fetches the same two
+MSIs from WineHQ with iOS networking (x86 for 32-bit programs, x86_64 for 64-bit
+ones: clang defines `__x86_64__` for ARM64EC, so Wine's 64-bit side asks for it), by itself on app start when on Wi-Fi (not on
+cellular or in Low Data Mode; without Wi-Fi the next start tries again), checks
+them against the SHA-256s in Wine's `appwiz.cpl`, and keeps them in Application
+Support/WineGecko. Every session links them into the prefix's Wine download
+cache (`$HOME/.cache/wine`, `[wine-gecko]` log lines), so Wine installs Gecko
+from there the first time a program needs it, without the download window.
+After **Remove Wine Gecko** they are not fetched again on its own. Should Wine's
+window still download (Gecko removed), `build/wine-patches/0015` keeps a
+synchronous recv()/send() waiting until its request finishes instead of failing
+with error 997 (`[ws2-sync]` log lines); CI builds it into the 32-bit farm only,
+as the ARM64EC farm is committed.
 Settings › Steam also shows the signed-in account with **Sign out of Steam**
 (or **Sign in to Steam**), the **Steam Cloud saves** switch
 (`docs/STEAM_CLOUD.md`), **Madeira Dock** (Dock's sheet, with the last Dock

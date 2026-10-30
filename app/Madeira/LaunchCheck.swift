@@ -12,6 +12,8 @@
 //  - The program imports a DLL that is in neither its folder, Wine's prefix nor
 //    Madeira's Wine libraries: Windows' loader refuses such a program at once.
 //  - It imports mscoree.dll (.NET Framework) and Wine Mono is not on the device.
+//  - The program imports mshtml/ieframe (web pages) and Wine Gecko is not
+//    downloaded yet: Wine would stop it on its own download window.
 //  - Steam's store lists a minimum memory this device does not have.
 //  - Little free space is left on the device.
 //  - On the good side: the game is on KnownGames, the games device-tested on
@@ -33,11 +35,12 @@ struct LaunchCheckNote: Identifiable, Equatable {
     }
     /// What the note's button does (LaunchCheckView maps it to the page or action).
     enum Fix: Equatable {
-        case steamPage, getWineMono
+        case steamPage, getWineMono, getWineGecko
         var label: String {
             switch self {
             case .steamPage: return "Choose the program"
             case .getWineMono: return "Get Wine Mono"
+            case .getWineGecko: return "Get Wine Gecko"
             }
         }
     }
@@ -74,6 +77,7 @@ enum LaunchCheck {
         /// -noeac, GTA V's -nobattleye).
         var antiCheatSkipped = false
         var monoAvailable = true
+        var geckoAvailable = true
         var deviceName = "iPhone"
         var physicalMemory: UInt64 = 0
         /// Steam's minimum memory for the game, in bytes (minimumMemory(html:)).
@@ -116,6 +120,11 @@ enum LaunchCheck {
             notes.append(LaunchCheckNote(id: "mono", level: .problem, title: "Needs .NET Framework",
                                          detail: "This game is a .NET program. Madeira runs those with Wine Mono, which is not on this device yet (about 80 MB).",
                                          fix: .getWineMono))
+        }
+        if !input.geckoAvailable, input.imports.contains(where: { $0 == "mshtml.dll" || $0 == "ieframe.dll" }) {
+            notes.append(LaunchCheckNote(id: "gecko", level: .info, title: "Shows web pages",
+                                         detail: "This program draws pages with Internet Explorer's engine, which Wine Gecko provides. Madeira gets it on Wi-Fi by itself; get it now so Wine doesn't stop the program to download it.",
+                                         fix: .getWineGecko))
         }
         // Compared with the memory as sold (an 8 GB phone reports a little under 8 GB).
         if let needed = input.steamMinimumMemory, input.physicalMemory > 0,

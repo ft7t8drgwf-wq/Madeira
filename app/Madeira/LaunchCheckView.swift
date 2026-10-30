@@ -15,6 +15,7 @@ struct LaunchCheckSection: View {
     let notes: [LaunchCheckNote]
     var fix: (LaunchCheckNote.Fix) -> Void
     @ObservedObject private var mono = WineMonoModel.shared
+    @ObservedObject private var gecko = WineGeckoModel.shared
 
     var body: some View {
         Section {
@@ -33,7 +34,7 @@ struct LaunchCheckSection: View {
                         Text(note.title).fontWeight(.semibold)
                         Text(note.detail).font(.caption).foregroundStyle(.secondary)
                         if let action = note.fix {
-                            if action == .getWineMono, mono.busy {
+                            if (action == .getWineMono && mono.busy) || (action == .getWineGecko && gecko.busy) {
                                 ProgressView().controlSize(.small)
                             } else {
                                 Button(action.label) { fix(action) }
@@ -85,6 +86,7 @@ extension LaunchCheck {
         let drive = LibraryEntry.hostDrive
         var input = Input()
         input.monoAvailable = WineMonoModel.available
+        input.geckoAvailable = WineGeckoModel.available
         input.deviceName = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
         input.physicalMemory = ProcessInfo.processInfo.physicalMemory
         input.tested = KnownGames.find(windowsPath: entry.windowsPath, steamAppID: entry.steamAppID)

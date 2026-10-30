@@ -3173,6 +3173,7 @@ struct LibraryView: View {
                 EASettingsSection(open: { settingsSheet = $0 })
             }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
+            if settingsShow("Gecko", "Wine Gecko", "web", "HTML", "Internet Explorer", "download") { WineGeckoSettingsSection() }
             if settingsShow("registry", "regedit", "user.reg", "system.reg", "keys") {
                 Section {
                     Button { settingsSheet = .registry } label: {
@@ -3695,6 +3696,7 @@ struct LibraryDetail: View {
         switch fix {
         case .steamPage: path.append(.steam)
         case .getWineMono: WineMonoModel.shared.install()
+        case .getWineGecko: WineGeckoModel.shared.install()
         }
     }
     /// A Steam game without a chosen cover shows Steam's store artwork.
@@ -4172,11 +4174,12 @@ struct LibraryDetail: View {
             .toolbarBackground(.regularMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.save(entry); dismiss() } } }
-            // "Will it run?": read again when the program or arguments change, or Wine Mono arrives.
+            // "Will it run?": read again when the program or arguments change, or Wine Mono or Gecko arrives.
             .task(id: "\(entry.launchRelativePath)#\(entry.steamStart ?? "")#\(entry.arguments)#\(launchCheckRound)") {
                 launchNotes = await LaunchCheck.run(entry)
             }
             .onReceive(WineMonoModel.shared.$installed.dropFirst()) { _ in launchCheckRound += 1 }
+            .onReceive(WineGeckoModel.shared.$installed.dropFirst()) { _ in launchCheckRound += 1 }
             .confirmationDialog("This game probably won't start", isPresented: $confirmPlayAnyway, titleVisibility: .visible) {
                 Button("Play anyway") { if let launchNotes { LaunchCheck.acknowledge(entry, launchNotes) }; start() }
                 Button("Cancel", role: .cancel) {}

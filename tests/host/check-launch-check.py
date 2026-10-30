@@ -36,6 +36,8 @@ start = library[library.index('    private func start() {'):]
 start = start[:start.index('\n    }\n') + 6]
 check(start.index('LaunchCheck.acknowledged') < start.index('LaunchCurtain.shared.begin'),
       'Play asks "Play anyway?" before the launch starts')
+check('case .getWineGecko: WineGeckoModel.shared.install()' in library
+      and 'input.geckoAvailable = WineGeckoModel.available' in view, 'Get Wine Gecko is wired')
 check('!confirmPlayAnyway' in library, 'the controller\'s accept does not launch past the question')
 check('Button("Play anyway")' in library and 'LaunchCheck.acknowledge(entry' in library, 'Play anyway remembers the answer')
 check('LogStore.shared.log(logLine(' in view, 'the result is logged as [will-it-run]')
@@ -111,6 +113,11 @@ input = base; input.imports = ["mscoree.dll", "foo.dll"]; input.available = ["ms
 let mono = LaunchCheck.notes(input)
 expect(Set(mono.map(\.id)) == ["missing-dll", "mono"] && mono.first { $0.id == "mono" }?.fix == .getWineMono, ".NET without Wine Mono offers Get Wine Mono")
 expect(mono.first { $0.id == "missing-dll" }?.title == "Missing foo.dll", "one missing DLL is named in the title")
+input = base; input.imports = ["mshtml.dll"]; input.available = ["mshtml.dll", "kernel32.dll"]; input.geckoAvailable = false; input.bits = 32
+let gecko = LaunchCheck.notes(input)
+expect(gecko.map(\.id) == ["gecko"] && gecko[0].level == .info && gecko[0].fix == .getWineGecko, "a web-page program without Wine Gecko offers Get Wine Gecko")
+input.geckoAvailable = true
+expect(ids(input).isEmpty, "no Gecko line once it is downloaded")
 
 input = base; input.freeBytes = Int64(gb)
 expect(LaunchCheck.notes(input).first?.level == .caution, "1 GB free is a caution")
