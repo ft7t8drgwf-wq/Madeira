@@ -26594,6 +26594,48 @@ void virtual_init_user_shared_data(void)
     }
 
     init_shared_data_cpuinfo( data );
+
+    /* madeira-bcd: what wineboot.exe's create_user_shared_data() writes. The iOS
+     * prefix is pre-seeded and wineboot.exe never runs (run_wineboot), so these
+     * stayed zero for every guest: NtMajorVersion 0, NtBuildNumber 0, no
+     * NtSystemRoot. GetVersionEx reads the PEB and never noticed, but code that
+     * reads the page directly does: a protected game (The Adventures of Elliot)
+     * read NtMajorVersion ~10,000 times in four seconds ([kuser-read]) and then
+     * faulted on a pointer it had computed. The values are the ones the PEB
+     * carries (init_peb: Windows 10, build 19045), with the product type and
+     * suite mask of Wine's WIN10 entry (dlls/ntdll/version.c). */
+    {
+        static const WCHAR rootW[] = {'C',':','\\','w','i','n','d','o','w','s',0};
+        data->NtBuildNumber      = 19045;
+        data->NtProductType      = NtProductWinNt;   /* VER_NT_WORKSTATION */
+        data->ProductTypeIsValid = TRUE;
+        data->NtMajorVersion     = 10;
+        data->NtMinorVersion     = 0;
+        data->SuiteMask          = VER_SUITE_SINGLEUSERTS;
+        memcpy( data->NtSystemRoot, rootW, sizeof(rootW) );
+    }
+
+    /* madeira-bcd: the same game also read Cookie and BootId ~4,000 times each,
+     * and both were zero. On Windows Cookie is a random per-boot value and BootId
+     * counts boots, so neither is ever zero; give them values of that shape.
+     * MADEIRA_KUSER_NATIVE_ARCH=9 also reports an AMD64 host instead of ARM64
+     * (diagnostic, off by default: protected code may take a Windows-on-ARM path
+     * when it sees 12). Nothing in Wine's PE side reads this field. */
+    {
+        const char *arch = getenv( "MADEIRA_KUSER_NATIVE_ARCH" );
+        /* This runs again for every process started without a parent, on the
+         * same shared page, so keep the first value: Windows keeps one Cookie
+         * per boot, and a process that cached it must not see it change. */
+        if (!data->Cookie) data->Cookie = arc4random() | 1;
+        data->BootId = 7;
+        if (arch && *arch)
+        {
+            data->NativeProcessorArchitecture = (USHORT)atoi( arch );
+            ERR( "[kuser] NativeProcessorArchitecture=%u (MADEIRA_KUSER_NATIVE_ARCH)\n",
+                 data->NativeProcessorArchitecture );
+        }
+    }
+
 #ifdef WINE_IOS
     {
         /* ml1310: with MADEIRA_FEX_AVX=1 FEX runs AVX/AVX2 and its CPUID says so, but
