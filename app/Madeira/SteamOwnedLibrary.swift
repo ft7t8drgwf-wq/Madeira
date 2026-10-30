@@ -1013,8 +1013,8 @@ final class SteamOwnedLibrary: ObservableObject {
                 // not held for it, and the same saves are not sent again this run.
                 cloudFull[appID, default: []].formUnion(wanted.map(Self.cloudFullKey))
                 let left = wanted.count - done
-                state.full = "Steam Cloud is full for this game, so \(left == 1 ? "1 save" : "\(left) saves") made on this device \(left == 1 ? "stays" : "stay") here only. "
-                    + "Delete old saves in the game to make room; they upload at the next sync. Your saves on this device are fine."
+                state.full = "Steam's cloud for this game is full. Delete some old saves in the game to make room. "
+                    + "Until then, \(left == 1 ? "1 save" : "\(left) saves") from this device \(left == 1 ? "stays" : "stay") here only; they upload at the next sync."
             } else {
                 state.problem = "Steam Cloud upload stopped: \(SteamSignIn.message(error)) This device's saves were not changed."
             }
@@ -1498,7 +1498,7 @@ final class SteamOwnedLibrary: ObservableObject {
     /// What a Steam Cloud refusal means, for the game page.
     static func cloudRefusal(_ eresult: Int32) -> String {
         switch eresult {
-        case 25: return "Steam Cloud is full for this game (code 25). Delete old saves in the game, then sync again."
+        case 25: return "Steam's cloud for this game is full. Delete some old saves in the game, then sync again."
         case 15: return "Steam Cloud refused this save (code 15: access denied)."
         case 8: return "Steam Cloud did not accept this save's name (code 8)."
         default: return "Steam Cloud refused this save (code \(eresult))."
