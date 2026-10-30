@@ -1146,8 +1146,9 @@ int read_process_memory( struct process *process, client_ptr_t ptr, data_size_t 
  * Allowed only when gmod.exe, a 32-bit process, writes into a 32-bit child of
  * its own in this Unix process.  wow64_NtWriteVirtualMemory has already moved
  * the address into the child's window (target-window rule), so `ptr` is a host
- * address.  The write is one mach_vm_write on our own task and never takes the
- * task_suspend() fallback below: suspending our own task would stop this
+ * address.  The write is one mach_vm_write on our own task, or a store through
+ * the JIT pool's RW alias for RWX memory, and never takes the task_suspend()
+ * fallback below: suspending our own task would stop this
  * server.  madeira.cfg `no-child-write = 1` turns it off. */
 static int ios_is_gmod_image( const struct process *process )
 {
@@ -1184,12 +1185,15 @@ static int ios_child_write_allowed( const struct process *process )
     return !off;
 }
 
+extern int ios_child_write_store( void *dst, const void *src, size_t n ) __attribute__((weak));
+
 static int ios_local_child_write( struct process *process, client_ptr_t ptr, data_size_t size,
                                   const char *src, data_size_t *written )
 {
     static unsigned int n_log;
     mach_vm_offset_t data;
     kern_return_t ret;
+    const char *via = NULL;
 
     if ((mach_vm_address_t)ptr != ptr)
     {
@@ -1205,9 +1209,16 @@ static int ios_local_child_write( struct process *process, client_ptr_t ptr, dat
     memcpy( (void *)data, src, size );
     ret = mach_vm_write( mach_task_self(), (mach_vm_address_t)ptr, data, (mach_msg_type_number_t)size );
     free( (void *)data );
+    /* An anonymous PAGE_EXECUTE_READWRITE block is the JIT pool's RX view at its
+     * guest address: store through its RW alias (ntdll, virtual_ios.c). */
+    if (ret != KERN_SUCCESS && ios_child_write_store &&
+        ios_child_write_store( (void *)(uintptr_t)ptr, src, size ))
+        via = "alias";
     if (n_log++ < 64)
-        fprintf( stderr, "[child-write] #%u pid=%04x -> pid=%04x addr=%p size=0x%x ret=%d\n",
-                 n_log, current->process->id, process->id, (void *)(uintptr_t)ptr, size, ret );
+        fprintf( stderr, "[child-write] #%u pid=%04x -> pid=%04x addr=%p size=0x%x ret=%d%s%s\n",
+                 n_log, current->process->id, process->id, (void *)(uintptr_t)ptr, size, ret,
+                 via ? " stored via " : "", via ? via : "" );
+    if (via) ret = KERN_SUCCESS;
     if (ret != KERN_SUCCESS)
     {
         mach_set_error( ret );
