@@ -1095,6 +1095,7 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(app.sharedOwners[9100]?.installDir == "Fixture Game", "the owner of the shared depot is known for the record")
     let downloader = DepotDownloader(session: session)
     downloader.contentHosts = { _ in hosts }
+    downloader.manifestCacheFolder = tmp.appendingPathComponent("manifest-cache")
     var lastProgress = SteamDownloadProgress()
     let licensed: Set<UInt32> = phase == "refused-licensed" ? [9001, 9003, 9004] : [9001, 9003]
     do {
@@ -1111,7 +1112,15 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         require(lastProgress.phase == .finishing && lastProgress.doneBytes == lastProgress.totalBytes && lastProgress.totalBytes > 0, "progress ends complete: \(lastProgress.doneBytes)/\(lastProgress.totalBytes)")
         // Keys are asked for with the app being installed; manifest codes and tokens with the app that owns the content.
         require(session.keyRequests.contains { $0.depot == 9001 && $0.app == 9000 } && session.keyRequests.contains { $0.depot == 9003 && $0.app == 9000 }, "depot keys are requested for the installed app")
-        require(session.codeRequests.contains { $0.depot == 9003 && $0.app == 9100 } && session.codeRequests.contains { $0.depot == 9001 && $0.app == 9000 }, "manifest codes are requested for the app that owns the depot")
+        // A manifest fetched by an earlier phase comes from the cache, with no code request.
+        let prepared = loggedEvents.first { $0.contains("[steam-depot] prepared app=9000 ") } ?? ""
+        require(prepared.contains("manifests-ms=") && prepared.contains("files-ms=") && prepared.contains("files="), "the wait before the download is timed in the log")
+        let fetchedShared = session.codeRequests.contains { $0.depot == 9003 }, fetchedMain = session.codeRequests.contains { $0.depot == 9001 }
+        require((!fetchedShared || session.codeRequests.contains { $0.depot == 9003 && $0.app == 9100 }) && (!fetchedMain || session.codeRequests.contains { $0.depot == 9001 && $0.app == 9000 }),
+                "manifest codes are requested for the app that owns the depot")
+        require(prepared.contains("manifest-cached=\((fetchedShared ? 0 : 1) + (fetchedMain ? 0 : 1))/2"), "every manifest not asked for came from the cache: \(prepared)")
+        if phase == "resume" { require(session.codeRequests.isEmpty, "a resumed install reads both file lists from the cache the interrupted one left") }
+        if phase == "update" { require(fetchedMain && !fetchedShared, "an update fetches only the new build's file list; the unchanged depot's comes from the cache") }
         require(session.authRequests.contains { $0.depot == 9003 && $0.app == 9100 && $0.host == "127.0.0.1" }, "content authorization names the bare host name")
         require(!session.keyRequests.contains { $0.depot == 9002 }, "a depot for another language is never asked for")
         guard let game = found.first(where: { $0.id == 9000 }) else { require(false, "Madeira Dock's discovery finds the downloaded game"); return }
