@@ -126,6 +126,8 @@ expect(KnownGames.find(windowsPath: #"C:\x\steamapps\common\The Escapists 2"#, s
 expect(KnownGames.find(windowsPath: #"C:\Games\Megabonk\Megabonk.exe"#, steamAppID: nil)?.id == "megabonk", "Megabonk by program")
 expect(KnownGames.find(windowsPath: #"C:\x\steamapps\common\Stardew Valley\Stardew Valley.exe"#, steamAppID: nil)?.id == "stardew-valley"
        && KnownGames.find(windowsPath: "", steamAppID: 413150)?.tests.first?.build == 48, "Stardew Valley by program and App ID, build 48")
+expect(KnownGames.find(windowsPath: #"C:\x\steamapps\common\Slay the Spire 2\SlayTheSpire2.exe"#, steamAppID: nil)?.id == "slay-the-spire-2"
+       && KnownGames.find(windowsPath: "", steamAppID: 2868840)?.tests.first?.build == 48, "Slay the Spire 2 by program and App ID, build 48")
 expect(KnownGames.find(windowsPath: #"C:\Games\Foo\foo.exe"#, steamAppID: 620) == nil, "other games are not known")
 expect(Set(KnownGames.all.map(\.id)).count == KnownGames.all.count, "known game ids are unique")
 input = base; input.tested = KnownGames.all[0]
