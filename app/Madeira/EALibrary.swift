@@ -69,7 +69,7 @@ struct EAInstalledGame: Codable, Sendable {
     private var resumeAfterBackground = Set<String>()
     private var started = false
     private var timer: Timer?
-    private var grace: UIBackgroundTaskIdentifier = .invalid
+    private var grace: BackgroundRun.Token?   // BackgroundRun.swift
     private let api = EAAPI.shared
     private let downloader = EADownloader()
     /// The game whose launch Madeira prepared (its environment and service), until the session ends.
@@ -559,8 +559,8 @@ struct EAInstalledGame: Codable, Sendable {
     }
 
     private func beginGrace() {
-        guard hasActiveDownload, grace == .invalid else { return }
-        grace = UIApplication.shared.beginBackgroundTask(withName: "EA download") { [weak self] in
+        guard hasActiveDownload, grace == nil else { return }
+        grace = BackgroundRun.shared.beginTask("EA download") { [weak self] in
             MainActor.assumeIsolated {
                 self?.pauseForBackground()
                 self?.endGrace()
@@ -569,9 +569,9 @@ struct EAInstalledGame: Codable, Sendable {
     }
 
     private func endGrace() {
-        guard grace != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(grace)
-        grace = .invalid
+        guard let task = grace else { return }
+        grace = nil
+        BackgroundRun.shared.endTask(task)
     }
 
     private func pauseForBackground() {
