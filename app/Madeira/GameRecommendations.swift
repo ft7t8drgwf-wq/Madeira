@@ -622,12 +622,19 @@ enum GameRecommendations {
     /// (iPhone, build 31: Java then starts and reaches LWJGL). The game draws with
     /// OpenGL only. Tested through Madeira Dock with the standard list's lines, so
     /// without madeira-bcd's defaults (see the standard list). No switches.
+    /// Version 2 (iPhone, build 50: in a world and playable): Java patches its
+    /// code cache all the time, and with a global WINEDEBUG that turns
+    /// err:virtual back on (that device had err+all,fixme+all,+seh) every
+    /// write-protect change logged three lines: 371 MB, 3.6 million lines while
+    /// loading, with heavy stutters. The list keeps Madeira's default of no
+    /// err:virtual whatever the global settings say, like God of War's.
     static let projectZomboid = GameRecommendation(
-        id: "project-zomboid", title: "Project Zomboid", version: 1,
+        id: "project-zomboid", title: "Project Zomboid", version: 2,
         config: """
         # Madeira's recommended settings for Project Zomboid.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env._JAVA_OPTIONS = -XX:-UseZGC -XX:+UseG1GC
+        env.WINEDEBUG = err+all,err-virtual,fixme-all
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
