@@ -212,7 +212,20 @@ final class LauncherSupportModel: ObservableObject {
         catch { self.error = "The download folder could not be made: \(error.localizedDescription)"; return }
         downloading = id; error = nil; status = "Downloading the \(id.title) installer…"
         LogStore.shared.log("[launcher] download \(id.rawValue) from \(id.installerURL.host ?? "?")")
-        URLSession.shared.downloadTask(with: id.installerURL) { temporary, response, failure in
+        fetch(id, into: folder, resumeData: nil, attempt: 1)
+    }
+
+    /// Tries a dropped connection again, from where it stopped when the server allows
+    /// (build 48: Ubisoft's CDN dropped the connection 41 s in on a phone).
+    nonisolated static let attempts = 4
+    nonisolated static func retryable(_ error: Error?) -> Bool {
+        guard let code = (error as? URLError)?.code else { return false }
+        return [.networkConnectionLost, .timedOut, .notConnectedToInternet, .cannotConnectToHost,
+                .dnsLookupFailed, .secureConnectionFailed].contains(code)
+    }
+
+    private func fetch(_ id: LauncherID, into folder: URL, resumeData: Data?, attempt: Int) {
+        let handler: @Sendable (URL?, URLResponse?, Error?) -> Void = { temporary, response, failure in
             // The file is gone once this returns: move it before going to the main actor.
             var moved: URL?
             var problem = failure?.localizedDescription
@@ -227,8 +240,24 @@ final class LauncherSupportModel: ObservableObject {
                     moved = target
                 } catch { problem = error.localizedDescription }
             }
-            Task { @MainActor in self.downloaded(id, moved, problem ?? (moved == nil ? "no file arrived" : nil)) }
-        }.resume()
+            let again = moved == nil && attempt < Self.attempts && Self.retryable(failure)
+            let resume = (failure as? URLError)?.downloadTaskResumeData
+            let code = (failure as? URLError)?.code.rawValue ?? 0
+            Task { @MainActor in
+                if again {
+                    LogStore.shared.log("[launcher] download \(id.rawValue) attempt \(attempt) dropped (url-\(code)); "
+                                        + "again in \(2 * attempt) s, resume=\(resume == nil ? 0 : 1)")
+                    self.status = "The connection dropped. Trying again (\(attempt + 1) of \(Self.attempts))…"
+                    try? await Task.sleep(nanoseconds: UInt64(2 * attempt) * 1_000_000_000)
+                    self.fetch(id, into: folder, resumeData: resume, attempt: attempt + 1)
+                } else {
+                    self.downloaded(id, moved, problem ?? (moved == nil ? "no file arrived" : nil))
+                }
+            }
+        }
+        let task = resumeData.map { URLSession.shared.downloadTask(withResumeData: $0, completionHandler: handler) }
+            ?? URLSession.shared.downloadTask(with: id.installerURL, completionHandler: handler)
+        task.resume()
     }
 
     private func downloaded(_ id: LauncherID, _ file: URL?, _ problem: String?) {
