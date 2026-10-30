@@ -423,7 +423,6 @@ struct ExternalGamesSheet: View {
 /// Settings › External drives.
 struct ExternalDrivesSection: View {
     @ObservedObject private var drives = ExternalDrives.shared
-    @State private var picking = false
     @State private var error: String?
     @State private var scanning: ExternalFolder?
     @State private var removing: ExternalFolder?
@@ -442,7 +441,7 @@ struct ExternalDrivesSection: View {
                     Button("Find games on \(folder.name)") { scanning = folder }
                 }
             }
-            Button("Add drive or folder") { FolderPickerSigning.willPick(); picking = true }
+            Button("Add drive or folder") { ExternalFolderPicker.shared.present(added) }
             if !drives.folders.isEmpty {
                 Picker("Install Steam games on", selection: Binding(
                     get: { drives.folders.first { $0.steamInstalls == true }?.id },
@@ -455,17 +454,6 @@ struct ExternalDrivesSection: View {
         } header: { Text("External drives") } footer: {
             Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.")
         }
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
-            FolderPickerSigning.didPick(answered: true)
-            do {
-                try drives.add(try result.get()); error = nil
-                SteamGamesModel.shared.refresh()
-                // Offer the games already on it.
-                scanning = drives.folders.last
-            } catch { self.error = error.localizedDescription }
-        }
-        // Next turn of the main loop, after the answer if there was one.
-        .onChange(of: picking) { _, open in if !open { DispatchQueue.main.async { FolderPickerSigning.didPick(answered: false) } } }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
             Button("Remove", role: .destructive) { drives.remove(folder.id) }
@@ -476,62 +464,263 @@ struct ExternalDrivesSection: View {
             if let root = drives.mounted[folder.id] { ExternalGamesSheet(folder: folder, root: root.resolvingSymlinksInPath()) }
         }
     }
+
+    private func added(_ url: URL) {
+        do {
+            try drives.add(url); error = nil
+            SteamGamesModel.shared.refresh()
+            // Offer the games already on it.
+            scanning = drives.folders.last
+        } catch { self.error = error.localizedDescription }
+    }
+}
+
+/// Settings › External drives' folder picker. Madeira presents it itself, not
+/// through SwiftUI's fileImporter, so FolderPickerSigning can fix the picker up
+/// before it is shown and the log can tell Cancel apart from a pick.
+@MainActor final class ExternalFolderPicker: NSObject, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate {
+    static let shared = ExternalFolderPicker()
+    private var done: (@MainActor (URL) -> Void)?
+
+    func present(_ done: @escaping @MainActor (URL) -> Void) {
+        guard var top = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else {
+            LogStore.shared.log("[external] folder picker: no window to show it from")
+            return
+        }
+        while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
+        // Before the picker exists: iOS fills in its configuration when it is created.
+        FolderPickerSigning.willPick()
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+        picker.allowsMultipleSelection = false
+        picker.delegate = self
+        FolderPickerSigning.prepare(picker)
+        self.done = done
+        top.present(picker, animated: true) {
+            picker.presentationController?.delegate = self
+            FolderPickerSigning.report(picker, stage: "shown")
+        }
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        FolderPickerSigning.didPick(.picked)
+        if let url = urls.first { done?(url) }
+        done = nil
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        FolderPickerSigning.didPick(.cancelled)
+        done = nil
+    }
+
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        FolderPickerSigning.didPick(.swipedAway)
+        done = nil
+    }
 }
 
 /// The folder picker's Open button does nothing when this copy is signed with a
 /// profile whose App ID differs from its bundle ID (KravaSigner and other signers
-/// that keep the bundle ID do this). The picker tells fileproviderd which app gets
-/// the folder by DOCConfiguration's hostIdentifier, which it fills in with the
-/// bundle ID; fileproviderd only grants the folder to the App ID the process is
-/// really signed with, so the grant fails and the pick is dropped without calling
-/// back (Cancel still works). While Madeira's own folder picker is open, the picker
-/// is given the signed App ID instead. Nothing changes on a copy whose bundle ID
-/// already is its App ID, and `external-picker-fix = 0` in madeira.cfg turns it off.
-/// The folder is still opened in place, never copied.
+/// that keep the bundle ID do this): iOS drops the pick without calling back, and
+/// only Cancel works. The picker names the app that gets the folder in its
+/// DOCConfiguration (hostIdentifier), filled in from the bundle ID, and the folder
+/// is only granted to the App ID the process is really signed with.
+///
+/// Build 47 swapped the value through hostIdentifier's setter and getter only, and
+/// Open still did nothing on iOS 27.2. So while Madeira's own folder picker is open
+/// this now also rewrites every field of the picker and its configuration that
+/// holds the bundle ID, again just before the configuration is encoded for the
+/// picker's process, and logs what each field holds and which hooks ran, so one
+/// device log shows how far the change got. Nothing changes on a copy whose bundle
+/// ID already is its App ID, and the folder is still opened in place, never copied.
+///
+/// madeira.cfg `external-picker-fix`: unset or 1 = all of the above; hooks = only
+/// build 47's setter/getter swap; ignore = all of the above plus the picker's own
+/// "ignore the application entitlement" flag; 0 = off.
 enum FolderPickerSigning {
+    enum Outcome: String { case picked, cancelled, swipedAway = "swiped away" }
+
     /// The signed App ID when it differs from the bundle ID, else nil.
     static let signedAppID: String? = {
         guard let signed = signedAppIdentifier() ?? SigningProfile.embedded?.appIdentifier,
               signed != Bundle.main.bundleIdentifier else { return nil }
         return signed
     }()
+    private static let bundleID = Bundle.main.bundleIdentifier ?? ""
+    /// One object for every write, so the fields that take it keep it alive.
+    private static let signedObject: NSString? = signedAppID.map { $0 as NSString }
 
     private static let lock = NSLock()
     private static var open = false
-    private static var answered = false
+    private static var mode = "all"
     private static var installed = false
+    /// Hook calls while the picker is open: how many ran, how many swapped a value.
+    private static var calls: [String: (ran: Int, swapped: Int)] = [:]
 
-    /// Right before the picker is shown, so it is in effect when iOS builds it.
+    // MARK: session
+
+    /// Right before the picker is created, so the hooks are in effect when iOS fills it in.
     static func willPick() {
         // Default on. 0: the folder picker is left as iOS builds it, so on a copy signed with a different App ID
-        // its Open button does nothing again. Only matters on such a copy; read each time the picker opens.
-        guard let signedAppID, MadeiraConfig.bool("external-picker-fix", default: true) else { return }
-        lock.lock(); defer { lock.unlock() }
+        // its Open button does nothing again; hooks: only build 47's swap; ignore: also the picker's ignore flag.
+        let setting = (MadeiraConfig.get("external-picker-fix") ?? "1").lowercased()
+        let chosen = ["0", "off", "no", "false"].contains(setting) ? "off"
+            : setting == "hooks" ? "hooks" : setting == "ignore" ? "ignore" : "all"
+        guard let signedAppID else {
+            LogStore.shared.log("[external] folder picker: App ID matches the bundle ID, nothing to fix")
+            return
+        }
+        guard chosen != "off" else {
+            LogStore.shared.log("[external] folder picker: fix off in madeira.cfg")
+            return
+        }
+        lock.lock()
         if !installed { installed = install(signedAppID) }
-        open = true; answered = false
-        LogStore.shared.log("[external] folder picker opened with the signed App ID (it differs from the bundle ID)")
+        open = true; mode = chosen; calls = [:]
+        lock.unlock()
+        LogStore.shared.log("[external] folder picker opened with the signed App ID mode=\(chosen)"
+            + " bundle-id-len=\(bundleID.count) app-id-len=\(signedAppID.count)")
     }
 
-    /// When the picker answers, and again when it closes.
-    static func didPick(answered now: Bool) {
-        lock.lock(); defer { lock.unlock() }
-        guard open else { return }
-        if now { answered = true; return }
+    /// The picker answered or went away.
+    static func didPick(_ outcome: Outcome) {
+        lock.lock()
+        guard open else { lock.unlock(); return }
         open = false
-        if !answered { LogStore.shared.log("[external] folder picker closed without a folder") }
+        let counts = calls.keys.sorted().map { "\($0)=\(calls[$0]!.ran)/\(calls[$0]!.swapped)" }.joined(separator: " ")
+        lock.unlock()
+        LogStore.shared.log("[external] folder picker \(outcome.rawValue); hook calls ran/swapped: \(counts.isEmpty ? "none" : counts)")
     }
+
+    private static var active: (on: Bool, mode: String) {
+        lock.lock(); defer { lock.unlock() }
+        return (open, mode)
+    }
+
+    private static func count(_ hook: String, swapped: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        var entry = calls[hook] ?? (0, 0)
+        entry.ran += 1
+        if swapped { entry.swapped += 1 }
+        calls[hook] = entry
+    }
+
+    // MARK: fixing up the picker
+
+    /// Just after the picker is created and before it is shown.
+    static func prepare(_ picker: NSObject) {
+        let (on, mode) = active
+        guard on else { return }
+        report(picker, stage: "created")
+        guard mode != "hooks" else { return }
+        var rewritten = rewrite(picker)
+        for config in configurations(of: picker) { rewritten += rewrite(config) }
+        if mode == "ignore" { setFlag(picker, name: "_ignoreApplicationEntitlementForImport") }
+        LogStore.shared.log("[external] folder picker fields rewritten: \(rewritten.isEmpty ? "none" : rewritten.joined(separator: ","))")
+        report(picker, stage: "prepared")
+    }
+
+    /// Logs what the identity fields of the picker and its configuration hold.
+    static func report(_ picker: NSObject, stage: String) {
+        guard active.on || stage == "shown" else { return }
+        var parts = ["picker{\(describe(picker))}"]
+        for config in configurations(of: picker) { parts.append("\(type(of: config)){\(describe(config))}") }
+        LogStore.shared.log("[external] folder picker \(stage): " + parts.joined(separator: " "))
+    }
+
+    /// The DOCConfiguration objects the picker holds.
+    private static func configurations(of picker: NSObject) -> [NSObject] {
+        guard let cls = NSClassFromString("DOCConfiguration") else { return [] }
+        var found: [NSObject] = []
+        for (_, ivar, _) in ivars(of: picker) where isObject(ivar) {
+            if let value = object_getIvar(picker, ivar) as? NSObject, value.isKind(of: cls),
+               !found.contains(where: { $0 === value }) { found.append(value) }
+        }
+        return found
+    }
+
+    /// Every object field of `object` that holds the bundle ID gets the signed App
+    /// ID instead. Returns the fields' names.
+    private static func rewrite(_ object: NSObject) -> [String] {
+        guard let signedObject else { return [] }
+        var names: [String] = []
+        for (name, ivar, _) in ivars(of: object) where isObject(ivar) {
+            guard let value = object_getIvar(object, ivar) as? NSString, value as String == bundleID else { continue }
+            object_setIvarWithStrongDefault(object, ivar, signedObject)
+            names.append(name)
+        }
+        return names
+    }
+
+    /// Sets a BOOL field to YES when the object has one by that name.
+    private static func setFlag(_ object: NSObject, name: String) {
+        guard let field = ivars(of: object).first(where: { $0.name == name }), field.kind == "B" || field.kind == "c" else {
+            LogStore.shared.log("[external] folder picker: no \(name) field")
+            return
+        }
+        Unmanaged.passUnretained(object).toOpaque().advanced(by: ivar_getOffset(field.ivar)).storeBytes(of: 1, as: UInt8.self)
+        LogStore.shared.log("[external] folder picker: \(name) set")
+    }
+
+    /// The fields that look like an app's identity, with what they hold: the
+    /// bundle ID, the signed App ID, nothing, or the value itself.
+    private static func describe(_ object: NSObject) -> String {
+        let words = ["identifier", "host", "bundle", "entitlement", "client", "source"]
+        var parts: [String] = []
+        for (name, ivar, kind) in ivars(of: object) where words.contains(where: { name.lowercased().contains($0) }) {
+            if isObject(ivar) {
+                let value = object_getIvar(object, ivar)
+                if value == nil { parts.append("\(name)=nil"); continue }
+                guard let text = value as? NSString else { parts.append("\(name)=<\(type(of: value!))>"); continue }
+                let string = text as String
+                parts.append("\(name)=" + (string == bundleID ? "bundle-id" : string == signedAppID ? "app-id" : "\"\(string)\""))
+            } else if kind == "B" || kind == "c" {
+                let field = Unmanaged.passUnretained(object).toOpaque().advanced(by: ivar_getOffset(ivar))
+                parts.append("\(name)=\(field.load(as: UInt8.self))")
+            }
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// All instance variables of the object's class and its superclasses below NSObject.
+    private static func ivars(of object: NSObject) -> [(name: String, ivar: Ivar, kind: String)] {
+        var result: [(name: String, ivar: Ivar, kind: String)] = []
+        var cls: AnyClass? = object_getClass(object)
+        while let current = cls, ObjectIdentifier(current) != ObjectIdentifier(NSObject.self) {
+            var count: UInt32 = 0
+            if let list = class_copyIvarList(current, &count) {
+                for i in 0..<Int(count) {
+                    let ivar = list[i]
+                    guard let name = ivar_getName(ivar) else { continue }
+                    let type = ivar_getTypeEncoding(ivar).map { String(cString: $0) } ?? ""
+                    result.append((String(cString: name), ivar, type))
+                }
+                free(list)
+            }
+            cls = class_getSuperclass(current)
+        }
+        return result
+    }
+
+    private static func isObject(_ ivar: Ivar) -> Bool {
+        ivar_getTypeEncoding(ivar).map { $0.pointee == CChar(UInt8(ascii: "@")) } ?? false
+    }
+
+    // MARK: hooks
 
     /// The signed App ID in place of the bundle ID while the picker is open; any
     /// other value, and every value at other times, is kept.
-    private static func host(_ value: NSString?, signed: String) -> NSString? {
-        lock.lock(); defer { lock.unlock() }
-        guard open, let value, value as String == Bundle.main.bundleIdentifier else { return value }
-        return signed as NSString
+    private static func host(_ value: NSString?, hook: String) -> NSString? {
+        guard active.on else { return value }
+        let swap = value.map { $0 as String == bundleID } ?? false
+        count(hook, swapped: swap)
+        return swap ? signedObject : value
     }
 
-    /// Hooks DOCConfiguration's hostIdentifier setter and getter. Only methods the
-    /// class defines itself are replaced, so nothing it inherits changes. False when
-    /// the class is not loaded yet, to try again at the next pick.
+    /// Hooks DOCConfiguration's hostIdentifier setter and getter and its
+    /// encodeWithCoder:. Only methods the class defines itself are replaced, so
+    /// nothing it inherits changes. False when the class is not loaded yet, to try
+    /// again at the next pick.
     private static func install(_ signed: String) -> Bool {
         if NSClassFromString("DOCConfiguration") == nil {
             for framework in ["DocumentManager", "DocumentManagerCore"] {
@@ -555,7 +744,7 @@ enum FolderPickerSigning {
             typealias Setter = @convention(c) (AnyObject, Selector, NSString?) -> Void
             let original = unsafeBitCast(method_getImplementation(method), to: Setter.self)
             let body: @convention(block) (AnyObject, NSString?) -> Void = { object, value in
-                original(object, sel, host(value, signed: signed))
+                original(object, sel, host(value, hook: "set"))
             }
             method_setImplementation(method, imp_implementationWithBlock(body))
             hooked.append("set")
@@ -564,13 +753,38 @@ enum FolderPickerSigning {
             typealias Getter = @convention(c) (AnyObject, Selector) -> NSString?
             let original = unsafeBitCast(method_getImplementation(method), to: Getter.self)
             let body: @convention(block) (AnyObject) -> NSString? = { object in
-                host(original(object, sel), signed: signed)
+                host(original(object, sel), hook: "get")
             }
             method_setImplementation(method, imp_implementationWithBlock(body))
             hooked.append("get")
         }
-        LogStore.shared.log("[external] folder picker host hooks: \(hooked.isEmpty ? "none" : hooked.joined(separator: "+"))")
+        if case let (method, sel)? = own("encodeWithCoder:") {
+            // The last moment before the configuration goes to the picker's process.
+            typealias Encode = @convention(c) (AnyObject, Selector, NSCoder) -> Void
+            let original = unsafeBitCast(method_getImplementation(method), to: Encode.self)
+            let body: @convention(block) (AnyObject, NSCoder) -> Void = { object, coder in
+                let (on, mode) = active
+                if on, mode != "hooks", let config = object as? NSObject {
+                    FolderPickerSigning.count("encode", swapped: !rewrite(config).isEmpty)
+                } else if on {
+                    FolderPickerSigning.count("encode", swapped: false)
+                }
+                original(object, sel, coder)
+            }
+            method_setImplementation(method, imp_implementationWithBlock(body))
+            hooked.append("encode")
+        }
+        let names = ivarNames(cls)
+        LogStore.shared.log("[external] folder picker hooks: \(hooked.isEmpty ? "none" : hooked.joined(separator: "+"))"
+            + " DOCConfiguration fields: \(names)")
         return true
+    }
+
+    private static func ivarNames(_ cls: AnyClass) -> String {
+        var count: UInt32 = 0
+        guard let list = class_copyIvarList(cls, &count) else { return "none" }
+        defer { free(list) }
+        return (0..<Int(count)).compactMap { ivar_getName(list[$0]).map { String(cString: $0) } }.joined(separator: ",")
     }
 }
 
