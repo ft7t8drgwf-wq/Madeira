@@ -1330,12 +1330,17 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
-    static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,
+    /// The build line's own lists, in the order the library shows them.
+    static let own = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,
                       ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,
                       crysis2Remastered, crysis3Remastered, darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2,
                       projectZomboid, counterStrike2, escapists2, slayTheSpire2, rockstarLauncher, rockstarLauncherSetup,
                       steamBigPicture, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, ffxivLauncher, ffxivSetup, standard]
-        + steamTitles.map(\.list)
+
+    /// Every list once: the build line's own, then the merged Steam titles whose game has no list
+    /// above. Dark Souls III, Project Zomboid and Counter-Strike 2 keep the build line's tested lists;
+    /// their SteamTitle entries name those same lists, which recognise the game by App ID and folder.
+    static let all = own + steamTitles.map(\.list).filter { title in !own.contains { $0.id == title.id } }
 
     // MARK: Recognising a game
 

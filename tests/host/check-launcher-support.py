@@ -104,6 +104,11 @@ enum LibraryModel {
 '''
 dock_src = (app / 'MadeiraDock.swift').read_text(encoding='utf-8')
 stubs += dock_src[dock_src.index('/// A game Steam\'s client has installed'):dock_src.index('/// Madeira Dock: a small headless host')]
+# Production code too (DockGameSession.swift): the installer's third-party count reads isMicrosoftKey.
+session_src = (app / 'DockGameSession.swift').read_text(encoding='utf-8')
+key_fn = session_src[session_src.index('    static func isMicrosoftKey('):]
+key_fn = key_fn[:key_fn.index('\n    }\n') + len('\n    }\n')]
+stubs += '\nenum DockGameSession {\n' + key_fn + '}\n'
 
 checks = r'''
 import Foundation

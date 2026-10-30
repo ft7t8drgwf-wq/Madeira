@@ -81,12 +81,14 @@ assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other'
                         'slay-the-spire-2', 'rockstar-launcher', 'rockstar-launcher-setup', 'steam-big-picture', 'ubisoft-connect',
                         'ubisoft-connect-setup', 'battle-net', 'battle-net-setup', 'ffxiv-launcher', 'ffxiv-setup', 'standard'} | MERGED, \
     sorted(presets)
-assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,\n'
+assert ('static let own = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,\n'
         '                      ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,\n'
         '                      crysis2Remastered, crysis3Remastered, darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2,\n'
         '                      projectZomboid, counterStrike2, escapists2, slayTheSpire2, rockstarLauncher, rockstarLauncherSetup,\n'
-        '                      steamBigPicture, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, ffxivLauncher, ffxivSetup, standard]\n'
-        '        + steamTitles.map(\\.list)') in lists_src
+        '                      steamBigPicture, ubisoftConnect, ubisoftConnectSetup, battleNet, battleNetSetup, ffxivLauncher, ffxivSetup, standard]\n') in lists_src
+# Each list once: a merged Steam title whose game already has a list above (Dark Souls III, Project Zomboid,
+# Counter-Strike 2) names that list in steamTitles and is not added again.
+assert 'static let all = own + steamTitles.map(\\.list).filter { title in !own.contains { $0.id == title.id } }' in lists_src
 # The Rockstar Games Launcher outside Steam (logs 91-93, 2026-10-28): Launcher.exe in its own folder gets the
 # launcher chain's lines, its installer the standard line; both start in the Wine desktop with Windows services.
 assert ('        case "launcher.exe" where Array(parts.dropLast().suffix(2)) == ["rockstar games", "launcher"]:\n'
@@ -170,8 +172,8 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: %d lists (34 plus %d merged Steam titles), two comment lines each, recorded fork defaults retained, Dark Souls and Fallout lists kept separate, no key twice, '
-      % (len(presets), len(MERGED)), end='')
+print('PASS: %d lists (%d of the build line\'s own plus %d merged Steam titles, three shared), two comment lines each, recorded fork defaults retained, Dark Souls and Fallout lists kept separate, no key twice, '
+      % (len(presets), len(presets) - len(MERGED) + 3, len(MERGED)), end='')
 print(      'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -690,11 +692,14 @@ check(id(gta4, 12210) == "gta4-steam", "GTA IV by its App ID")
 check(id(gta4) == "gta4-steam", "GTA IV by its Steam folder")
 check(id(gta4 + #"\GTAIV\PlayGTAIV.exe"#) == "gta4-steam" && id(gta4 + #"\GTAIV\GTAIV.exe"#) == "gta4-steam", "GTA IV's programs inside Steam")
 check(id(#"C:\Games\GTA IV\GTAIV.exe"#) == "none", "GTA IV outside Steam has no list")
-// The device's RAM: GTA V Legacy's 3 GB RAM swap only under 12 GB; every other list the same everywhere.
+// The device's RAM: GTA V Legacy's 3 GB RAM swap and GTA V Enhanced's 2560 MB video-budget trim only
+// under 12 GB; every other list the same everywhere.
 R.deviceRAMBytes = 11_695 << 20
 let onTwelve = R.all.map { $0.fileText }
 check(!R.gta5LegacySteam.fileText.contains("swap-mb") && !R.gta5LegacySteam.fileText.contains("vram-mb"),
       "a 12 GB phone: no RAM swap in GTA V Legacy's list")
+check(!R.gta5EnhancedSteam.fileText.contains("vram-trim-mb") && !R.gta5EnhancedOther.fileText.contains("vram-trim-mb"),
+      "a 12 GB phone: no video-budget trim in GTA V Enhanced's lists")
 R.deviceRAMBytes = 16 << 30
 check(R.all.map { $0.fileText } == onTwelve, "a 16 GB iPad: the same lists as a 12 GB phone")
 R.deviceRAMBytes = 7_500 << 20
@@ -702,7 +707,11 @@ check(R.gta5LegacySteam.fileText.hasSuffix("env.MADEIRA_JIT_DUMP = 0\nswap-mb = 
       "an 8 GB phone: the 3 GB RAM swap after GTA V Legacy's list")
 check(R.gta5LegacyOther.fileText.hasSuffix("env.MADEIRA_JIT_DUMP = 0\nswap-mb = 3072\n"),
       "an 8 GB phone: the 3 GB RAM swap after GTA V Legacy's list outside Steam too")
-check(zip(R.all, onTwelve).allSatisfy { $0.0.id == "gta5l-steam" || $0.0.id == "gta5l-other" || $0.0.fileText == $0.1 },
+check(R.gta5EnhancedSteam.fileText.hasSuffix("env.MADEIRA_JIT_DUMP = 0\nvram-trim-mb = 2560\n"),
+      "an 8 GB phone: the 2560 MB video-budget trim after GTA V Enhanced's list")
+check(R.gta5EnhancedOther.fileText.hasSuffix("env.MADEIRA_JIT_DUMP = 0\nvram-trim-mb = 2560\n"),
+      "an 8 GB phone: the trim after GTA V Enhanced's list outside Steam too")
+check(zip(R.all, onTwelve).allSatisfy { ["gta5l-steam", "gta5l-other", "gta5e-steam", "gta5e-other"].contains($0.0.id) || $0.0.fileText == $0.1 },
       "every other list is the same on an 8 GB phone")
 R.deviceRAMBytes = 11_695 << 20
 check(id(other + #"\PlayGTAV.exe"#) == "none", "PlayGTAV.exe without GTA5_Enhanced.exe beside it")
@@ -786,12 +795,14 @@ check(id(#"C:\Games\Crysis 2\Bin32\Crysis2.exe"#) == "none", "the original Crysi
 // The merged Steam titles: App ID, folder, a program anywhere, a Steam-only program only inside a library.
 check(id(steam + #"\MSFS2024"#, 2537590) == "msfs-2024" && id(steam + #"\MSFS2024"#) == "msfs-2024", "a merged title by App ID and folder")
 check(id(#"D:\Games\FS\FlightSimulator2024.exe"#) == "msfs-2024", "a merged title's program anywhere")
-check(id(steam + #"\DARK SOULS III\Game\DarkSoulsIII.exe"#) == "dark-souls-iii", "a Steam-only program inside Steam")
-check(id(#"C:\Games\DS3\DarkSoulsIII.exe"#) == "none", "a Steam-only program outside Steam")
+check(id(steam + #"\Life is Strange 2\LIS2-Win64-Shipping.exe"#) == "life-is-strange-2", "a Steam-only program inside Steam")
+check(id(#"C:\Games\LiS2\LIS2-Win64-Shipping.exe"#) == "none", "a Steam-only program outside Steam")
+check(id(steam + #"\DARK SOULS III\Game\DarkSoulsIII.exe"#) == "dark-souls-iii" && id(#"C:\Games\DS3\DarkSoulsIII.exe"#) == "dark-souls-iii",
+      "Dark Souls III keeps the build line's list, inside and outside Steam")
 check(id(steam + #"\Dead as Disco"#, 3404260) == "dead-as-disco" && id(steam + #"\TUNG"#) == "tung", "App ID only, folder only")
 check(id(steam + #"\Red Dead Redemption"#) == "rdr1-steam" && id(steam + #"\Red Dead Redemption 2"#) == "rdr2-steam",
       "folders match whole names")
-check(R.steamTitles.count == 50 && R.all.count == 67, "50 merged titles, 67 lists")
+check(R.steamTitles.count == 50 && R.all.count == 81, "50 merged titles, 81 lists (three of them the build line's own)")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 50 merged Steam titles, others none")
