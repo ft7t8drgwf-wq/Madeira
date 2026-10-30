@@ -29,6 +29,7 @@
 		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
 		A1007B06 /* SwiftFFXIV/FFXIVLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B06 /* FFXIVLogin.swift */; };
 		A1007B07 /* FFXIVLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B07 /* FFXIVLaunch.swift */; };
+		A1007B21 /* LauncherGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B21 /* LauncherGames.swift */; };
 		A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A03 /* GOGAPI.swift */; };
 		A1006A04 /* SwiftGOG/GOGDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A04 /* GOGDownloader.swift */; };
 		A1006B01 /* EALibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B01 /* EALibrary.swift */; };
@@ -275,6 +276,7 @@
 		A2007B05 /* ItchGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchGames.swift"; sourceTree = "<group>"; };
 		A2007B06 /* FFXIVLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftFFXIV/FFXIVLogin.swift"; sourceTree = "<group>"; };
 		A2007B07 /* FFXIVLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FFXIVLaunch.swift"; sourceTree = "<group>"; };
+		A2007B21 /* LauncherGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LauncherGames.swift"; sourceTree = "<group>"; };
 		A2006A03 /* GOGAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGAPI.swift"; sourceTree = "<group>"; };
 		A2006A04 /* GOGDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGDownloader.swift"; sourceTree = "<group>"; };
 		A2006B01 /* EALibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EALibrary.swift"; sourceTree = "<group>"; };
@@ -568,6 +570,7 @@
 				A2007B05 /* ItchGames.swift */,
 				A2007B06 /* FFXIVLogin.swift */,
 				A2007B07 /* FFXIVLaunch.swift */,
+				A2007B21 /* LauncherGames.swift */,
 				A2006A03 /* GOGAPI.swift */,
 				A2006A04 /* GOGDownloader.swift */,
 				A2006B01 /* EALibrary.swift */,
@@ -985,6 +988,7 @@
 				A1007B05 /* ItchGames.swift in Sources */,
 				A1007B06 /* SwiftFFXIV/FFXIVLogin.swift in Sources */,
 				A1007B07 /* FFXIVLaunch.swift in Sources */,
+				A1007B21 /* LauncherGames.swift in Sources */,
 				A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */,
 				A1006A04 /* SwiftGOG/GOGDownloader.swift in Sources */,
 				A1006B01 /* EALibrary.swift in Sources */,

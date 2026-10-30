@@ -310,14 +310,19 @@ assert 'return inSteam ? rdr2Steam : rdr2Other' in match
 assert 'guard fileExists(folder + "\\\\GTA5_Enhanced.exe") else { return nil }' in match and 'default:\n            return nil' in match
 
 # The publishers' launchers (LauncherSupport.swift). Rockstar's lists are 125hz's (6f7eb58a) with this
-# tree's fork-default comment; Ubisoft Connect and Battle.net take the Chromium chain's lines without the
-# release delay. All of them, installers too, start in the Wine desktop with Windows services first.
+# tree's fork-default comment; Battle.net takes the Chromium chain's lines without the release delay.
+# Ubisoft Connect is 32-bit (v2, build 48): none of the 64-bit chain, which left upc.exe no 4 GB window.
+# All of them, installers too, start in the Wine desktop with Windows services first.
 CHROMIUM = ['pool-low = 1', 'pool-page-fit = 1', 'pool-split = 1', 'env.MADEIRA_SC_PA_POOLS = 2',
             'env.MADEIRA_POOL_HEAD_RESERVE_MB = 128', 'env.MADEIRA_POOL_LOW_IMAGES = 1', 'env.MADEIRA_POOL_RECYCLE_IMAGES = 1',
             'env.MADEIRA_X64_IMAGE_NOCOPY = 1', 'env.MADEIRA_LOCK_ORPHAN = stamped']
 for ident in ('rockstar-launcher', 'ubisoft-connect', 'battle-net'):
     p = presets[ident]
-    assert all(line in p['lines'] for line in CHROMIUM), (ident, 'the Chromium chain')
+    if ident == 'ubisoft-connect':
+        assert p['version'] >= 2 and not any(line in p['lines'] for line in CHROMIUM[:-1]), (ident, 'no 64-bit Chromium chain')
+        assert 'env.MADEIRA_WOW_PLACEHOLDERS = 1' in p['lines'] and 'env.MADEIRA_WOW_MIN_FREE_GB = 2' in p['lines'], ident
+    else:
+        assert all(line in p['lines'] for line in CHROMIUM), (ident, 'the Chromium chain')
     assert p['switches'] == 'fastSync: true, display: "fit", launchMode: "desktop", startServices: true', (ident, p['switches'])
 for ident in ('rockstar-launcher-setup', 'ubisoft-connect-setup', 'battle-net-setup'):
     p = presets[ident]

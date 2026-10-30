@@ -37,8 +37,8 @@ folder, and each installer by the name it downloads with:
 
 Every one of them starts in the Wine desktop with Windows services first (the
 lists' `launchMode` and `startServices`): the launchers install services and use
-out-of-process COM. The launchers' windows are Chromium (CEF), so their lists
-take the lines Social Club and Steam's web helper need: Social Club layout 2
+out-of-process COM. The 64-bit launchers' windows are Chromium (CEF), so the Battle.net
+and Rockstar lists take the lines Social Club and Steam's web helper need: Social Club layout 2
 (`env.MADEIRA_SC_PA_POOLS = 2`, room for Chromium 128+'s three 32 GB
 reservations), the JIT pool lines for libcef.dll, pure-x64 images uncopied, and
 the swap file for the web helper's idle pages. Ubisoft Connect's and Battle.net's
@@ -46,10 +46,27 @@ lists have no release delay (`MADEIRA_FREE_DELAY_MS`): Chromium's allocator
 reserves, releases and reserves again. The installers get the standard line
 only.
 
+Ubisoft Connect is 32-bit: UbisoftConnect.exe, upc.exe and UplayWebCore.exe each
+need a 4 GB window, so its list (version 2) has none of the 64-bit Chromium lines.
+With them, build 48's upc.exe found no window and the client never opened. The
+extra windows spill into the range the 64-bit Chromium layout would take.
+
 Battle.net's list also turns off Windows' location service
 (`env.WINEDLLOVERRIDES = locationapi=d`), which the client stops on under Wine.
 
 The Ubisoft Connect and Battle.net lists are not device-tested yet.
+
+## Library sections
+
+Each launcher has its own library section, like Steam's and GOG's
+(`app/Madeira/LauncherGames.swift`), shown once the launcher is installed or added:
+
+- the launcher and the games you added from its folders (they leave Other games);
+- an **Add** card when the launcher is installed but not in the library yet;
+- the games it installed that are not in the library yet, each with **Add**:
+  Ubisoft's `games` folder, Rockstar's game folders, Blizzard's game folders,
+  Final Fantasy XIV's game. Add picks the folder's one program (helpers aside), or
+  the one named like the folder; otherwise it asks for + instead.
 
 Final Fantasy XIV's launcher is in the same section, for installing and updating the
 game only: its window is Internet Explorer's engine, so its lists are the Wine

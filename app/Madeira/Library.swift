@@ -3022,6 +3022,9 @@ struct LibraryView: View {
             return $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
     }
+    /// Other games: the games you added, less the ones a launcher's section lists
+    /// (LauncherGames.swift).
+    private var otherEntries: [LibraryEntry] { entries.filter { LauncherID.owner(of: $0) == nil } }
     /// The games you added in the page's order, for the controller's focus. Grouping
     /// and sorting go game by game, so their order among the Steam games is the
     /// order without them.
@@ -3285,17 +3288,17 @@ struct LibraryView: View {
                 if SteamGamesSection.shown {
                     VStack(alignment: .leading, spacing: 14) {
                         // Games are added with the + in the navigation bar.
-                        LibrarySectionHeader(title: "Other games", count: entries.count,
+                        LibrarySectionHeader(title: "Other games", count: otherEntries.count,
                                              collapsed: SteamGamesSection.collapsible ? $hideOthers : nil) { EmptyView() }
                         if hideOthers && SteamGamesSection.collapsible {
                             EmptyView()
-                        } else if entries.isEmpty {
+                        } else if otherEntries.isEmpty {
                             Text(search.isEmpty
                                  ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
                                  : "No other games match your search.")
                                 .foregroundStyle(.secondary)
                         } else {
-                            cells(entries, width: viewport.size.width)
+                            cells(otherEntries, width: viewport.size.width)
                         }
                     }
                     if MadeiraDock.enabled {
@@ -3305,7 +3308,15 @@ struct LibraryView: View {
                 } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.gogProductID == nil && $0.itchGameID == nil && $0.eaOfferID == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
-                    cells(entries, width: viewport.size.width)
+                    cells(otherEntries, width: viewport.size.width)
+                }
+                // The publishers' launchers (LauncherGames.swift): the launcher, its games
+                // in the library and the ones it installed that are not added yet.
+                ForEach(LauncherID.allCases) { id in
+                    LauncherGamesSection(id: id, entries: entries.filter { LauncherID.owner(of: $0) == id },
+                                         layout: layout, width: viewport.size.width) { entry, list, dense in
+                        libraryItem(entry, list: list, dense: dense)
+                    }
                 }
                 // The account's GOG games (GOGGames.swift): installed ones open their
                 // Game details page, the others their download sheet.
