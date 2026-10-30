@@ -55,6 +55,11 @@ require('static var cloudQuitEnabled: Bool { cloudEnabled &&' in owned and 'if S
 require(owned.count('Self.cloudEnabled else { throw CancellationError() }') == 3
         and 'guard Self.cloudEnabled, !cloudBusy.contains(appID)' in owned,
         'off: a running transfer stops between files and no choice is applied')
+sync = owned[owned.index('func syncCloud('):owned.index('func resolveCloud(')]
+require('quotaFull = begun.eresult == 25' in owned and 'cloudFull[appID, default: []].formUnion(' in owned
+        and 'state.full = "Steam Cloud is full for this game.' in owned and '.full' not in hold
+        and 'upload skipped: cloud full' in sync and '.isSubset(of: refused)' in sync,
+        "a full Steam Cloud (EResult 25) is noted on the game's page, does not hold Play, and the same saves are not sent again")
 turned_on = owned[owned.index('func cloudTurnedOn()'):owned.index('func cloudTurnedOff()')]
 require('cloud.removeAll()' in turned_on and 'cloudAudited = false' in turned_on
         and turned_on.index('cloudBusy.isEmpty') < turned_on.index('cloud.removeAll()'),
@@ -183,6 +188,16 @@ let listed = SteamCloudFile(prefix: "%GameInstall%savedata/\(steamID)/", name: "
                             timestamp: 1, size: UInt64(bytes.count), persistState: 0)
 let both = try! SteamCloudAudit.run(listing: SteamCloudListing(files: [listed]), saveFiles: ufs, paths: paths)
 check(both.entries.count == 1 && both.entries[0].kind == .same, "  and once the cloud lists it under that name, the two are the same file")
+// A save the cloud lists as deleted (the game removed it on another computer) is not sent back up
+// from this device's older copy; a newer save of that name is.
+var gone = listed; gone.persistState = 2
+let removedAudit = try! SteamCloudAudit.run(listing: SteamCloudListing(files: [gone]), saveFiles: ufs, paths: paths)
+check(removedAudit.entries.isEmpty && removedAudit.removedInCloud == 1 && removedAudit.summary.hasSuffix("removed-in-cloud=1"),
+      "a device copy of a save the cloud lists as deleted is not offered for upload")
+var goneOther = gone; goneOther.sha = Data(repeating: 1, count: 20)
+let newer = try! SteamCloudAudit.run(listing: SteamCloudListing(files: [goneOther]), saveFiles: ufs, paths: paths)
+check(newer.entries.count == 1 && newer.entries[0].kind == .localOnly && newer.removedInCloud == 0,
+      "  a newer save of that name is offered")
 // Directory/missing inputs must not become digests; the empty regular file is distinct.
 check(SteamCloudAudit.sha1(of: saves) == nil, "directory input returns no digest")
 check(SteamCloudAudit.sha1(of: saves.appendingPathComponent("absent")) == nil, "open error returns no digest")

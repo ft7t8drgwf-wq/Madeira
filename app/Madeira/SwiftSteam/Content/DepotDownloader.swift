@@ -57,7 +57,10 @@ struct SteamDownloadProgress: Equatable, Sendable {
 final class DepotDownloader {
     private let session: SteamCMSession
     private var depotKeys: [UInt32: Data] = [:]
-    private var cdnAuthTokens: [String: String] = [:]  // "depot|host" -> "?auth=…" fragment
+    /// "depot|host" -> "?auth=…" fragment and when to ask again. The
+    /// downloader lives for the app run: a token is reused only until Steam's
+    /// expiry, and a failed request only briefly, so Try again asks afresh.
+    private var cdnAuthTokens: [String: (fragment: String, until: Date)] = [:]
     private let maxConcurrentChunks = 8
     private let attemptsPerChunk = 5
     private let hostPoolSize = 6
@@ -146,11 +149,31 @@ final class DepotDownloader {
                 throw SteamError.depotKeyNotFound(refused)
             }
             if session.steamID != 0 { accountID = session.steamID }
-            let contentAppID = !app.freeToDownload ? (depot.fromApp ?? app.appID) : app.appID
+            var contentAppID = !app.freeToDownload ? (depot.fromApp ?? app.appID) : app.appID
             // A beta's own manifest is requested under its branch name.
-            let manifest = try await fetchManifest(depotID: depot.depotID, appID: contentAppID,
+            let manifest: DepotManifest
+            do {
+                manifest = try await fetchManifest(depotID: depot.depotID, appID: contentAppID,
                                                    manifestGID: gid, key: key, hosts: hosts,
                                                    branch: depot.hasOwnManifest(app.branch) ? app.branch : nil)
+            } catch SteamError.contentRefused(let status) where contentAppID != app.appID {
+                // A depot taken from another app (depotfromapp) whose file list
+                // Steam refuses under that app (BioShock Infinite's 1523211 from
+                // 1523210: AccessDenied): asked for under the installed app, and
+                // when Steam refuses that too, left out like content the account
+                // does not own, instead of failing the whole install.
+                SteamLog.event("[steam-depot] borrowed depot refused app=\(app.appID) depot=\(depot.depotID) from=\(contentAppID) status=\(status) retry=own-app")
+                do {
+                    manifest = try await fetchManifest(depotID: depot.depotID, appID: app.appID,
+                                                       manifestGID: gid, key: key, hosts: hosts,
+                                                       branch: depot.hasOwnManifest(app.branch) ? app.branch : nil)
+                    contentAppID = app.appID
+                } catch SteamError.contentRefused(let status) {
+                    SteamLog.event("[steam-depot] borrowed depot skipped app=\(app.appID) depot=\(depot.depotID) from=\(contentAppID) status=\(status)")
+                    licenseSkipped.append(depot.depotID)
+                    continue
+                }
+            }
             let auth = await cdnAuthFragments(depotID: depot.depotID, appID: contentAppID, hosts: pool)
             plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
                                    hosts: pool, auth: auth,
@@ -608,6 +631,7 @@ final class DepotDownloader {
         if let url = error as? URLError { return "url\(url.code.rawValue)" }
         if case SteamError.chunkDecodeFailed(let format) = error { return "decode-\(format)" }
         if case SteamError.checksumMismatch = error { return "checksum" }
+        if case SteamError.contentHTTP(let status) = error { return "http\(status)" }
         return "other"
     }
 
@@ -629,7 +653,7 @@ final class DepotDownloader {
         guard let url = URL(string: urlString) else { throw SteamError.chunkDownloadFailed("Invalid content URL.") }
         let (data, response) = try await http.data(from: url)
         guard let status = (response as? HTTPURLResponse)?.statusCode, (200...299).contains(status) else {
-            throw SteamError.chunkDownloadFailed("Content server returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0).")
+            throw SteamError.contentHTTP((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
         return data
     }
@@ -676,41 +700,77 @@ final class DepotDownloader {
             try? FileManager.default.removeItem(at: cacheFile)
         }
         let fetchStarted = Date()
-        let requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID, branch: branch)
+        var requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID, branch: branch)
         var lastError: Error = SteamError.manifestFetchFailed("No content server returned the manifest.")
-        for host in hosts.prefix(6) {
-            try Task.checkCancellation()
-            let auth = await cdnAuthFragment(depotID: depotID, appID: appID, host: host)
-            let code = requestCode == 0 ? "" : "/\(requestCode)"
-            do {
-                let raw = try await Self.download("\(host)/depot/\(depotID)/manifest/\(manifestGID)/5\(code)\(auth)")
-                manifestStats.fetched += 1
-                manifestStats.bytes += raw.count
-                manifestStats.fetchSeconds += Date().timeIntervalSince(fetchStarted)
-                let parseStarted = Date()
-                let depotCache = depotCache
-                let manifest = try await Task.detached(priority: .userInitiated) {
-                    let (manifest, payload) = try Self.parseManifestKeepingPayload(raw, depotID: depotID, manifestGID: manifestGID, key: key)
-                    Self.keepForValve(manifest, payload: payload, depotID: depotID, manifestGID: manifestGID, depotCache: depotCache)
-                    if let cacheFolder, let cacheFile {
-                        // One manifest per depot is kept: an older build's list is replaced.
-                        let fm = FileManager.default
-                        try? fm.createDirectory(at: cacheFolder, withIntermediateDirectories: true)
-                        for name in (try? fm.contentsOfDirectory(atPath: cacheFolder.path)) ?? [] where name.hasPrefix("\(depotID)_") {
-                            try? fm.removeItem(at: cacheFolder.appendingPathComponent(name))
-                        }
-                        try? payload.write(to: cacheFile, options: .atomic)
-                    }
-                    return manifest
-                }.value
-                manifestStats.parseSeconds += Date().timeIntervalSince(parseStarted)
-                return manifest
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastError = error
-                SteamLog.trace("manifest from a content server failed: \(error.localizedDescription)")
+        // The first servers, and Valve's fallback when it is not among them.
+        var servers = Array(hosts.prefix(6))
+        if let fallback = hosts.last, !servers.contains(fallback) { servers.append(fallback) }
+        // "host:status" for each refusal, for the log line when every server refuses.
+        var refusals: [String] = []
+        var authorizedHosts = 0
+        var refusedStatus = 0
+        // A server that refuses (401/403) is asked again once with a fresh
+        // authorization; when no server answers and some refused, the round is
+        // repeated once with a fresh request code (it is short-lived and Steam
+        // may have answered without one).
+        for round in 0..<2 {
+            if round == 1 {
+                // A refused code (AccessDenied) is not asked for again.
+                guard !refusals.isEmpty, !codeDenied.contains("\(depotID)|\(appID)") else { break }
+                SteamLog.event("[steam-depot] manifest refused app=\(appID) depot=\(depotID) code=\(requestCode == 0 ? "none" : "yes") authorized=\(authorizedHosts)/\(servers.count) refusals=\(refusals.joined(separator: ",")) retry=fresh-code")
+                requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID, branch: branch)
+                refusals = []; authorizedHosts = 0
             }
+            for host in servers {
+                try Task.checkCancellation()
+                var auth = await cdnAuthFragment(depotID: depotID, appID: appID, host: host, refresh: round == 1)
+                let code = requestCode == 0 ? "" : "/\(requestCode)"
+                do {
+                    let raw: Data
+                    do {
+                        raw = try await Self.download("\(host)/depot/\(depotID)/manifest/\(manifestGID)/5\(code)\(auth)")
+                    } catch SteamError.contentHTTP(let status) where (status == 401 || status == 403) && round == 0 {
+                        auth = await cdnAuthFragment(depotID: depotID, appID: appID, host: host, refresh: true)
+                        raw = try await Self.download("\(host)/depot/\(depotID)/manifest/\(manifestGID)/5\(code)\(auth)")
+                    }
+                    manifestStats.fetched += 1
+                    manifestStats.bytes += raw.count
+                    manifestStats.fetchSeconds += Date().timeIntervalSince(fetchStarted)
+                    let parseStarted = Date()
+                    let depotCache = depotCache
+                    let manifest = try await Task.detached(priority: .userInitiated) {
+                        let (manifest, payload) = try Self.parseManifestKeepingPayload(raw, depotID: depotID, manifestGID: manifestGID, key: key)
+                        Self.keepForValve(manifest, payload: payload, depotID: depotID, manifestGID: manifestGID, depotCache: depotCache)
+                        if let cacheFolder, let cacheFile {
+                            // One manifest per depot is kept: an older build's list is replaced.
+                            let fm = FileManager.default
+                            try? fm.createDirectory(at: cacheFolder, withIntermediateDirectories: true)
+                            for name in (try? fm.contentsOfDirectory(atPath: cacheFolder.path)) ?? [] where name.hasPrefix("\(depotID)_") {
+                                try? fm.removeItem(at: cacheFolder.appendingPathComponent(name))
+                            }
+                            try? payload.write(to: cacheFile, options: .atomic)
+                        }
+                        return manifest
+                    }.value
+                    manifestStats.parseSeconds += Date().timeIntervalSince(parseStarted)
+                    return manifest
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    lastError = error
+                    if case SteamError.contentHTTP(let status) = error, status == 401 || status == 403 {
+                        refusals.append("\(URL(string: host)?.host ?? host):\(status)")
+                        refusedStatus = status
+                        if !auth.isEmpty { authorizedHosts += 1 }
+                    }
+                    SteamLog.trace("manifest from a content server failed: \(error.localizedDescription)")
+                }
+            }
+        }
+        if !refusals.isEmpty {
+            SteamLog.event("[steam-depot] manifest refused app=\(appID) depot=\(depotID) code=\(requestCode == 0 ? "none" : "yes") authorized=\(authorizedHosts)/\(servers.count) refusals=\(refusals.joined(separator: ",")) retry=none")
+            // Most servers refusing is a refusal, not a server outage.
+            if refusals.count * 2 >= servers.count { throw SteamError.contentRefused(refusedStatus) }
         }
         throw lastError
     }
@@ -823,6 +883,10 @@ final class DepotDownloader {
 
     // MARK: - Manifest Request Code
 
+    /// "depot|app" pairs whose request code Steam answered AccessDenied (15):
+    /// asking again does not change that answer.
+    private var codeDenied: Set<String> = []
+
     private func manifestRequestCode(depotID: UInt32, appID: UInt32, manifestGID: UInt64, branch: String? = nil) async throws -> UInt64 {
         try await session.ensureConnected()
         var encoder = ProtobufEncoder()
@@ -832,22 +896,37 @@ final class DepotDownloader {
         // app_branch: a beta's manifest is issued under its branch.
         if let branch, branch != SteamAppInfo.publicBranch { encoder.writeString(fieldNumber: 4, value: branch) }
 
-        let responseData = try await session.callServiceMethod(
-            method: .getManifestRequestCode,
-            body: encoder.data,
-            timeout: 15
-        )
-
-        var decoder = ProtobufDecoder(responseData)
-        while let tag = try decoder.readTag() {
-            if tag.fieldNumber == 1 {
-                // manifest_request_code is fixed64 on the wire
-                return tag.wireType == .fixed64 ? try decoder.readFixed64() : try decoder.readVarint()
+        // Steam can refuse for a moment (busy, rate limit): asked up to three
+        // times. Without a code the content servers refuse the manifest (401).
+        var eresult: Int32 = 0
+        var tries = 0
+        for attempt in 0..<3 {
+            tries = attempt + 1
+            if attempt > 0 { try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
+            let answer = try await session.callServiceMethodWithResult(
+                method: .getManifestRequestCode,
+                body: encoder.data,
+                timeout: 15
+            )
+            eresult = answer.eresult
+            var decoder = ProtobufDecoder(answer.body)
+            while let tag = try decoder.readTag() {
+                if tag.fieldNumber == 1 {
+                    // manifest_request_code is fixed64 on the wire
+                    let code = tag.wireType == .fixed64 ? try decoder.readFixed64() : try decoder.readVarint()
+                    if code != 0 { return code }
+                    continue
+                }
+                try decoder.skip(wireType: tag.wireType)
             }
-            try decoder.skip(wireType: tag.wireType)
+            if eresult == 1 { break }  // No request code needed (older depots)
+            if eresult == 15 { break } // AccessDenied: this account may not have it under this app
         }
-
-        return 0 // No request code needed (older depots)
+        if eresult != 1 {
+            if eresult == 15 { codeDenied.insert("\(depotID)|\(appID)") }
+            SteamLog.event("[steam-depot] manifest-code refused app=\(appID) depot=\(depotID) eresult=\(eresult) tries=\(tries)")
+        }
+        return 0
     }
 
     // MARK: - CDN Discovery + Auth
@@ -936,12 +1015,19 @@ final class DepotDownloader {
         }
     }
 
+    /// Drops every kept content-server authorization, so the next install
+    /// asks Steam again (after the servers refused a download).
+    func forgetAuthorization() {
+        cdnAuthTokens.removeAll()
+    }
+
     /// Unified-service GetCDNAuthToken → "?auth=…" query fragment for this
     /// depot on this host. An empty token is normal outside regional edge
-    /// networks. Cached per depot and host.
-    private func cdnAuthFragment(depotID: UInt32, appID: UInt32, host: String) async -> String {
+    /// networks. Cached per depot and host until Steam's expiry (a failed
+    /// request for a minute); `refresh` asks again whatever is cached.
+    private func cdnAuthFragment(depotID: UInt32, appID: UInt32, host: String, refresh: Bool = false) async -> String {
         let cacheKey = "\(depotID)|\(host)"
-        if let cached = cdnAuthTokens[cacheKey] { return cached }
+        if !refresh, let cached = cdnAuthTokens[cacheKey], cached.until > Date() { return cached.fragment }
 
         // host_name must be the bare hostname, not the https:// URL
         let bareHost = URL(string: host)?.host ?? host
@@ -953,22 +1039,39 @@ final class DepotDownloader {
 
         do {
             try await session.ensureConnected()
-            let responseData = try await session.callServiceMethod(
+            let answer = try await session.callServiceMethodWithResult(
                 method: .getCDNAuthToken,
                 body: encoder.data,
                 timeout: 10
             )
-            var decoder = ProtobufDecoder(responseData)
+            var decoder = ProtobufDecoder(answer.body)
             var token = ""
+            var expires: UInt64 = 0
             while let tag = try decoder.readTag() {
-                if tag.fieldNumber == 1 { token = try decoder.readString() } else { try decoder.skip(wireType: tag.wireType) }
+                switch tag.fieldNumber {
+                case 1: token = try decoder.readString()            // token = 1
+                case 2: expires = try decoder.readVarint()          // expiration_time = 2 (unix seconds)
+                default: try decoder.skip(wireType: tag.wireType)
+                }
             }
             let fragment = token.isEmpty ? "" : (token.hasPrefix("?") || token.hasPrefix("&") ? token : "?auth=\(token)")
-            cdnAuthTokens[cacheKey] = fragment
+            // A minute's margin before Steam's expiry; an hour when none is given;
+            // a refused request (no token) is asked again after a minute.
+            let now = Date()
+            let until: Date
+            if answer.eresult != 1 || token.isEmpty {
+                until = now.addingTimeInterval(60)
+            } else if expires > 0 {
+                until = max(now, Date(timeIntervalSince1970: TimeInterval(expires)).addingTimeInterval(-60))
+            } else {
+                until = now.addingTimeInterval(3600)
+            }
+            if answer.eresult != 1 { SteamLog.trace("content authorization eresult=\(answer.eresult)") }
+            cdnAuthTokens[cacheKey] = (fragment, until)
             return fragment
         } catch {
             SteamLog.trace("content authorization request failed; continuing without a token")
-            cdnAuthTokens[cacheKey] = ""
+            cdnAuthTokens[cacheKey] = ("", Date().addingTimeInterval(60))
             return ""
         }
     }
