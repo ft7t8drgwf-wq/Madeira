@@ -57,20 +57,20 @@ require('part: steamFirst ? .notInstalled : .all, open: { selected = $0 })' in p
         and 'if MadeiraDock.enabled {' in page[others_at:],
         'Not installed follows Other games; with nothing installed the whole Steam section does')
 single = page[others_at:]
-require('ContentUnavailableView("Make yourself at home"' in single and single.count('cells(entries, width: viewport.size.width)') == 2,
+require('ContentUnavailableView("Make yourself at home"' in single and single.count('cells(otherEntries, width: viewport.size.width)') == 2,
         'without the Steam section: one grid of the games you added, or the empty-library message')
 require('.refreshable { await SteamGamesSection.refresh() }' in page, 'pull down on the library refreshes the Steam section')
 
 # ------------------------------------------------------------------ Other games
 others = between(page, 'LibrarySectionHeader(title: "Other games"', '} else if model.entries.filter(')
-require('count: entries.count' in others and 'collapsed: SteamGamesSection.collapsible ? $hideOthers : nil' in others,
+require('count: otherEntries.count' in others and 'collapsed: SteamGamesSection.collapsible ? $hideOthers : nil' in others,
         'Other games: count and a collapsible title (MADEIRA_LIBRARY_COLLAPSE)')
 require('Label("Add a game"' not in others and '{ EmptyView() }' in others and 'browser = true' in page,
         'Other games: no Add a game button of its own; the + in the navigation bar opens the executable browser')
 require('"Copy a game\'s folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."' in others
         and '"No other games match your search."' in others, 'Other games: empty and no-match texts')
-require(others.index('if hideOthers && SteamGamesSection.collapsible {') < others.index('} else if entries.isEmpty {')
-        < others.index('cells(entries, width: viewport.size.width)'), 'Other games: collapsed, empty, then the games')
+require(others.index('if hideOthers && SteamGamesSection.collapsible {') < others.index('} else if otherEntries.isEmpty {')
+        < others.index('cells(otherEntries, width: viewport.size.width)'), 'Other games: collapsed, empty, then the games')
 require('@AppStorage("madeiraLibraryHideOthers") private var hideOthers = false' in view, 'Other games: remembered collapsed state')
 entries = between(view, 'private var entries: [LibraryEntry] {', 'var body: some View {')
 require('$0.desktop != true && $0.steamAppID == nil' in entries and 'localizedCaseInsensitiveContains(search)' in entries,
