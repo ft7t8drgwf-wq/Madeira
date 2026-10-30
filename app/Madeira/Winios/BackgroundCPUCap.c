@@ -165,13 +165,19 @@ static void *cap_main(void *arg)
 }
 
 /* Start (percent > 0) or end (0) the cap. Ending it returns once every held thread runs again. */
+/* The main thread's port, taken while the image loads (constructors run on
+ * the main thread): pthread_main_thread_np() is not in the iOS SDK. */
+__attribute__((constructor)) static void cap_note_main_thread(void)
+{
+    cap_main_port = pthread_mach_thread_np(pthread_self());
+}
+
 void madeira_bg_cpu_cap(int percent)
 {
     pthread_mutex_lock(&cap_lock);
     if (percent > 0 && !cap_started) {
         pthread_t th;
         pthread_attr_t attr;
-        cap_main_port = pthread_mach_thread_np(pthread_main_thread_np());
         pthread_attr_init(&attr);
         pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
         if (pthread_create(&th, &attr, cap_main, NULL) == 0) { pthread_detach(th); cap_started = 1; }
