@@ -754,17 +754,21 @@ enum GameRecommendations {
     /// 4GB-aligned slot", upc.exe exit code 1) and the client never opened. Version 2
     /// has none of those lines, so the extra windows spill into that range
     /// (MADEIRA_WOW_SPILL_CEF), and keeps the 2 GB margin, every window slot from the
-    /// start and the small DXMT rings. Its service and out-of-process COM need the
+    /// start and the small DXMT rings. Version 3 (build 58): upc.exe hooks ntdll by
+    /// writing into its own code, and a write into its own process is denied unless
+    /// the program is a local-write-target ("[hard-error] ... Error at hooking API
+    /// \"LdrFindResource_U\"", then exit 0xdeadc0de). Its service and out-of-process COM need the
     /// service manager, so the Wine desktop with Windows services first. The swap
     /// file takes the web helper's idle pages. No release delay (madeira-bcd's
     /// 2000 ms): Chromium's allocator reserves, releases and reserves again.
     static let ubisoftConnect = GameRecommendation(
-        id: "ubisoft-connect", title: "Ubisoft Connect", version: 2,
+        id: "ubisoft-connect", title: "Ubisoft Connect", version: 3,
         config: """
         # Madeira's recommended settings for Ubisoft Connect.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         swap-mb = 4096
         swap-min-mb = 1
+        local-write-target = upc.exe;UbisoftConnect.exe;UplayWebCore.exe
         env.MADEIRA_SWAP_COVERAGE = broad
         env.MADEIRA_LOCK_ORPHAN = stamped
         env.MADEIRA_TOUCH_MOUSE = 1
