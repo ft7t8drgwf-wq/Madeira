@@ -35234,6 +35234,45 @@ NTSTATUS WINAPI NtUnlockVirtualMemory( HANDLE process, PVOID *addr, SIZE_T *size
 }
 
 
+/* madeira-bcd: follow one file through open, size query, section and map, in
+ * every process. MADEIRA_FILE_WATCH names a part of the path; the default is
+ * "icudtl.dat", the Chromium data file Garry's Mod's helpers fail to map while
+ * no section or map call fails. 0 turns it off; the log stops after 400 lines.
+ * Opens are matched on the name asked for, the rest on the handle's file. */
+void ios_file_watch_note( const char *what, unsigned int status, HANDLE handle,
+                          const OBJECT_ATTRIBUTES *attr, ULONGLONG a, ULONGLONG b )
+{
+    static int count;
+    const char *word = getenv( "MADEIRA_FILE_WATCH" );
+    char path[PATH_MAX];
+    int fd = -1, needs_close = 0;
+
+    if (!word || !*word) word = "icudtl.dat";
+    else if (word[0] == '0' && !word[1]) return;
+    path[0] = 0;
+    if (attr)
+    {
+        const UNICODE_STRING *name = attr->ObjectName;
+        size_t i, n = name && name->Buffer ? name->Length / sizeof(WCHAR) : 0;
+
+        if (n > sizeof(path) - 1) n = sizeof(path) - 1;
+        for (i = 0; i < n; i++) path[i] = name->Buffer[i] < 0x80 ? (char)name->Buffer[i] : '?';
+        path[n] = 0;
+    }
+    else if (handle && !server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL ))
+    {
+        if (fcntl( fd, F_GETPATH, path ) == -1) path[0] = 0;
+        if (needs_close) close( fd );
+    }
+    if (!path[0] || !strcasestr( path, word )) return;
+    if (__atomic_add_fetch( &count, 1, __ATOMIC_RELAXED ) > 400) return;
+    dprintf( STDERR_FILENO, "[file-watch] %s status=%08x pid=%04x tid=%04x wow64=%d handle=%p a=0x%llx b=0x%llx path=%s\n",
+             what, status, (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ),
+             (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ), is_wow64(),
+             handle, (unsigned long long)a, (unsigned long long)b, path );
+}
+
+
 /* madeira-bcd: a failing NtCreateSection / NtMapViewOfSection(Ex) is logged
  * with its status and the file's path, so a Chromium child's "Couldn't mmap
  * icu data file" names the call that failed (Garry's Mod). Failures are rare;
@@ -35247,7 +35286,12 @@ void ios_map_fail_note( const char *what, unsigned int status, HANDLE handle,
     char path[PATH_MAX] = "?";
     int fd = -1, needs_close = 0;
 
-    if (NT_SUCCESS(status) || status == STATUS_CONFLICTING_ADDRESSES) return;
+    if (NT_SUCCESS(status))
+    {
+        ios_file_watch_note( what, status, handle, NULL, (ULONG_PTR)addr, size );
+        return;
+    }
+    if (status == STATUS_CONFLICTING_ADDRESSES) return;
     if ((env = getenv( "MADEIRA_MAP_FAIL_LOG" )) && env[0] == '0') return;
     if (__atomic_add_fetch( &count, 1, __ATOMIC_RELAXED ) > 200) return;
     if (handle && !server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL ))
