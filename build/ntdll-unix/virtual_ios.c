@@ -17389,6 +17389,11 @@ static struct ios_smc_code_map *ios_smc_map_for( uintptr_t addr )
 
 /* [addr, addr + len) lies in one 16 KB page that FEX trapped and holds no
  * translated code. Called before and after the store. */
+/* [smc-why]: why the last ios_smc_write_ok on this thread said no (IOS_SMC_WHY_*). */
+enum { IOS_SMC_WHY_SPAN = 1, IOS_SMC_WHY_NO_MAP, IOS_SMC_WHY_SLOT, IOS_SMC_WHY_UNARMED, IOS_SMC_WHY_CODE,
+       IOS_SMC_WHY_UNKNOWN_PAGE, IOS_SMC_WHY_ALIAS, IOS_SMC_WHY_INSN, IOS_SMC_WHY_UNDECODED, IOS_SMC_WHY_COUNT };
+static __thread int ios_smc_why;
+
 int ios_smc_write_ok( uintptr_t addr, size_t len )
 {
     struct ios_smc_code_map *map;
@@ -17397,17 +17402,51 @@ int ios_smc_write_ok( uintptr_t addr, size_t len )
     unsigned g, g_end;
     uint64_t bits[4];
 
+    ios_smc_why = IOS_SMC_WHY_SPAN;
     if (!len || len > IOS_SMC_PAGE || ((addr + len - 1) & ~(uintptr_t)(IOS_SMC_PAGE - 1)) != page) return 0;
+    ios_smc_why = IOS_SMC_WHY_NO_MAP;
     if (!(map = ios_smc_map_for( addr ))) return 0;
     slot = &map->slots[(page / IOS_SMC_PAGE) % IOS_SMC_SLOTS];
+    ios_smc_why = IOS_SMC_WHY_SLOT;
     if (__atomic_load_n( &slot->page, __ATOMIC_ACQUIRE ) != page) return 0;
+    ios_smc_why = IOS_SMC_WHY_UNARMED;
     if (!(__atomic_load_n( &slot->flags, __ATOMIC_ACQUIRE ) & IOS_SMC_ARMED)) return 0;
     for (g = 0; g < 4; g++) bits[g] = __atomic_load_n( &slot->bits[g], __ATOMIC_ACQUIRE );
+    ios_smc_why = IOS_SMC_WHY_SLOT;
     if (__atomic_load_n( &slot->page, __ATOMIC_ACQUIRE ) != page) return 0;
+    /* All ones: the page was claimed outside a full-page invalidation, so which
+     * bytes hold code is unknown (not that every byte does). */
+    ios_smc_why = (bits[0] & bits[1] & bits[2] & bits[3]) == ~0ull ? IOS_SMC_WHY_UNKNOWN_PAGE : IOS_SMC_WHY_CODE;
     g_end = (unsigned)((addr + len - 1 - page) / 64);
     for (g = (unsigned)((addr - page) / 64); g <= g_end; g++)
         if (bits[g / 64] & (1ull << (g % 64))) return 0;
+    ios_smc_why = 0;
     return 1;
+}
+
+/* [smc-why]: the fault handler sends a store in a plain view to FEX's path.
+ * why < 0: take the reason from the last ios_smc_write_ok on this thread. */
+void ios_smc_count_refusal( int why )
+{
+    static const char *names[IOS_SMC_WHY_COUNT] = { "?", "crosses-page", "no-map", "slot-taken", "not-armed",
+        "code-bytes", "unknown-page", "alias-or-burst", "insn", "undecoded" };
+    static unsigned long counts[IOS_SMC_WHY_COUNT], total;
+    unsigned long n;
+
+    if (why < 0) why = ios_smc_why;
+    if (why <= 0 || why >= IOS_SMC_WHY_COUNT || why == IOS_SMC_WHY_NO_MAP) return;
+    __atomic_add_fetch( &counts[why], 1, __ATOMIC_RELAXED );
+    n = __atomic_add_fetch( &total, 1, __ATOMIC_RELAXED );
+    if (n == 1 || n == 1000 || !(n % 20000))
+    {
+        char line[512];
+        int i, len = snprintf( line, sizeof(line), "[smc-why] %lu stores in plain JIT pages sent to FEX:", n );
+        for (i = 1; i < IOS_SMC_WHY_COUNT && len > 0 && len < (int)sizeof(line); i++)
+            if (i != IOS_SMC_WHY_NO_MAP)
+                len += snprintf( line + len, sizeof(line) - len, " %s=%lu", names[i],
+                                 __atomic_load_n( &counts[i], __ATOMIC_RELAXED ) );
+        dprintf( 2, "%s (emulated %lu)\n", line, (unsigned long)ios_smc_emulated );
+    }
 }
 
 static uint64_t ios_smc_ticks( void )
