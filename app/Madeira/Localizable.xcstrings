@@ -533,6 +533,34 @@
         }
       }
     },
+    "Achievement unlocked": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erfolg freigeschaltet"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Logro desbloqueado"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conquista desbloqueada"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Достижение получено"
+          }
+        }
+      }
+    },
     "Active": {
       "localizations": {
         "de": {
@@ -1341,6 +1369,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "Применить общую настройку"
+          }
+        }
+      }
+    },
+    "As Steam saved them on this device the last time the game ran through Madeira Dock. A banner shows each new one while you play.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "So, wie Steam sie beim letzten Start des Spiels über Madeira Dock auf diesem Gerät gespeichert hat. Während du spielst, zeigt ein Banner jeden neuen Erfolg."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tal como Steam los guardó en este dispositivo la última vez que el juego se ejecutó con Madeira Dock. Mientras juegas, un aviso muestra cada logro nuevo."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Como a Steam as salvou neste dispositivo na última vez que o jogo rodou pelo Madeira Dock. Enquanto você joga, um aviso mostra cada conquista nova."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Так, как Steam сохранил их на этом устройстве при последнем запуске игры через Madeira Dock. Во время игры баннер показывает каждое новое достижение."
           }
         }
       }
@@ -5937,6 +5993,34 @@
         }
       }
     },
+    "Hidden achievement": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verborgener Erfolg"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Logro oculto"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conquista oculta"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Скрытое достижение"
+          }
+        }
+      }
+    },
     "Hold the display at its maximum rate": {
       "localizations": {
         "de": {
@@ -6997,6 +7081,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "Продолжить загрузку"
+          }
+        }
+      }
+    },
+    "Keep playing to reveal it.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spiel weiter, um ihn aufzudecken."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sigue jugando para descubrirlo."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue jogando para revelá-la."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Продолжайте играть, чтобы открыть его."
           }
         }
       }
@@ -9185,6 +9297,34 @@
         }
       }
     },
+    "No achievements on this device yet.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Erfolge auf diesem Gerät."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aún no hay logros en este dispositivo."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ainda não há conquistas neste dispositivo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "На этом устройстве пока нет достижений."
+          }
+        }
+      }
+    },
     "No executables here. Copy files into Madeira/wine/drive_c using Files.": {
       "localizations": {
         "de": {
@@ -10721,6 +10861,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "Всё равно играть"
+          }
+        }
+      }
+    },
+    "Play the game once through Madeira Dock: Steam then keeps its achievements here, and a banner shows each one you unlock.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spiele das Spiel einmal über Madeira Dock: Steam speichert seine Erfolge dann hier, und ein Banner zeigt jeden, den du freischaltest."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Juega una vez con Madeira Dock: Steam guardará aquí sus logros y un aviso mostrará cada uno que desbloquees."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jogue uma vez pelo Madeira Dock: a Steam passa a guardar as conquistas aqui, e um aviso mostra cada uma que você desbloquear."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запустите игру один раз через Madeira Dock: Steam сохранит её достижения здесь, а баннер покажет каждое полученное."
           }
         }
       }

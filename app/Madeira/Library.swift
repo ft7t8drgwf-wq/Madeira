@@ -3765,7 +3765,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, gog, itch, library, iniFiles, dllOverrides, mods, advanced
+        case display, controls, launch, compatibility, steam, cloud, achievements, gog, itch, library, iniFiles, dllOverrides, mods, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3774,6 +3774,7 @@ struct LibraryDetail: View {
             case .compatibility: return "Compatibility"
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
+            case .achievements: return "Achievements"
             case .workshop: return "Steam Workshop"
             case .gog: return "GOG"
             case .itch: return "itch.io"
@@ -3792,6 +3793,7 @@ struct LibraryDetail: View {
             case .compatibility: return "cpu"
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
+            case .achievements: return "trophy"
             case .workshop: return "square.stack.3d.up"
             case .gog: return "bag"
             case .itch: return "bag"
@@ -3811,7 +3813,7 @@ struct LibraryDetail: View {
     private var pageGroups: [[Page]] {
         let launch = entry.usesLaunchOptions || entry.desktop != true
         let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch] : [])
-            : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
+            : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
         let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .mods, .advanced]
@@ -3853,6 +3855,7 @@ struct LibraryDetail: View {
             case .compatibility: compatibilityPage
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
+            case .achievements: if let appID = entry.steamAppID { SteamAchievementsSection(appID: appID) }
             case .workshop:
                 if let appID = entry.steamAppID, appID > 0, appID <= Int(UInt32.max) {
                     SteamWorkshopSections(appID: UInt32(appID), title: entry.title)
