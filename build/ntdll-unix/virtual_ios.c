@@ -10115,7 +10115,12 @@ static ULONG_PTR get_wow_user_space_limit(void)
  * address map, see ios_wow_band), below the CEF pools [0x7400000000,
  * 0x7c00000000) and the FEX band [0x7c00000000, 0x8000000000).
  */
-#define IOS_WOW_MAX_WINDOWS 8
+/* 10 (2026-10-31): Ubisoft Connect wants nine or more 32-bit programs at once
+ * (client, two services, Chromium's GPU, network and storage helpers and its
+ * renderers); with eight, the ninth found the registry full. The band and its
+ * spill range [0x7100000000, 0x7b00000000) hold at most ten 4 GB-aligned
+ * candidates, so ten registry entries let every free one be used. */
+#define IOS_WOW_MAX_WINDOWS 10
 #define IOS_WOW_CEF_POOLS_START ((ULONG_PTR)0x7400000000)
 #define IOS_WOW_FEX_BAND_END    ((ULONG_PTR)0x8000000000)
 
@@ -25234,6 +25239,70 @@ static int ios_avail_phys_chromium( void )
 }
 
 
+/* Launchers (2026-10-31): `exe-phys-mb = upc.exe:479;Other.exe:600` in the
+ * game's own file reports N MB of physical memory, total and available, to the
+ * named programs only (last path component, any case). The reason is Chromium's
+ * renderer cap: a browser process keeps at most physical MB / 2 / 60 renderers
+ * (at least 3), so 479 MB caps Ubisoft Connect's upc.exe at three, where it
+ * started six on build 58 and ran out of 4 GB windows ("BOOT FAILED at stage
+ * 'guest-window-reserve'"). Its CEF setup ignores --renderer-process-limit on
+ * its command line. Only the browser process should be named: the renderers
+ * size V8's heap from the same figure. Returns the bytes, or 0 when the calling
+ * pseudo-process is not named (or the key is unset). */
+static unsigned long long ios_exe_phys_bytes( void )
+{
+    static char spec[512], read_for[1024];
+    static int read;
+    const char *game = getenv( "MADEIRA_CFG_GAME" );
+    PEB *peb;
+    RTL_USER_PROCESS_PARAMETERS *pp;
+    const WCHAR *path;
+    const char *t;
+    size_t len, base = 0, k;
+
+    /* per game: read again when the game whose lines apply changes */
+    if (!game) game = "";
+    if (!read || strncmp( read_for, game, sizeof(read_for) - 1 ))
+    {
+        snprintf( read_for, sizeof(read_for), "%s", game );
+        if (!madeira_cfg_get( "exe-phys-mb", spec, sizeof(spec) )) spec[0] = 0;
+        read = 1;
+        if (spec[0]) dprintf( 2, "[exe-phys] reported physical memory per program: %s (exe-phys-mb)\n", spec );
+    }
+    if (!spec[0] || !(peb = ios_jit_current_peb()) || !(pp = peb->ProcessParameters) ||
+        !(path = pp->ImagePathName.Buffer)) return 0;
+    len = pp->ImagePathName.Length / sizeof(WCHAR);
+    for (k = 0; k < len; k++) if (path[k] == '\\' || path[k] == '/') base = k + 1;
+    for (t = spec; *t; )
+    {
+        const char *colon, *end = strchr( t, ';' );
+        size_t n, el = end ? (size_t)(end - t) : strlen( t );
+
+        while (el && *t == ' ') { t++; el--; }
+        colon = memchr( t, ':', el );
+        n = colon ? (size_t)(colon - t) : 0;
+        if (n && n == len - base)
+        {
+            for (k = 0; k < n; k++)
+            {
+                WCHAR c = path[base + k];
+                char d = t[k];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (d >= 'A' && d <= 'Z') d += 32;
+                if (c != (WCHAR)(unsigned char)d) break;
+            }
+            if (k == n)
+            {
+                unsigned long long mb = strtoull( colon + 1, NULL, 10 );
+                return mb >= 64 && mb <= 65536 ? mb << 20 : 0;
+            }
+        }
+        if (!end) break;
+        t = end + 1;
+    }
+    return 0;
+}
+
 /***********************************************************************
  *           ios_avail_phys
  *
@@ -25301,6 +25370,11 @@ unsigned long long ios_avail_phys( unsigned long long host_free )
         }
         band = now;
         if (left < host_free) value = left;
+    }
+    /* exe-phys-mb: never more available than the total that program is told */
+    {
+        unsigned long long own = ios_exe_phys_bytes();
+        if (own && value > own) value = own;
     }
     /* madeira-bcd: avail-phys-cef-mb, the Chromium browsers only (see above) */
     if (cef && value > cef && ios_avail_phys_chromium())
@@ -25470,6 +25544,18 @@ void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 )
                      ((unsigned long long)info->MmHighestPhysicalPage * page_size) >> 20,
                      cached_limit >> 20 ); }
             info->MmHighestPhysicalPage = max( 1, cached_limit / page_size );
+        }
+        /* exe-phys-mb (ios_exe_phys_bytes): this program alone is told N MB */
+        {
+            unsigned long long own = ios_exe_phys_bytes();
+            static int said;
+            if (own && own / page_size < (unsigned long long)info->MmHighestPhysicalPage)
+            {
+                if (said++ < 4)
+                    dprintf( 2, "[exe-phys] reporting %llu MB of physical memory to this program "
+                             "(exe-phys-mb)\n", own >> 20 );
+                info->MmHighestPhysicalPage = max( 1, own / page_size );
+            }
         }
     }
 #elif defined(_SC_PHYS_PAGES)

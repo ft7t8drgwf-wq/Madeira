@@ -771,8 +771,15 @@ enum GameRecommendations {
     /// Ubisoft's CEF setup seems to ignore its own command line; the line is harmless
     /// and stays until a log shows otherwise. That run had no failed helpers before
     /// upc.exe hit the x18 LDRSW crash (fixed in signal_arm64_ios.c).
+    /// Version 5 (log 16:20Z): with the crash gone, upc.exe ran its two services,
+    /// Chromium's GPU, network and storage helpers and asked for six renderers; the
+    /// ninth program found the window registry (eight entries) full and the client
+    /// said "Ubisoft services are temporarily unavailable". The switches line is
+    /// dropped; instead upc.exe alone is told 479 MB of memory (exe-phys-mb), which
+    /// caps Chromium at three renderers (physical MB / 2 / 60, at least 3), and the
+    /// registry now holds ten windows. The renderers keep the real figure for V8.
     static let ubisoftConnect = GameRecommendation(
-        id: "ubisoft-connect", title: "Ubisoft Connect", version: 4,
+        id: "ubisoft-connect", title: "Ubisoft Connect", version: 5,
         config: """
         # Madeira's recommended settings for Ubisoft Connect.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
@@ -786,7 +793,7 @@ enum GameRecommendations {
         env.MADEIRA_WOW_PLACEHOLDERS = 1
         env.DXMT_SMALL_RINGS = UbisoftConnect.exe;upc.exe;UplayWebCore.exe
         env.MADEIRA_EC_HOOK_TRACE = 0
-        env.MADEIRA_CHILD_ARGS = upc.exe --renderer-process-limit=1 --in-process-gpu
+        exe-phys-mb = upc.exe:479
         """,
         fastSync: true, display: "fit", launchMode: "desktop", startServices: true)
 

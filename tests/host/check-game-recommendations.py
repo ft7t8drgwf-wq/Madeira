@@ -336,10 +336,14 @@ assert 'env.WINEDLLOVERRIDES = locationapi=d' in presets['battle-net']['lines'],
 # Build 58 logs (2026-10-31): both clients ran out of 4 GB windows for their Chromium helpers
 # ("BOOT FAILED at stage 'guest-window-reserve'"). Their browser process (upc.exe,
 # Battle.net.exe) gets one renderer and in-process GPU work through MADEIRA_CHILD_ARGS.
-for ident, exe in (('ubisoft-connect', 'upc.exe'), ('battle-net', 'Battle.net.exe')):
+for ident, exe in (('battle-net', 'Battle.net.exe'),):
     want = 'env.MADEIRA_CHILD_ARGS = %s --renderer-process-limit=1 --in-process-gpu' % exe
     assert want in presets[ident]['lines'], (ident, 'fewer Chromium helpers')
-assert presets['ubisoft-connect']['version'] >= 4 and presets['battle-net']['version'] >= 3
+assert presets['ubisoft-connect']['version'] >= 5 and presets['battle-net']['version'] >= 3
+# Ubisoft's CEF ignores those switches (log 16:16Z): upc.exe alone is told 479 MB instead, which caps
+# Chromium at three renderers (exe-phys-mb, virtual_ios.c ios_exe_phys_bytes).
+assert 'exe-phys-mb = upc.exe:479' in presets['ubisoft-connect']['lines']
+assert not any('MADEIRA_CHILD_ARGS' in l for l in presets['ubisoft-connect']['lines'])
 # local-write-target is per game: wineserver reads it again when MADEIRA_CFG_GAME changes.
 mach = (root / 'build/wineserver/mach_ios.c').read_text()
 lwt = mach[mach.index('static int ios_local_write_target'):]

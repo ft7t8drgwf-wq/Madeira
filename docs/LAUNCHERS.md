@@ -26,7 +26,7 @@ folder, and each installer by the name it downloads with:
 
 | Program | List |
 |---|---|
-| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v4) |
+| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v5) |
 | `UbisoftConnectInstaller.exe` | `ubisoft-connect-setup` |
 | `Battle.net\Battle.net Launcher.exe`, `Battle.net.exe` | `battle-net` (v3) |
 | `Battle.net-Setup.exe` | `battle-net-setup` |
@@ -78,6 +78,15 @@ Device logs (2026-10-31): Battle.net.exe took the switches (no GPU process, no f
 helpers, faster load). upc.exe still started a GPU process, so Ubisoft's CEF setup seems
 to ignore them. Both clients then hit `[x18-emul3] UNRECOGNIZED insn=b9980e5c`
 (wow64.dll's `ldrsw` of WowTebOffset with x18 = 0), which the x18 emulation now handles.
+
+Ubisoft list version 5 (log 16:20Z): past the crash, upc.exe ran two UplayService.exe
+copies, Chromium's GPU, network and storage helpers and asked for six renderers. The ninth
+32-bit program found the guest-window registry (eight entries) full, and the client said
+"Ubisoft services are temporarily unavailable". Chromium's browser keeps at most
+physical MB / 2 / 60 renderers (at least 3), so the list tells upc.exe alone 479 MB
+(`exe-phys-mb = upc.exe:479`, virtual_ios.c `ios_exe_phys_bytes`; the renderers keep the
+real figure for V8's heap), and the registry now holds ten windows (the band and its spill
+range have at most ten 4 GB-aligned candidates). The switches line is dropped.
 
 ## Library sections
 
