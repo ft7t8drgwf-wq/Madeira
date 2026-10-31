@@ -35234,10 +35234,27 @@ NTSTATUS WINAPI NtUnlockVirtualMemory( HANDLE process, PVOID *addr, SIZE_T *size
 }
 
 
-/* madeira-bcd: follow one file through open, size query, section and map, in
- * every process. MADEIRA_FILE_WATCH names a part of the path; the default is
- * "icudtl.dat", the Chromium data file Garry's Mod's helpers fail to map while
- * no section or map call fails. 0 turns it off; the log stops after 400 lines.
+/* gmod.exe and its Chromium helpers (same image) */
+static int ios_file_watch_is_gmod(void)
+{
+    static const WCHAR gmod[] = {'\\','g','m','o','d','.','e','x','e'};
+    const RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+    const UNICODE_STRING *image = params ? &params->ImagePathName : NULL;
+    size_t i, n = ARRAY_SIZE(gmod);
+    const WCHAR *tail;
+
+    if (!image || !image->Buffer || image->Length / sizeof(WCHAR) < n) return 0;
+    tail = image->Buffer + image->Length / sizeof(WCHAR) - n;
+    for (i = 0; i < n; i++)
+        if ((tail[i] >= 'A' && tail[i] <= 'Z' ? tail[i] + 32 : tail[i]) != gmod[i]) return 0;
+    return 1;
+}
+
+/* madeira-bcd: follow one file through open, size query, section and map.
+ * MADEIRA_FILE_WATCH names a part of the path and watches it in every process;
+ * unset, only gmod.exe processes watch "icudtl.dat", the Chromium data file
+ * Garry's Mod's helpers fail to map while no section or map call fails, so
+ * other programs pay nothing. 0 turns it off; the log stops after 400 lines.
  * Opens are matched on the name asked for, the rest on the handle's file. */
 void ios_file_watch_note( const char *what, unsigned int status, HANDLE handle,
                           const OBJECT_ATTRIBUTES *attr, ULONGLONG a, ULONGLONG b )
@@ -35247,7 +35264,11 @@ void ios_file_watch_note( const char *what, unsigned int status, HANDLE handle,
     char path[PATH_MAX];
     int fd = -1, needs_close = 0;
 
-    if (!word || !*word) word = "icudtl.dat";
+    if (!word || !*word)
+    {
+        if (!ios_file_watch_is_gmod()) return;
+        word = "icudtl.dat";
+    }
     else if (word[0] == '0' && !word[1]) return;
     path[0] = 0;
     if (attr)

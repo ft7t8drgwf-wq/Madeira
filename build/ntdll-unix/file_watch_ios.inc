@@ -2,7 +2,7 @@
 /* madeira-bcd: appended to file.c by build.sh. NtCreateFile (and NtOpenFile,
  * which calls it) and NtQueryInformationFile report to ios_file_watch_note
  * (virtual_ios.c), which logs [file-watch] lines for the file named by
- * MADEIRA_FILE_WATCH (default icudtl.dat). */
+ * MADEIRA_FILE_WATCH (unset: icudtl.dat in gmod.exe only). */
 void ios_file_watch_note( const char *what, unsigned int status, HANDLE handle,
                           const OBJECT_ATTRIBUTES *attr, ULONGLONG a, ULONGLONG b );
 
