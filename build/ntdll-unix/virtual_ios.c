@@ -1298,6 +1298,27 @@ static void *ios_pool_warmer_thread( void *arg )
                             (unsigned long long)vmi.compressed >> 20,
                             (unsigned long long)vmi.external >> 20,
                             (unsigned long long)vmi.reusable >> 20, cycle);
+                    /* [fp-graphics]: phys_footprint also counts memory that internal and
+                     * compressed do not: Metal/IOSurface objects (purgeable non-volatile
+                     * and graphics-tagged ledgers) and IOKit mappings. Project Zomboid
+                     * reached 8 GB at its menu with only ~4.4 GB internal + compressed. */
+                    if (vmi_cnt >= TASK_VM_INFO_REV4_COUNT &&
+                        (!ios_lean_diag_virtual() || cycle == 1 || (cycle % 10) == 0))
+                    {
+                        unsigned long long known = (unsigned long long)vmi.internal + vmi.compressed;
+                        dprintf(2, "[fp-graphics] purgeable-nonvolatile=%llu MB (+%llu compressed) purgeable-volatile=%llu MB "
+                                "graphics-tag=%llu MB (+%llu compressed) media-tag=%llu MB neural-tag=%llu MB "
+                                "unexplained=%lld MB limit-left=%llu MB (cycle=%u)\n",
+                                (unsigned long long)vmi.ledger_purgeable_nonvolatile >> 20,
+                                (unsigned long long)vmi.ledger_purgeable_novolatile_compressed >> 20,
+                                (unsigned long long)vmi.ledger_purgeable_volatile >> 20,
+                                (unsigned long long)vmi.ledger_tag_graphics_footprint >> 20,
+                                (unsigned long long)vmi.ledger_tag_graphics_footprint_compressed >> 20,
+                                (unsigned long long)vmi.ledger_tag_media_footprint >> 20,
+                                (unsigned long long)vmi.ledger_tag_neural_footprint >> 20,
+                                ((long long)vmi.phys_footprint - (long long)known) >> 20,
+                                (unsigned long long)vmi.limit_bytes_remaining >> 20, cycle);
+                    }
                 }
             }
             /* ml566: WHEN does the host malloc zone become corrupt?
