@@ -5265,6 +5265,20 @@ void ios_jit_anon_alias_set_rx(void *user_va, void *jit_rx_alias)
     }
 }
 
+/* 1 when va is inside the pool span but in a split pool's hole (WINE_IOS_JIT_HOLE /
+ * WINE_IOS_JIT_HOLE2): that part is not pool memory and has no RW alias. The main
+ * thread's stack lives there, and so can other host thread stacks: Grounded's
+ * Maine-Win64-Shipping.exe child thread (build 51, 2026-10-30 19:32) had its stack
+ * at pool offset 0x25e6e06c inside hole [0x25000000,0x25f8c000), and a server reply
+ * meant for that stack went to RW alias 0x7025e6e06c, which is not mapped. */
+int ios_jit_pool_hole_va(uintptr_t va)
+{
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
+
+    if (!rx || va < rx || va - rx >= ios_jit_pool_size_global) return 0;
+    return IOS_POOL_IN_HOLE(va - rx);
+}
+
 uintptr_t ios_jit_anon_alias_lookup(uintptr_t fault_addr)
 {
     int n = ios_jit_anon_alias_count;

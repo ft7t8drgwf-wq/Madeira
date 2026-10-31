@@ -8,5 +8,5 @@ dplay dplayx dpnaddr dpnet dpnhpast dpnhupnp dpnlobby dpvoice dpwsockx httpapi w
 apphelp faultrep wer profapi sxs fusion tdh tzres dbgeng sfc sfc_os srclient rstrtmgr shfolder shdocvw url hlink dispex scrrun vbscript jscript msxml msxml2 msxml4 msi oledlg olepro32 mapi32 iertutil uianimation directmanipulation coremessaging threadpoolwinrt twinapi.appcore cryptowinrt bcp47langs rometadata loadperf slc sppc winsta amsi magnification
 windows.applicationmodel windows.devices.enumeration windows.gaming.ui.gamebar windows.globalization windows.media windows.media.devices windows.media.mediacontrol windows.networking windows.networking.connectivity windows.networking.hostname windows.security.credentials.ui.userconsentverifier windows.storage windows.storage.applicationdata windows.system.profile.systemid windows.system.profile.systemmanufacturers windows.ui.core.textinput windows.perception.stub windows.graphics windows.web geolocation
 mspatcha odbccp32
-# sapi: SAPI 5 (SpVoice, SpDataKey ...); the prefix registers it at system32\Speech\Common\sapi.dll, which the app links to this file. Grounded's narration (System.Speech) needs it.
-sapi
+# sapi, msttsengine: SAPI 5 (SpVoice, SpDataKey ...) and its TTS engine; the prefix registers them under system32\Speech, which the app links to these files. Grounded's narration (System.Speech) needs them.
+sapi msttsengine
