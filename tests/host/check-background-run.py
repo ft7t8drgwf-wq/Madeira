@@ -84,12 +84,37 @@ for name, label in [('SteamDownloadBackground.swift', 'Steam and Epic')]:
           and 'beginBackgroundTask' not in src and 'endBackgroundTask' not in src,
           f'{label} downloads take their background time through BackgroundRun')
 for key, kind, default in [('background-run', '.int', '10'), ('background-download', '.int', '60'),
-                           ('background-sound', '.bool', '0'), ('background-gpu-gate', '.bool', '1')]:
+                           ('background-sound', '.bool', '0'), ('background-gpu-gate', '.bool', '1'),
+                           ('background-cpu', '.int', '50')]:
     check(f'ConfigOption(key: "{key}", ' in catalog and f'kind: {kind}, defaultValue: "{default}", category: "App & front end"'
           in catalog.split(f'ConfigOption(key: "{key}", ')[1].split('\n')[0] and f'"{key}": {{' in gen,
           f'catalog: {key} ({default})')
     check(f'MadeiraConfig.get("{key}")' in run_src, f'BackgroundRun reads {key}')
 check(sum('BackgroundRun.swift' in line for line in project.splitlines()) == 4, 'BackgroundRun.swift is in the app target')
+check(sum('Winios/BackgroundCPUCap.c' in line for line in project.splitlines()) == 4, 'BackgroundCPUCap.c is in the app target')
+cap = (app / 'Winios/BackgroundCPUCap.c').read_text()
+loop = body(cap, 'static void *cap_main(void *arg)')
+check(loop.index('cap_resume_all()') < loop.index('pthread_mutex_lock(&cap_lock);\n            stop')
+      and loop.index('if (stop) break;') < loop.index('if (credit < 0) cap_hold_all();'),
+      'CPU cap: held threads run again first each tick, and nothing is held once it is told to stop')
+check('if (credit > 2.0) credit = 2.0;' in loop and 'credit += dt * percent / 100.0 - (cpu - last_cpu);' in loop,
+      'CPU cap: budget of percent of one core with at most 2 s of credit')
+hold = body(cap, 'static void cap_hold_all(void)')
+check(hold.index('cap_exempt(list[i])') < hold.index('thread_suspend('), 'CPU cap: names and policies are read before any thread is held')
+ex = body(cap, 'static int cap_exempt(thread_act_t t)')
+check('t == cap_main_port' in ex and 'THREAD_TIME_CONSTRAINT_POLICY' in ex and '!get_default' in ex and 'AURemoteIO' in ex,
+      'CPU cap: the main thread, real-time threads and the audio threads keep running')
+check('list[i] == self' in hold, 'CPU cap: the governor never holds itself')
+stopfn = body(cap, 'void madeira_bg_cpu_cap(int percent)')
+check('while (!cap_idle && pthread_cond_timedwait' in stopfn, 'CPU cap: turning it off waits until every thread runs again')
+check(run_src.index('madeira_bg_cpu_cap(0)') < run_src.index('_ = madeira_audio_background(0, 0, 0)')
+      and 'madeira_bg_cpu_cap(cap)' in run_src, 'BackgroundRun: cap on while keeping, off before anything else on return')
+check('int madeira_audio_check(void)' in driver and 'if (last_valid && e == last_epoch)' in driver,
+      'audio: a running endpoint that rendered nothing between two checks is restarted')
+check('if (ios_dev_create_locked(&fmt) && !failed_before) g_dev.failed = 0;' in driver,
+      'audio: a keep-alive that cannot make the endpoint does not take the game\'s sound away')
+check('_ = madeira_audio_background(1, 0, 0)' in body(run_src, '    private func leaving()'),
+      'BackgroundRun: the endpoint starts while Madeira is still in front, unmuted')
 check(sum('Winios/MetalBackgroundGate.m' in line for line in project.splitlines()) == 4, 'MetalBackgroundGate.m is in the app target')
 gate = (app / 'Winios/MetalBackgroundGate.m').read_text()
 commit = body(gate, 'static void mbg_commit(id self, SEL cmd)')
@@ -168,6 +193,13 @@ func madeira_audio_background(_ k: Int32, _ m: Int32, _ h: Int32) -> Int32 {
     audioCalls.append([k, m, h]); return (k == 1 && endpointStarts) ? 1 : 0
 }
 func madeira_metal_gate_install() -> Int32 { 1 }
+nonisolated(unsafe) var capCalls: [Int32] = []
+func madeira_bg_cpu_cap(_ p: Int32) { capCalls.append(p) }
+func madeira_bg_cpu_stats(_ c: UnsafeMutablePointer<Double>, _ w: UnsafeMutablePointer<Double>, _ h: UnsafeMutablePointer<Double>) {
+    c.pointee = 30; w.pointee = 60; h.pointee = 20
+}
+nonisolated(unsafe) var checks = 0
+func madeira_audio_check() -> Int32 { checks += 1; return 0 }
 nonisolated(unsafe) var resumes = 0
 func madeira_audio_resume_after_interruption() { resumes += 1 }
 '''
@@ -191,13 +223,25 @@ MainActor.assumeIsolated {
     wineRunning = 1
     post(UIApplication.willResignActiveNotification)
     check(session.options.contains(.mixWithOthers), "leaving with a game: other apps' audio may play")
+    check(audioCalls.last == [1, 0, 0], "leaving with a game: endpoint started while still in front, not muted")
     post(UIApplication.didEnterBackgroundNotification)
     check(audioCalls.last == [1, 1, 0], "game in the background: endpoint kept running, muted")
+    check(capCalls.last == 50, "game in the background: CPU held under 50% of one core")
     check(LogStore.shared.lines.last?.contains("keeping Madeira running in the background for: game") == true, "log names the game")
     post(AVAudioSession.interruptionNotification, [AVAudioSessionInterruptionTypeKey: UInt(0)])
     check(resumes == 1, "an interruption that ended restarts the endpoint")
     post(UIApplication.didBecomeActiveNotification)
     check(audioCalls.last == [0, 0, 0] && session.options.isEmpty, "back: endpoint as the game wants it, category restored")
+    check(capCalls.last == 0, "back: CPU cap off")
+    let checksBefore = checks
+    RunLoop.main.run(until: Date().addingTimeInterval(2))
+    check(checks == checksBefore + 1, "back: the endpoint is checked again 1.5 s later")
+    check(LogStore.shared.lines.contains { $0.contains("Madeira is active again: 50% of one core") }, "back: log gives the CPU use")
+    MadeiraConfig.values["background-cpu"] = "0"
+    post(UIApplication.didEnterBackgroundNotification)
+    check(capCalls.last == 0 && LogStore.shared.lines.last?.contains("no CPU cap") == true, "background-cpu = 0: no cap")
+    post(UIApplication.didBecomeActiveNotification)
+    MadeiraConfig.values["background-cpu"] = nil
 
     // background-sound = 1: not muted.
     MadeiraConfig.values["background-sound"] = "1"
@@ -211,7 +255,7 @@ MainActor.assumeIsolated {
     post(UIApplication.didEnterBackgroundNotification)
     check(audioCalls.last == [1, 1, 0], "short limit: kept running at first")
     RunLoop.main.run(until: Date().addingTimeInterval(16))
-    check(audioCalls.last == [0, 1, 1], "after its minutes: endpoint halted so iOS suspends Madeira")
+    check(audioCalls.last == [0, 1, 1] && capCalls.last == 0, "after its minutes: cap off, endpoint halted so iOS suspends Madeira")
     check(UNUserNotificationCenter.shared.posted == ["Your game is paused"], "a notification says the game is paused")
     post(UIApplication.didBecomeActiveNotification)
     check(audioCalls.last == [0, 0, 0], "back: halt lifted")

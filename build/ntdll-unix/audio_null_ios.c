@@ -1009,7 +1009,10 @@ int madeira_audio_background(int keepalive, int mute, int halt)
         memset(&fmt, 0, sizeof(fmt));
         fmt.sample_rate = IOS_AUDIO_SAMPLE_RATE;
         fmt.channels = IOS_AUDIO_CHANNELS;
-        ios_dev_create_locked(&fmt);
+        /* A failure here must not leave the game without sound for the rest of
+         * the session: its own first client tries again. */
+        int failed_before = g_dev.failed;
+        if (ios_dev_create_locked(&fmt) && !failed_before) g_dev.failed = 0;
     }
     if (g_dev.au && !g_dev.running && !g_bg_halt && (any || g_bg_keepalive)) {
         OSStatus err = AudioOutputUnitStart(g_dev.au);
@@ -1024,6 +1027,38 @@ int madeira_audio_background(int keepalive, int mute, int halt)
     fprintf(stderr, "[ios_audio] bg keepalive=%d mute=%d halt=%d clients=%d -> endpoint %s\n",
             keepalive, mute, halt, any, running ? "running" : "stopped");
     return running;
+}
+
+/* Is the endpoint really rendering? An interruption, or a category change
+ * while it ran, can stop the RemoteIO unit without telling us, and then iOS
+ * would suspend Madeira (and the game would be silent). Called by the app
+ * every few seconds while it keeps Madeira running, and once shortly after
+ * Madeira is active again: when a running endpoint rendered nothing since the
+ * previous call, it is started again. Returns 1 when it was restarted. */
+int madeira_audio_check(void)
+{
+    static uint64_t last_epoch;
+    static int last_valid;
+    int restarted = 0;
+    uint64_t e;
+
+    pthread_mutex_lock(&g_dev_lock);
+    e = atomic_load_explicit(&g_dev.cb_epoch, memory_order_acquire);
+    if (g_dev.au && g_dev.running && !g_bg_halt) {
+        if (last_valid && e == last_epoch) {
+            OSStatus err;
+            AudioOutputUnitStop(g_dev.au);
+            err = AudioOutputUnitStart(g_dev.au);
+            if (err) { g_dev.running = 0; fprintf(stderr, "[ios_audio] endpoint stalled; restart failed: %d\n", (int)err); }
+            else { restarted = 1; fprintf(stderr, "[ios_audio] endpoint stalled; restarted\n"); }
+        }
+        last_valid = 1;
+    } else {
+        last_valid = 0;
+    }
+    last_epoch = e;
+    pthread_mutex_unlock(&g_dev_lock);
+    return restarted;
 }
 
 /* An audio interruption (a call, Siri, another app's non-mixable audio) stops

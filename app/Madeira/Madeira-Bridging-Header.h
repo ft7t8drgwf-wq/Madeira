@@ -27,6 +27,12 @@ void wine_set_ui_log_callback(wine_ui_log_callback_t cb);
 int madeira_audio_background(int keepalive, int mute, int halt);
 // Start the endpoint again after an audio interruption ended.
 void madeira_audio_resume_after_interruption(void);
+// Restart a running endpoint that rendered nothing since the last call (1 = restarted).
+int madeira_audio_check(void);
+// CPU cap while Madeira runs in the background (Winios/BackgroundCPUCap.c):
+// percent of one core, 0 = off (returns once every held thread runs again).
+void madeira_bg_cpu_cap(int percent);
+void madeira_bg_cpu_stats(double *cpu_s, double *wall_s, double *held_s);
 // Metal command buffers off the main thread wait while Madeira is inactive
 // (Winios/MetalBackgroundGate.m). Returns the number of classes wrapped.
 int madeira_metal_gate_install(void);

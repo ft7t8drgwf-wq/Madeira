@@ -24,6 +24,12 @@ import UserNotifications
 // madeira.cfg background-gpu-gate; also madeira_gl_wait_active in
 // Winios/WiniosGL.m).
 //
+// iOS ends an app that keeps running this way once it averages more than about
+// 80% of one core for a minute, and a loading game uses several. So while
+// Madeira keeps itself running, its CPU use is held under `background-cpu`
+// percent of one core (default 50; Winios/BackgroundCPUCap.c): the game loads
+// slower in the background instead of being ended.
+//
 // It stops on its own, and then iOS suspends Madeira as before:
 //   `background-run` minutes after Madeira left the screen while a game runs
 //   (default 10; 0 = never keep a game running), and
@@ -48,6 +54,11 @@ import UserNotifications
     static var gameMinutes: Double { minutes(MadeiraConfig.gameValue("background-run") ?? MadeiraConfig.get("background-run"), default: 10) }
     /// Minutes a download keeps going after Madeira leaves the screen. 0: iOS's short grace period, then the download pauses.
     static var downloadMinutes: Double { minutes(MadeiraConfig.get("background-download"), default: 60) }
+    /// Percent of one core Madeira may use on average while it keeps running in the background. 0: no cap (iOS may end Madeira).
+    static var cpuPercent: Int32 {
+        guard let raw = MadeiraConfig.gameValue("background-cpu") ?? MadeiraConfig.get("background-cpu"), let v = Int32(raw) else { return 50 }
+        return max(0, v)
+    }
     /// 1: the game's sound keeps playing while Madeira is in the background.
     static var gameSound: Bool { (MadeiraConfig.gameValue("background-sound") ?? MadeiraConfig.get("background-sound")) == "1" }
 
@@ -76,6 +87,7 @@ import UserNotifications
     private var tick: Timer?
     private var activatedSession = false // we made the audio session active (no game session)
     private var changedCategory = false  // we made it mix with other apps' audio
+    private var ticks = 0
 
     private func log(_ line: String) { LogStore.shared.log("[bg-run] " + line) }
 
@@ -144,10 +156,13 @@ import UserNotifications
     // MARK: Leaving and coming back
 
     private func leaving() {
-        // Also a pull of Control Center or a notification banner: nothing to start until
-        // Madeira is really in the background, but the session's category is set while
-        // Madeira is still in front, where iOS allows it.
-        if gameRunning, Self.gameMinutes > 0 { mixWithOthers() }
+        // Also a pull of Control Center or a notification banner. While Madeira is still
+        // in front, where iOS allows it, the session mixes with other apps' audio and the
+        // endpoint is already running (not muted yet), so nothing has to start from the
+        // background.
+        guard gameRunning, Self.gameMinutes > 0 else { return }
+        mixWithOthers()
+        _ = madeira_audio_background(1, 0, 0)
     }
 
     private func enteredBackground() {
@@ -166,9 +181,18 @@ import UserNotifications
         keeping = false
         gameSince = nil
         for id in holds.keys { holds[id]?.since = nil }
+        madeira_bg_cpu_cap(0)
         _ = madeira_audio_background(0, 0, 0)
         restoreSession()
-        if wasKeeping { log("Madeira is active again") }
+        if wasKeeping { log("Madeira is active again" + cpuSummary()) }
+        // The category change can stop the endpoint without a word: check it renders.
+        _ = madeira_audio_check()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.inBackground else { return }
+                if madeira_audio_check() != 0 { self.log("game audio had stopped; restarted") }
+            }
+        }
     }
 
     private func interruption(ended: Bool) {
@@ -217,8 +241,13 @@ import UserNotifications
                 return
             }
             keeping = true
+            ticks = 0
+            let cap = Self.cpuPercent
+            if cap > 0 { madeira_bg_cpu_cap(cap) }
+            _ = madeira_audio_check()
             log("keeping Madeira running in the background for: \(reasons.joined(separator: ", ")) "
-                + "(game \(Int(Self.gameMinutes)) min, downloads \(Int(Self.downloadMinutes)) min)")
+                + "(game \(Int(Self.gameMinutes)) min, downloads \(Int(Self.downloadMinutes)) min, "
+                + (cap > 0 ? "CPU held under \(cap)% of one core)" : "no CPU cap)"))
         }
         if tick == nil {
             tick = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -231,6 +260,11 @@ import UserNotifications
     private func update() {
         guard inBackground else { return }
         let now = Date()
+        if keeping {
+            if madeira_audio_check() != 0 { log("the audio endpoint had stopped; restarted") }
+            ticks += 1
+            if ticks % 4 == 0 { log("still running in the background" + cpuSummary()) }
+        }
         // Downloads past their time pause now.
         let dl = Self.downloadMinutes * 60
         for (id, hold) in holds {
@@ -263,12 +297,21 @@ import UserNotifications
         let was = keeping
         keeping = false
         gameSince = nil
+        madeira_bg_cpu_cap(0)
         _ = madeira_audio_background(0, 1, 1)
         for (id, hold) in holds where hold.system == .invalid {
             holds[id] = nil
             hold.expiration()
         }
-        if was { log("stopped keeping Madeira running" + (reason.map { " (\($0))" } ?? "") + "; iOS pauses it now") }
+        if was { log("stopped keeping Madeira running" + (reason.map { " (\($0))" } ?? "") + "; iOS pauses it now" + cpuSummary()) }
+    }
+
+    /// ": 45% of one core, threads held 70% of the time over 300 s" for the current or last run.
+    private func cpuSummary() -> String {
+        var cpu = 0.0, wall = 0.0, held = 0.0
+        madeira_bg_cpu_stats(&cpu, &wall, &held)
+        guard wall > 0 else { return "" }
+        return ": \(Int(100 * cpu / wall))% of one core, threads held \(Int(100 * held / wall))% of the time over \(Int(wall)) s"
     }
 
     // MARK: Audio session
