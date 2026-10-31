@@ -375,6 +375,7 @@ jobs:
           python3 tests/host/check-game-recommendations.py --require-swift
           python3 tests/host/check-ini-editor.py --require-swift
           python3 tests/host/check-dll-overrides.py --require-swift
+          python3 tests/host/check-game-setup-share.py --require-swift
           python3 tests/host/check-background-run.py --require-swift
           python3 tests/host/check-registry-editor.py --require-swift
           python3 tests/host/check-steam-files-flag.py --require-swift

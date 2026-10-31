@@ -3114,6 +3114,8 @@ struct LibraryView: View {
         } message: { Text(model.error ?? "") }
         // Signing that runs out: the refresh, and the offer when it could not run (SigningRefresh.swift).
         .modifier(SigningRefreshOffer())
+        // A setup opened from Files, a chat or a madeira://setup link (GameSetupShare.swift).
+        .modifier(GameSetupInboxPresenter())
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
         .onAppear {
             // An ended desktop session's surface never stays over the library.
@@ -3613,6 +3615,12 @@ struct LibraryDetail: View {
     @State private var confirmPlayAnyway = false
     @State private var launchCheckRound = 0
     @State private var copiedLink = false
+    /// Share Setup and Apply Shared Setup (GameSetupShare.swift).
+    @State private var shareSetup = false
+    @State private var askSetupSource = false
+    @State private var importSetup = false
+    @State private var setupToApply: GameSetupInbox.Pending?
+    @State private var setupError: String?
     /// Where Play is on screen: the starting screen grows out of it (LaunchCurtain).
     @State private var playFrame: CGRect = .zero
     /// Settings › Sync engine, read when the details open: the fastsync switches
@@ -3658,6 +3666,11 @@ struct LibraryDetail: View {
         recommended = GameRecommendations.reset(&entry)
         model.save(entry)
         reloadBCD()
+    }
+    /// Apply Shared Setup: reads the setup, then shows what it holds before applying.
+    private func readSetup(_ read: () throws -> GameSetup) {
+        do { setupToApply = GameSetupInbox.Pending(setup: try read()) }
+        catch { setupError = error.localizedDescription }
     }
     /// "None", or how many keys this game's own config sets.
     static func configSummary(_ config: String?) -> String {
@@ -4205,6 +4218,12 @@ struct LibraryDetail: View {
                 }
                 // madeira-bcd: always last, for every entry, the Desktop too (GameRecommendationsApply.swift).
                 Section {
+                    Button("Share Setup", systemImage: "square.and.arrow.up") { model.save(entry); shareSetup = true }
+                    Button("Apply Shared Setup", systemImage: "square.and.arrow.down") { askSetupSource = true }
+                        .confirmationDialog("Apply a shared setup", isPresented: $askSetupSource, titleVisibility: .visible) {
+                            Button("Choose a File") { importSetup = true }
+                            Button("Paste from Clipboard") { readSetup { try GameSetup(text: UIPasteboard.general.string ?? "") } }
+                        }
                     Button("Copy Settings", systemImage: "doc.on.doc") {
                         let configText = entry.config ?? ""
                         UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
@@ -4216,6 +4235,10 @@ struct LibraryDetail: View {
                         }
                 } footer: {
                     Text(GameRecommendations.note(recommended, desktop: entry.desktop == true))
+                }
+                .fileImporter(isPresented: $importSetup,
+                              allowedContentTypes: [GameSetup.contentType, .json, .plainText, .data]) { result in
+                    readSetup { try GameSetup.read(file: try result.get()) }
                 }
             }
             .navigationTitle("Game details").navigationBarTitleDisplayMode(.inline)
@@ -4248,6 +4271,22 @@ struct LibraryDetail: View {
                 reloadBCD()
             }
         }
+        .sheet(isPresented: $shareSetup) { GameSetupShareSheet(entry: entry) }
+        .sheet(item: $setupToApply) { pending in
+            GameSetupApplySheet(setup: pending.setup, gameTitle: entry.title,
+                                otherGame: pending.setup.match(steamAppID: entry.steamAppID, program: GameSetup.programName(entry)) == 0) { controls, ini in
+                do {
+                    try pending.setup.apply(to: &entry, controls: controls, iniFiles: ini)
+                    model.save(entry)
+                    reloadBCD()
+                } catch {
+                    setupError = "This setup could not be applied: \(error.localizedDescription)"
+                }
+            }
+        }
+        .alert("Shared setup", isPresented: Binding(get: { setupError != nil }, set: { if !$0 { setupError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(setupError ?? "") }
         .sheet(isPresented: $findCover) { SteamSearchView(query: entry.title) { match in entry.steamID = match.id; entry.title = match.name; entry.coverFile = nil } }
         .fileImporter(isPresented: $importCover, allowedContentTypes: [.image]) { result in
             do {
