@@ -109,6 +109,9 @@ static int ios_wow_in_window( const void *a )
     return wow_base && (uintptr_t)a >= wow_base && (uintptr_t)a < wow_base + IOS_WOW_WINDOW_SIZE;
 }
 static struct ios_wow_window *ios_wow_rwx_plain_window( const void *a ) { (void)a; return NULL; }
+static int smc_added, smc_forgot;   /* [smc-emu] registry, tested in check-smc-emu.py */
+static void ios_smc_plain_add( const void *b, size_t s, void *peb ) { (void)b; (void)s; (void)peb; smc_added++; }
+static void ios_smc_forget_peb( void *peb ) { (void)peb; smc_forgot++; }
 static struct file_view *find_view( const void *addr, size_t size )
 {
     (void)size;

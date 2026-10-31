@@ -24,7 +24,7 @@ end = source.index('                    ++wr_seen;', start)
 policy = source[start:end]
 assert 'ios_alias_store_pair( insn, fault_addr, gpr, &alias_fault, honor_guest_prot )' in source
 start = source.index('                int honor_guest_prot = 1;')
-end = source.index('                if (rw_addr && honor_guest_prot && ios_alias_write_is_trapped', start)
+end = source.index('                if (rw_addr && honor_guest_prot && !smc_candidate && ios_alias_write_is_trapped', start)
 honor = source[start:end]
 code = r'''
 #include <assert.h>

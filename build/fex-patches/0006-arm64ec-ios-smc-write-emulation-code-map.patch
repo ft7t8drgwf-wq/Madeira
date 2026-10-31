@@ -1,0 +1,340 @@
+Windows/iOS ARM64EC: complete writes into trapped code pages that touch no code
+
+On willfaust/FEX 18d891e + 0004 + 0005 (the build 49 pin). Not for FEX-Emu.
+
+With a 64-bit Java process's code cache as plain memory ([x64-rwx]), every
+write into a write-trapped 16 KB page invalidated every block compiled from
+the page; FEX untrapped it, translated it all again and trapped it again.
+HotSpot writes new code and data next to code it runs all the time: Project
+Zomboid (Zulu 25, build 50) did about 658,000 translations and 176,000 SMC
+faults before its main menu (4.5 minutes).
+
+FEXCore/Utils/MadeiraSmcCodeMap.h keeps, per 16 KB page, which 64-byte
+granules the decoder has read as code and whether FEX itself armed the
+page's write trap. The decoder marks an instruction's bytes before it reads
+them, then fences. A full-page invalidation (exclusive code-invalidation
+lock) clears a page's bits; any protection change of a page clears its
+armed flag; the trap sets it after its NtProtectVirtualMemory call.
+The ARM64EC module hands the map to Madeira's ntdll through
+NtQueryVirtualMemory class 1007. Madeira's fault handler
+(build/ntdll-unix/signal_arm64_ios.c, virtual_ios.c [smc-emu]) completes an
+ordinary or store-release store into an armed page of a plain [x64-rwx] view
+through a second mapping of the page when the written granules hold no
+code, then fences and checks again; a store that raced the decoder goes to
+FEX's usual path, which runs it again.
+
+MADEIRA_SMC_WRITE_EMULATE=0 does not register the map (every write takes the
+old path). The rebuilt module is app/Madeira/arm64ec-windows/xtajit64.dll,
+built from 18d891e + 0004 + 0005 + 0006 with build/fex-arm64ec/build.sh's
+options.
+
+diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+index cc7ef7be3..400068613 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -6,6 +6,7 @@ desc: Extracts instruction & block meta info, frontend multiblock logic
+ $end_info$
+ */
+ 
++#include <FEXCore/Utils/MadeiraSmcCodeMap.h>
+ #include "Interface/Context/Context.h"
+ #include "Interface/Core/Frontend.h"
+ #include "Interface/Core/X86Tables/X86Tables.h"
+@@ -1602,6 +1603,10 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState* Thre
+       if (TotalInstructions == 0) {
+         /* [iOS-Madeira] verbose Decoder log suppressed */ // LogMan::Msg::IFmt("[iOS] Decoder: About to decode first instruction at {:#x}, byte={:#x}", OpAddress, InstStream[0]);
+       }
++#ifdef FEX_IOS_HOST
++      // MADEIRA: record the bytes as code before reading them (MadeiraSmcCodeMap.h).
++      FEXCore::Madeira::SmcMarkCode(OpAddress, MAX_INST_SIZE);
++#endif
+       BlockIt->BlockStatus = DecodeInstruction(OpAddress);
+       if (HitBadRelocation) {
+         BlockInfo.TotalInstructionCount = 0;
+diff --git a/FEXCore/include/FEXCore/Utils/MadeiraSmcCodeMap.h b/FEXCore/include/FEXCore/Utils/MadeiraSmcCodeMap.h
+new file mode 100644
+index 000000000..c6eb54782
+--- /dev/null
++++ b/FEXCore/include/FEXCore/Utils/MadeiraSmcCodeMap.h
+@@ -0,0 +1,157 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++/* MADEIRA (iOS host, ARM64EC): which bytes of a write-trapped 16 KB host page hold translated code.
++ *
++ * Every write into a write-trapped code page used to invalidate every block compiled from the whole
++ * 16 KB page, and the page's code was translated again afterwards. A JIT (HotSpot's code cache) writes
++ * new code and data next to code it already runs all the time: Project Zomboid did 658,000
++ * re-translations before its main menu. Madeira's fault handler (ntdll unix side) reads this map and
++ * completes a store itself, through a second mapping of the page, when the bytes it writes hold no
++ * translated code: nothing is invalidated and the page stays trapped.
++ *
++ * Layout is shared with C (build/ntdll-unix/virtual_ios.c, struct ios_smc_code_map); keep the two
++ * in step. A slot describes one 16 KB page; Bits has one bit per 64 bytes.
++ *   - The decoder sets the bits of an instruction BEFORE it reads the instruction's bytes, then
++ *     fences. The fault handler stores, fences, and reads the bits again: either the decoder sees
++ *     the new bytes or the handler sees the bit and sends the fault to FEX (Dekker).
++ *   - A page whose slot belongs to another page, or that was claimed outside a full-page
++ *     invalidation, has all bits set (nothing is emulated there).
++ *   - A full-page invalidation (exclusive code-invalidation lock, so no decode runs) clears the bits.
++ *   - Armed: FEX write-protected the page itself (SMC trap). Cleared on any protection change of it.
++ */
++#include <cstdint>
++
++namespace FEXCore::Madeira {
++inline constexpr uint32_t SmcCodeMapMagic = 0x31434d53; // 'SMC1'
++inline constexpr uint32_t SmcCodeMapSlots = 8192;
++inline constexpr uint64_t SmcPageSize = 0x4000;
++inline constexpr uint64_t SmcGranule = 64;
++inline constexpr uint64_t SmcArmed = 1;
++
++struct SmcCodeMapSlot {
++  uint64_t Page;
++  uint64_t Flags;
++  uint64_t Bits[4];
++};
++
++struct SmcCodeMap {
++  uint32_t Magic;
++  uint32_t SlotCount;
++  uint64_t Reserved;
++  SmcCodeMapSlot Slots[SmcCodeMapSlots];
++};
++
++// Zero-initialized (.bss, not 384 KB of the DLL file); Magic and SlotCount are set before registration.
++inline SmcCodeMap g_SmcCodeMap {};
++inline bool g_SmcCodeMapEnabled {false};
++
++inline SmcCodeMapSlot& SmcSlot(uint64_t Page) {
++  return g_SmcCodeMap.Slots[(Page / SmcPageSize) % SmcCodeMapSlots];
++}
++
++// Takes the slot for Page with every bit set (conservative) and no flags.
++inline void SmcClaim(SmcCodeMapSlot& S, uint64_t Page, uint64_t BitsValue) {
++  for (auto& W : S.Bits) {
++    __atomic_store_n(&W, BitsValue, __ATOMIC_RELAXED);
++  }
++  __atomic_store_n(&S.Flags, 0, __ATOMIC_RELAXED);
++  __atomic_store_n(&S.Page, Page, __ATOMIC_RELEASE);
++}
++
++// Decoder: about to read [Addr, Addr + Len) as code.
++inline void SmcMarkCode(uint64_t Addr, uint64_t Len) {
++  if (!g_SmcCodeMapEnabled || !Len) {
++    return;
++  }
++  const uint64_t End = Addr + Len;
++  for (uint64_t Page = Addr & ~(SmcPageSize - 1); Page < End; Page += SmcPageSize) {
++    auto& S = SmcSlot(Page);
++    if (__atomic_load_n(&S.Page, __ATOMIC_ACQUIRE) != Page) {
++      SmcClaim(S, Page, ~0ULL);
++      continue;
++    }
++    const uint64_t B = (Addr > Page ? Addr : Page) - Page;
++    const uint64_t E = (End < Page + SmcPageSize ? End : Page + SmcPageSize) - Page;
++    for (uint64_t G = B / SmcGranule; G <= (E - 1) / SmcGranule; G++) {
++      const uint64_t Bit = 1ULL << (G % 64);
++      if (!(__atomic_load_n(&S.Bits[G / 64], __ATOMIC_RELAXED) & Bit)) {
++        __atomic_fetch_or(&S.Bits[G / 64], Bit, __ATOMIC_SEQ_CST);
++      }
++    }
++  }
++  __atomic_thread_fence(__ATOMIC_SEQ_CST);
++}
++
++// Every page entirely inside [Addr, Addr + Size) lost all its translations. Caller holds the
++// code-invalidation lock exclusively.
++inline void SmcPagesInvalidated(uint64_t Addr, uint64_t Size) {
++  if (!g_SmcCodeMapEnabled) {
++    return;
++  }
++  const uint64_t Begin = (Addr + SmcPageSize - 1) & ~(SmcPageSize - 1);
++  const uint64_t End = Size > ~0ULL - Addr ? ~0ULL & ~(SmcPageSize - 1) : (Addr + Size) & ~(SmcPageSize - 1);
++  if (Begin >= End) {
++    return;
++  }
++  if ((End - Begin) / SmcPageSize > SmcCodeMapSlots) {
++    for (auto& S : g_SmcCodeMap.Slots) {
++      const uint64_t Page = __atomic_load_n(&S.Page, __ATOMIC_ACQUIRE);
++      if (Page >= Begin && Page < End) {
++        for (auto& W : S.Bits) {
++          __atomic_store_n(&W, 0, __ATOMIC_RELEASE);
++        }
++      }
++    }
++    return;
++  }
++  for (uint64_t Page = Begin; Page < End; Page += SmcPageSize) {
++    auto& S = SmcSlot(Page);
++    if (__atomic_load_n(&S.Page, __ATOMIC_ACQUIRE) != Page) {
++      SmcClaim(S, Page, 0);
++    } else {
++      for (auto& W : S.Bits) {
++        __atomic_store_n(&W, 0, __ATOMIC_RELEASE);
++      }
++    }
++  }
++}
++
++// FEX write-protected [Addr, Addr + Size) for SMC detection.
++inline void SmcSetArmed(uint64_t Addr, uint64_t Size) {
++  if (!g_SmcCodeMapEnabled || !Size) {
++    return;
++  }
++  const uint64_t End = Addr + Size;
++  for (uint64_t Page = Addr & ~(SmcPageSize - 1); Page < End; Page += SmcPageSize) {
++    auto& S = SmcSlot(Page);
++    if (__atomic_load_n(&S.Page, __ATOMIC_ACQUIRE) != Page) {
++      SmcClaim(S, Page, ~0ULL);
++    }
++    __atomic_fetch_or(&S.Flags, SmcArmed, __ATOMIC_RELEASE);
++  }
++}
++
++// The protection of [Addr, Addr + Size) changed (FEX untrapped it, or the program reprotected it).
++inline void SmcClearArmed(uint64_t Addr, uint64_t Size) {
++  if (!g_SmcCodeMapEnabled || !Size) {
++    return;
++  }
++  const uint64_t Begin = Addr & ~(SmcPageSize - 1);
++  const uint64_t End = Size > ~0ULL - Addr ? ~0ULL : Addr + Size;
++  if ((End - Begin) / SmcPageSize > SmcCodeMapSlots) {
++    for (auto& S : g_SmcCodeMap.Slots) {
++      const uint64_t Page = __atomic_load_n(&S.Page, __ATOMIC_ACQUIRE);
++      if (Page >= Begin && Page < End) {
++        __atomic_fetch_and(&S.Flags, ~SmcArmed, __ATOMIC_SEQ_CST);
++      }
++    }
++    return;
++  }
++  for (uint64_t Page = Begin; Page < End; Page += SmcPageSize) {
++    auto& S = SmcSlot(Page);
++    if (__atomic_load_n(&S.Page, __ATOMIC_ACQUIRE) == Page) {
++      __atomic_fetch_and(&S.Flags, ~SmcArmed, __ATOMIC_SEQ_CST);
++    }
++  }
++}
++} // namespace FEXCore::Madeira
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index f6ff18d27..9b1c0ef13 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -6,6 +6,7 @@ desc: Implements the ARM64EC BT module API using FEXCore
+ $end_info$
+ */
+ 
++#include <FEXCore/Utils/MadeiraSmcCodeMap.h>
+ #include "../Common/ArenaManager.h"
+ #include <FEXCore/fextl/fmt.h>
+ #include <FEXCore/Core/X86Enums.h>
+@@ -1230,6 +1231,29 @@ NTSTATUS ProcessInit() {
+     InvalidationTracker->EnableHotSMCPages(HotThreshold);
+     LogMan::Msg::EFmt("[smc-hot] hot SMC pages {} (threshold {} write faults per second)", HotThreshold ? "on" : "off", HotThreshold);
+   }
++#ifdef FEX_IOS_HOST
++  {
++    // MADEIRA: hand the SMC code map to Madeira's fault handler, which then completes writes into
++    // trapped code pages that touch no translated bytes (MadeiraSmcCodeMap.h).
++    // MADEIRA_SMC_WRITE_EMULATE=0 keeps every such write on the invalidate-and-untrap path.
++    const char* Emulate = getenv("MADEIRA_SMC_WRITE_EMULATE");
++    if (!(Emulate && Emulate[0] == '0')) {
++      FEXCore::Madeira::g_SmcCodeMap.Magic = FEXCore::Madeira::SmcCodeMapMagic;
++      FEXCore::Madeira::g_SmcCodeMap.SlotCount = FEXCore::Madeira::SmcCodeMapSlots;
++      FEXCore::Madeira::g_SmcCodeMapEnabled = true;
++      ULONG_PTR Answer = 0;
++      const NTSTATUS Status = NtQueryVirtualMemory(NtCurrentProcess(), &FEXCore::Madeira::g_SmcCodeMap,
++                                                   static_cast<MEMORY_INFORMATION_CLASS>(1007), &Answer, sizeof(Answer), nullptr);
++      if (Status) {
++        FEXCore::Madeira::g_SmcCodeMapEnabled = false;
++      }
++      LogMan::Msg::EFmt("[smc-emu] code map {} at {} ({:#x})", Status ? "not taken by this ntdll" : "registered",
++                        static_cast<void*>(&FEXCore::Madeira::g_SmcCodeMap), static_cast<uint32_t>(Status));
++    } else {
++      LogMan::Msg::EFmt("[smc-emu] off (MADEIRA_SMC_WRITE_EMULATE=0)");
++    }
++  }
++#endif
+   ImageTracker.emplace(*CTX, false);
+ 
+   auto MainModule = reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb->ImageBaseAddress;
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index ccf29dc4c..1165d8a46 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ 
++#include <FEXCore/Utils/MadeiraSmcCodeMap.h>
+ #include <atomic>
+ #include <cstdlib>  // ml623: getenv/strtoull for the IR-capture target
+ #include <cstring>  // ml623: strlen
+@@ -100,6 +101,10 @@ static bool ProtIsWritable(ULONG Prot) {
+ }
+ 
+ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  // MADEIRA: any protection change ends "FEX armed this page" (MadeiraSmcCodeMap.h).
++  FEXCore::Madeira::SmcClearArmed(Address, Size);
++#endif
+   if (IntervalsLock.HeldByThisThread()) {
+     // FEX's own heap, changed while this thread holds IntervalsLock: see OwnedSharedMutex.
+     NestedNotificationSkips.fetch_add(1, std::memory_order_relaxed);
+@@ -542,6 +547,9 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+     void* TmpAddress = reinterpret_cast<void*>(FaultAddress);
+     SIZE_T TmpSize = 1;
+     NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++    FEXCore::Madeira::SmcClearArmed(FaultAddress & MADEIRA_TRAP_PAGE_MASK, MADEIRA_TRAP_PAGE_SIZE);
++#endif
+     if (HotPage) {
+       *HotPage = true;
+     }
+@@ -582,6 +590,9 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+         SIZE_T TmpSize = FEXCore::Utils::FEX_PAGE_SIZE;
+         NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PageUntrapProt, &TmpProt);
+       }
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++      FEXCore::Madeira::SmcClearArmed(TrapPage, MADEIRA_TRAP_PAGE_SIZE);
++#endif
+       if (Locked) {
+         CTX.GetCodeInvalidationMutex().unlock();
+       }
+@@ -862,6 +873,9 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
+ void InvalidationTracker::DisableSMCDetection() {
+   std::unique_lock Lock(IntervalsLock);
+   SMCDetectionDisabled = true;
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  FEXCore::Madeira::SmcClearArmed(0, ~0ULL);
++#endif
+   uint64_t Address = 0;
+ 
+   // Reprotect all RWX intervals as writable
+@@ -955,6 +969,8 @@ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uin
+     CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size);
+   }
+ #if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++  // MADEIRA: whole pages in the range hold no translated code now (MadeiraSmcCodeMap.h).
++  FEXCore::Madeira::SmcPagesInvalidated(Address, Size);
+   /* iOS-Madeira ml1207: a sub-floor image (fixed base below 4GB, mapped high) has
+    * two names for every byte, and its code can be compiled under either: at its
+    * low addresses (ml1206 starts it there, absolute pointers lead there) or at
+@@ -1016,11 +1032,19 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
+       }
+       const auto ProtectEnd = std::min(End, Address + Query.Size);
+       const auto Prot = ForWriteLocked ? GetUntrapProt(Address) : GetTrapProt(Address);
+-      auto Protect = [Prot](uint64_t Begin, uint64_t RangeEnd) {
++      auto Protect = [Prot, ForWriteLocked](uint64_t Begin, uint64_t RangeEnd) {
+         void* TmpAddress = reinterpret_cast<void*>(Begin);
+         SIZE_T TmpSize = static_cast<SIZE_T>(RangeEnd - Begin);
+         ULONG TmpProt;
+         NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, Prot, &TmpProt);
++#if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
++        // MADEIRA: after the call, whose own notification clears the flag (MadeiraSmcCodeMap.h).
++        if (ForWriteLocked) {
++          FEXCore::Madeira::SmcClearArmed(Begin, RangeEnd - Begin);
++        } else {
++          FEXCore::Madeira::SmcSetArmed(Begin, RangeEnd - Begin);
++        }
++#endif
+       };
+       if (ForWriteLocked || !HotPagesUsed.load(std::memory_order_acquire)) {
+         Protect(Address, ProtectEnd);
