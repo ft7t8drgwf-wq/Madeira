@@ -7,8 +7,9 @@ device uses one, and English otherwise (a text the catalog lacks stays English).
 
 Checks: the catalog is in the app's resources with its languages; every key is still a
 literal in the app's Swift (so a changed English text is noticed); every key has all five
-languages; links, line breaks and trailing spaces survive translation. Texts with
-interpolations or % are not translated yet (their keys need format specifiers).
+languages; links, line breaks and trailing spaces survive translation. A text with
+interpolations is keyed with %@ for each one (only String interpolations are translated
+this way); its translations use %1$@, %2$@... so the words can move.
 """
 from pathlib import Path
 import json, re, sys
@@ -42,7 +43,8 @@ pattern = re.compile(r'\b(?:Text|Button|Label|Toggle|Section|Picker|navigationTi
 literals = set()
 for swift in app.glob('*.swift'):
     for m in pattern.finditer(swift.read_text(encoding='utf-8')):
-        literals.add(re.sub(r'\\(["\\nt\'])', lambda x: {'n': '\n', 't': '\t'}.get(x.group(1), x.group(1)), m.group(1)))
+        text = re.sub(r'\\\([^()"]*\)', '%@', m.group(1))
+        literals.add(re.sub(r'\\(["\\nt\'])', lambda x: {'n': '\n', 't': '\t'}.get(x.group(1), x.group(1)), text))
 
 strings = catalog['strings']
 stale = [k for k in strings if k not in literals]
@@ -54,7 +56,9 @@ broken = []
 for k, v in strings.items():
     for l in languages:
         t = v['localizations'][l]['stringUnit']['value']
-        if ('](' in k) != ('](' in t) or k.count('\n') != t.count('\n') or k.endswith(' ') != t.endswith(' ') or '%' in t:
+        if ('](' in k) != ('](' in t) or k.count('\n') != t.count('\n') or k.endswith(' ') != t.endswith(' ') or \
+                sorted(re.findall(r'%(\d)\$@', t)) != [str(i + 1) for i in range(k.count('%@'))] or \
+                t.count('%') != k.count('%@'):
             broken.append((k[:30], l))
 check(not broken, 'links, line breaks and trailing spaces survive' + (f' ({broken[:5]})' if broken else ''))
 check(len(strings) >= 600, f'{len(strings)} texts translated')

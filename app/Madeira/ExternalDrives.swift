@@ -427,6 +427,7 @@ struct ExternalDrivesSection: View {
     @State private var dropTarget = false
     @State private var scanning: ExternalFolder?
     @State private var removing: ExternalFolder?
+    private var bundleID: String { Bundle.main.bundleIdentifier ?? "different" }
 
     var body: some View {
         Section {
@@ -462,10 +463,8 @@ struct ExternalDrivesSection: View {
                 // Builds 47 to 60: with these two different, iOS refuses every in-place
                 // folder hand-off (picker, drag and drop, Shortcuts), with no error.
                 Label {
-                    Text("This copy of Madeira is signed with the App ID \(appID), but its bundle ID is "
-                        + "\(Bundle.main.bundleIdentifier ?? "different"). iOS only lets an app open folders on a drive "
-                        + "when the two match. Sign Madeira again with the bundle ID set to \(appID) (in your signer, "
-                        + "usually a Bundle ID or \"use profile's App ID\" option), then add the drive here.")
+                    // One literal, so the catalog translates it (%@ for each interpolation).
+                    Text("This copy of Madeira is signed with the App ID \(appID), but its bundle ID is \(bundleID). iOS only lets an app open folders on a drive when the two match. Sign Madeira again with the bundle ID set to \(appID) (in your signer, usually a Bundle ID or \"use profile's App ID\" option), then add the drive here.")
                         .font(.footnote)
                 } icon: { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
             }
