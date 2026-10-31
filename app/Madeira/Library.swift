@@ -3765,7 +3765,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, gog, itch, library, iniFiles, dllOverrides, advanced
+        case display, controls, launch, compatibility, steam, cloud, gog, itch, library, iniFiles, dllOverrides, mods, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3780,6 +3780,7 @@ struct LibraryDetail: View {
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
             case .dllOverrides: return "DLL overrides"
+            case .mods: return "Mods"
             case .advanced: return "Advanced"
             }
         }
@@ -3797,6 +3798,7 @@ struct LibraryDetail: View {
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
             case .dllOverrides: return "puzzlepiece.extension"
+            case .mods: return "hammer"
             case .advanced: return "wrench.and.screwdriver"
             }
         }
@@ -3812,7 +3814,7 @@ struct LibraryDetail: View {
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
-        let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .advanced]
+        let more: [Page] = entry.desktop == true ? [.dllOverrides, .advanced] : [.library, .iniFiles, .dllOverrides, .mods, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
     }
     /// Steam Workshop is offered unless Steam says the game has none
@@ -3834,6 +3836,9 @@ struct LibraryDetail: View {
             return count == 0 ? nil : count == 1 ? "1 file" : "\(count) files"
         case .dllOverrides:
             let count = DllOverrides.read(config: bcd.configText).entries.count
+            return count == 0 ? nil : "\(count)"
+        case .mods:
+            let count = GameMods.mods(entry.windowsPath).count
             return count == 0 ? nil : "\(count)"
         default: return nil
         }
@@ -3857,6 +3862,7 @@ struct LibraryDetail: View {
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
             case .dllOverrides: GameDllOverridesSection(windowsPath: entry.windowsPath, gameFolder: overridesGameFolder) { reloadBCD() }
+            case .mods: GameModsSection(entry: entry) { reloadBCD() }
             case .advanced: advancedPage
             }
         }
