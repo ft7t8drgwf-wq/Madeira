@@ -26,9 +26,9 @@ folder, and each installer by the name it downloads with:
 
 | Program | List |
 |---|---|
-| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v3) |
+| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v4) |
 | `UbisoftConnectInstaller.exe` | `ubisoft-connect-setup` |
-| `Battle.net\Battle.net Launcher.exe`, `Battle.net.exe` | `battle-net` (v2) |
+| `Battle.net\Battle.net Launcher.exe`, `Battle.net.exe` | `battle-net` (v3) |
 | `Battle.net-Setup.exe` | `battle-net-setup` |
 | `Rockstar Games\Launcher\Launcher.exe` | `rockstar-launcher` (125hz) |
 | `Rockstar-Games-Launcher.exe` | `rockstar-launcher-setup` (125hz) |
@@ -63,6 +63,17 @@ Battle.net's list also turns off Windows' location service
 (`env.WINEDLLOVERRIDES = locationapi=d`), which the client stops on under Wine.
 
 Battle.net's version 2 list works on build 58 (Cameron, 2026-10-31; slow, its window is 32-bit Chromium). Ubisoft Connect's version 3 is not device-tested yet.
+
+Fewer Chromium helpers (Ubisoft v4, Battle.net v3). The band holds eight 4 GB windows,
+and both clients start more 32-bit Chromium helpers than that: on build 58 their
+renderers failed with `BOOT FAILED at stage 'guest-window-reserve'`. Ubisoft's
+picture then only redrew on a minimize and the client quit. Battle.net's main page
+renderer crashed in libcef.dll during a StarCraft install and its replacement could not
+start, which left a blank window while Agent.exe went on. Chromium reads switches from
+the browser process's own command line (upc.exe, Battle.net.exe), so the lists pass
+`--renderer-process-limit=1 --in-process-gpu` through `env.MADEIRA_CHILD_ARGS`, which
+removes the GPU process and the extra renderers. Battle.net's own "Use browser hardware
+acceleration" switch (Settings > App) off is the usual Wine advice too (Wine bug 50637).
 
 ## Library sections
 

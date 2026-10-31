@@ -761,8 +761,15 @@ enum GameRecommendations {
     /// service manager, so the Wine desktop with Windows services first. The swap
     /// file takes the web helper's idle pages. No release delay (madeira-bcd's
     /// 2000 ms): Chromium's allocator reserves, releases and reserves again.
+    /// Version 4 (build 58 log, 2026-10-31): with the hook fixed the window opened,
+    /// then five UplayWebCore.exe helpers found no 4 GB window ("BOOT FAILED at stage
+    /// 'guest-window-reserve'"; the band holds eight), the picture only redrew on a
+    /// minimize and the client quit. upc.exe is the Chromium browser process (it
+    /// starts the UplayWebCore.exe helpers), and Chromium reads switches from the
+    /// process command line, so MADEIRA_CHILD_ARGS gives it one renderer and the GPU
+    /// work inside upc.exe: three to five fewer 32-bit helpers.
     static let ubisoftConnect = GameRecommendation(
-        id: "ubisoft-connect", title: "Ubisoft Connect", version: 3,
+        id: "ubisoft-connect", title: "Ubisoft Connect", version: 4,
         config: """
         # Madeira's recommended settings for Ubisoft Connect.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
@@ -776,6 +783,7 @@ enum GameRecommendations {
         env.MADEIRA_WOW_PLACEHOLDERS = 1
         env.DXMT_SMALL_RINGS = UbisoftConnect.exe;upc.exe;UplayWebCore.exe
         env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_CHILD_ARGS = upc.exe --renderer-process-limit=1 --in-process-gpu
         """,
         fastSync: true, display: "fit", launchMode: "desktop", startServices: true)
 
@@ -800,8 +808,13 @@ enum GameRecommendations {
     /// MADEIRA_WOW_SPILL_CEF), with the Wine desktop with Windows services first for
     /// the Agent's out-of-process COM. Windows' location service is off: the client
     /// stops on it under Wine (Lutris's Battle.net script turns it off the same way).
+    /// Version 3 (build 58 log, 2026-10-31, StarCraft install): ten Battle.net.exe
+    /// renderers found no 4 GB window, the main page's renderer then crashed in
+    /// libcef.dll and its replacement could not start either, so the window went
+    /// blank while Agent.exe kept running. MADEIRA_CHILD_ARGS gives Battle.net.exe
+    /// (the Chromium browser process) one renderer and the GPU work in-process.
     static let battleNet = GameRecommendation(
-        id: "battle-net", title: "Battle.net", version: 2,
+        id: "battle-net", title: "Battle.net", version: 3,
         config: """
         # Madeira's recommended settings for Battle.net.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
@@ -815,6 +828,7 @@ enum GameRecommendations {
         env.DXMT_SMALL_RINGS = Battle.net Launcher.exe;Battle.net.exe;Agent.exe
         env.WINEDLLOVERRIDES = locationapi=d
         env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_CHILD_ARGS = Battle.net.exe --renderer-process-limit=1 --in-process-gpu
         """,
         fastSync: true, display: "fit", launchMode: "desktop", startServices: true)
 

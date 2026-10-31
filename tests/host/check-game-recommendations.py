@@ -333,6 +333,18 @@ assert 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist' in preset
 assert presets['ubisoft-connect']['version'] >= 3 and 'local-write-target = upc.exe;UbisoftConnect.exe;UplayWebCore.exe' in presets['ubisoft-connect']['lines'], \
     'Ubisoft Connect: upc.exe may write into its own code (its API hooks)'
 assert 'env.WINEDLLOVERRIDES = locationapi=d' in presets['battle-net']['lines'], 'Battle.net without Windows\' location service'
+# Build 58 logs (2026-10-31): both clients ran out of 4 GB windows for their Chromium helpers
+# ("BOOT FAILED at stage 'guest-window-reserve'"). Their browser process (upc.exe,
+# Battle.net.exe) gets one renderer and in-process GPU work through MADEIRA_CHILD_ARGS.
+for ident, exe in (('ubisoft-connect', 'upc.exe'), ('battle-net', 'Battle.net.exe')):
+    want = 'env.MADEIRA_CHILD_ARGS = %s --renderer-process-limit=1 --in-process-gpu' % exe
+    assert want in presets[ident]['lines'], (ident, 'fewer Chromium helpers')
+assert presets['ubisoft-connect']['version'] >= 4 and presets['battle-net']['version'] >= 3
+# local-write-target is per game: wineserver reads it again when MADEIRA_CFG_GAME changes.
+mach = (root / 'build/wineserver/mach_ios.c').read_text()
+lwt = mach[mach.index('static int ios_local_write_target'):]
+lwt = lwt[:lwt.index('\n}\n')]
+assert 'getenv( "MADEIRA_CFG_GAME" )' in lwt and 'strncmp( read_for, game' in lwt, 'local-write-target re-read per game'
 # Final Fantasy XIV's launcher is Internet Explorer's engine, not Chromium: the standard line, in the Wine
 # desktop with services first (v2: its InstallShield installer only ran that way on build 48).
 for ident in ('ffxiv-launcher', 'ffxiv-setup'):
