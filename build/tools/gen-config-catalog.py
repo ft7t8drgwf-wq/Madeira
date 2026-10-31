@@ -687,6 +687,14 @@ OVERLAY = {
                         "figure). Below 400 (e.g. 300) Chromium reports critical memory pressure every 5 s and purges "
                         "caches and garbage; 400-999 (e.g. 900), moderate every 10 s. Independent of avail-phys. Set it "
                         "in the game's own file; read at session start."},
+    # Launchers (2026-10-31, virtual_ios.c ios_exe_phys_bytes): Chromium's renderer cap for a CEF browser.
+    "exe-phys-mb": {"category": "Memory & JIT pool", "title": "Memory told to named programs",
+                "kind": "text", "default": "",
+                "note": "Programs and MB, e.g. upc.exe:479;Other.exe:600. Each named program (and nothing else) is told "
+                        "it has N MB of physical memory, total and available. A Chromium browser keeps at most "
+                        "N / 2 / 60 renderers (at least 3), so 479 caps Ubisoft Connect's upc.exe at three renderers "
+                        "when its 32-bit helpers run out of 4 GB windows. Name only the browser process: renderers size "
+                        "V8's heap from the same figure. 64-65536 MB. Set it in the game's own file."},
     "swap-images": {"category": "Memory & JIT pool", "title": "Swap tier: pure-x64 DLLs and programs in the file",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: the sections of pure-x64 images (with env.MADEIRA_X64_IMAGE_NOCOPY = 1: "
