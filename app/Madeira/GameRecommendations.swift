@@ -628,12 +628,17 @@ enum GameRecommendations {
     /// write-protect change logged three lines: 371 MB, 3.6 million lines while
     /// loading, with heavy stutters. The list keeps Madeira's default of no
     /// err:virtual whatever the global settings say, like God of War's.
+    /// Version 3 (iPhone, build 60, 2026-10-31): -XX:TieredStopAtLevel=1 keeps
+    /// Java on its quick C1 compiler. FEX translated half as many blocks by the
+    /// same point (376k vs ~800k: C2's recompiles patch the code cache, and every
+    /// patch re-translates a page), the menus answer faster and play was fine.
+    /// Time to the main menu stayed about the same.
     static let projectZomboid = GameRecommendation(
-        id: "project-zomboid", title: "Project Zomboid", version: 2,
+        id: "project-zomboid", title: "Project Zomboid", version: 3,
         config: """
         # Madeira's recommended settings for Project Zomboid.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
-        env._JAVA_OPTIONS = -XX:-UseZGC -XX:+UseG1GC
+        env._JAVA_OPTIONS = -XX:-UseZGC -XX:+UseG1GC -XX:TieredStopAtLevel=1
         env.WINEDEBUG = err+all,err-virtual,fixme-all
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
