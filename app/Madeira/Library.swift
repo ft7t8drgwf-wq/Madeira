@@ -5189,7 +5189,7 @@ struct OverlayStyleSettings: View {
                     Text("2 s").tag(2.0); Text("4 s").tag(4.0); Text("8 s").tag(8.0)
                 }.pickerStyle(.segmented).frame(maxWidth: 220)
             }
-            Text("1% lows: the frame rate of the slowest 1% of frames in the last ten seconds; 1% highs, the fastest. The graph shows each frame's time, newest on the right; a stall is a plateau as long as the stall.")
+            Text("1% lows: the frame rate of the slowest 1% of frames in the last ten seconds. The graph shows each frame's time, newest on the right; a stall is a plateau as long as the stall.")
                 .font(.caption).foregroundStyle(.secondary)
             Button("Reset overlay style") {
                 layout = "grid"; scale = 1; background = "glass"; opacity = 1; labels = true; colours = false; refresh = 1; graphSeconds = 4
@@ -5706,7 +5706,7 @@ struct LibraryHUD: View {
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
                     ForEach(OverlayStyle.fields, id: \.self) { field in
-                        Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
+                        Toggle(OverlayStyle.title(field), isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
                     }
@@ -5806,6 +5806,9 @@ enum OverlayStyle {
     static let backgrounds: [(id: String, name: String)] = [("glass", "Glass"), ("dark", "Dark"), ("clear", "None")]
     /// The figures the overlay can show, in the order of the menu's switches.
     static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]
+    /// A field's switch label. The field names above are the saved keys, so the
+    /// capitalised "Lows" is only shown, never stored.
+    static func title(_ field: String) -> String { field.replacingOccurrences(of: "% lows", with: "% Lows") }
 }
 
 /// Frame times from the present path (madeira_frame_times_us, Winios.m) and the
@@ -5977,7 +5980,6 @@ struct LibraryMetrics: View {
         if model.overlayFields.contains("1% lows") {
             result.append(Cell(id: "low", label: "1% LOW", value: onePercent.map { String(format: "%.0f", $0.low) } ?? "–", width: 52,
                                tint: onePercent.flatMap { speed($0.low) }))
-            result.append(Cell(id: "high", label: "1% HIGH", value: onePercent.map { String(format: "%.0f", $0.high) } ?? "–", width: 54))
         }
         if model.overlayFields.contains("0.1% lows") {
             result.append(Cell(id: "low01", label: "0.1% LOW", value: pointOneLow.map { String(format: "%.0f", $0) } ?? "–", width: 60,
@@ -6151,7 +6153,7 @@ struct LibraryMetrics: View {
         if model.overlayFields.contains("FPS") { result.append(String(format: "%.0f FPS", fps)) }
         if model.overlayFields.contains("Frame time") { result.append(frameMs.map { String(format: "%.1f ms", $0) } ?? "— ms") }
         if model.overlayFields.contains("1% lows") {
-            result.append(onePercent.map { String(format: "1%% low %.0f, 1%% high %.0f FPS", $0.low, $0.high) } ?? "1% lows —")
+            result.append(onePercent.map { String(format: "1%% low %.0f FPS", $0.low) } ?? "1% lows —")
         }
         if model.overlayFields.contains("0.1% lows") { result.append(pointOneLow.map { String(format: "0.1%% low %.0f FPS", $0) } ?? "0.1% low —") }
         if model.overlayFields.contains("CPU") {
