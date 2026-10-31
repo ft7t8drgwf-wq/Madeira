@@ -767,7 +767,10 @@ enum GameRecommendations {
     /// minimize and the client quit. upc.exe is the Chromium browser process (it
     /// starts the UplayWebCore.exe helpers), and Chromium reads switches from the
     /// process command line, so MADEIRA_CHILD_ARGS gives it one renderer and the GPU
-    /// work inside upc.exe: three to five fewer 32-bit helpers.
+    /// work inside upc.exe. Device log 16:16Z: upc.exe still started a GPU process, so
+    /// Ubisoft's CEF setup seems to ignore its own command line; the line is harmless
+    /// and stays until a log shows otherwise. That run had no failed helpers before
+    /// upc.exe hit the x18 LDRSW crash (fixed in signal_arm64_ios.c).
     static let ubisoftConnect = GameRecommendation(
         id: "ubisoft-connect", title: "Ubisoft Connect", version: 4,
         config: """

@@ -74,6 +74,10 @@ the browser process's own command line (upc.exe, Battle.net.exe), so the lists p
 `--renderer-process-limit=1 --in-process-gpu` through `env.MADEIRA_CHILD_ARGS`, which
 removes the GPU process and the extra renderers. Battle.net's own "Use browser hardware
 acceleration" switch (Settings > App) off is the usual Wine advice too (Wine bug 50637).
+Device logs (2026-10-31): Battle.net.exe took the switches (no GPU process, no failed
+helpers, faster load). upc.exe still started a GPU process, so Ubisoft's CEF setup seems
+to ignore them. Both clients then hit `[x18-emul3] UNRECOGNIZED insn=b9980e5c`
+(wow64.dll's `ldrsw` of WowTebOffset with x18 = 0), which the x18 emulation now handles.
 
 ## Library sections
 
