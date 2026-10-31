@@ -97,7 +97,8 @@ enum MadeiraConfig {
     static var game: String?   // stands in for the file MADEIRA_CFG_GAME names
     @discardableResult static func applyGame(_ text: String?) throws -> [String: String] { game = text; return [:] }
 }
-final class LogStore { static let shared = LogStore(); var lines: [String] = []; func log(_ s: String) { lines.append(s) } }
+enum LogEntry { enum Level { case info, success, error, debug } }
+final class LogStore { static let shared = LogStore(); var lines: [String] = []; func log(_ s: String, level: LogEntry.Level = .info) { lines.append(s) } }
 var published: (Int32, Int32) = (0, 0)
 func winios_display_mode_changed(_ w: Int32, _ h: Int32) { published = (w, h) }
 var vsync: Int32 = -1
