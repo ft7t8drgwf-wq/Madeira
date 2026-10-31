@@ -58,10 +58,65 @@ for name, clsid in (('SpDataKey', '{D9F6EE60-58C9-458B-88E1-2F908FD7F87C}'),
 bridge = (root / 'app/Madeira/WineProcessBridge.m').read_text()
 helper = bridge[bridge.index('static void madeira_link_speech('):]
 helper = helper[:helper.index('\n}\n')]
-assert 'stringByAppendingPathComponent:@"Speech/Common"' in helper and '@"sapi.dll"' in helper, 'Speech\\Common\\sapi.dll is not linked'
+assert '{ "Speech/Common", "sapi.dll" }' in helper, 'Speech\\Common\\sapi.dll is not linked'
+assert '{ "Speech/Engines/TTS", "msttsengine.dll" }' in helper, 'Speech\\Engines\\TTS\\msttsengine.dll is not linked'
 assert 'createSymbolicLinkAtPath:dst withDestinationPath:src' in helper and 'removeItemAtPath:dst' in helper, \
     'the link is not re-made each session (the bundle path changes on reinstall)'
-assert 'madeira_link_speech(fm, prefix, @"system32", dllSource);' in bridge, 'system32\\Speech\\Common is not linked to the session farm'
+assert 'madeira_link_speech(fm, prefix, @"system32", dllSource);' in bridge, 'system32\\Speech is not linked to the session farm'
 farm_list = (root / 'build/wine-pe/farm-modules.txt').read_text().split()
-assert 'sapi' in farm_list, 'build-modules.sh would not rebuild sapi'
+assert 'sapi' in farm_list and 'msttsengine' in farm_list, 'build-modules.sh would not rebuild sapi / msttsengine'
+
+# msttsengine.dll: the engine CLSID the voice token names, packaged like sapi.dll
+assert 'msttsengine.dll' in shipped, 'the voice token names msttsengine, but the farm has no msttsengine.dll'
+eng = PE(shipped['msttsengine.dll'])
+for symbol in ('DllGetClassObject', 'DllCanUnloadNow'):
+    assert eng.exports().get(symbol), 'msttsengine.dll misses ' + symbol
+assert not eng.imports(True), 'msttsengine.dll keeps delay imports'
+missing = {dep for dep in eng.imports() if dep not in shipped and not dep.startswith(('api-ms-', 'ext-ms-'))}
+assert not missing, 'missing msttsengine.dll imports: ' + ', '.join(sorted(missing))
+section = r'[Software\\Classes\\CLSID\\{C64501F6-E6E6-451F-A150-25D0839BC510}\\InprocServer32]'
+assert section in registry, 'missing registration of the TTS engine'
+entry = registry.split(section, 1)[1].split('\n[', 1)[0]
+assert re.search(r'@="C:\\\\windows\\\\system32\\\\Speech\\\\Engines\\\\TTS\\\\msttsengine\.dll"', entry, re.I), \
+    'the TTS engine is not registered at system32\\Speech\\Engines\\TTS\\msttsengine.dll'
+
+# The voice token gets its values (madeira_add_default_voice), on a copy of the template's system.reg.
+import subprocess
+import tempfile
+cut = bridge[bridge.index('/* begin madeira_default_voice (host test cut) */'):
+             bridge.index('/* end madeira_default_voice (host test cut) */')]
+harness = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+""" + cut + r"""
+int main(int argc, char **argv) { int a = madeira_add_default_voice( argv[1] ), b = madeira_add_default_voice( argv[1] );
+    printf( "%d %d\n", a, b ); return !(a == 1 && b == 0); }
+"""
+with tempfile.TemporaryDirectory() as d:
+    d = Path(d)
+    (d / 't.c').write_text(harness)
+    (d / 'system.reg').write_text(registry)
+    (d / 'empty.reg').write_text('WINE REGISTRY Version 2\n')
+    subprocess.run(['cc', '-std=gnu11', '-Wall', '-Werror', '-o', str(d / 't'), str(d / 't.c')], check=True)
+    r = subprocess.run([str(d / 't'), str(d / 'system.reg')], capture_output=True, text=True)
+    assert r.returncode == 0, 'voice token: first call must change the file, the second must not: ' + r.stdout
+    r = subprocess.run([str(d / 't'), str(d / 'empty.reg')], capture_output=True, text=True)
+    assert r.stdout.split() == ['0', '0'], 'a prefix without the token was changed'
+    out = (d / 'system.reg').read_text()
+    assert out.startswith(registry), 'the existing registry text was changed'
+    added = out[len(registry):]
+    for view in ('', 'Wow6432Node\\\\'):
+        key = '[Software\\\\' + view + 'Microsoft\\\\Speech\\\\Voices\\\\Tokens\\\\Wine Default Voice]'
+        assert key in added, 'no token values for view ' + repr(view)
+        body = added.split(key, 1)[1].split('\n\n', 1)[0]
+        assert '@="Wine Default Voice"' in body and '"CLSID"="{C64501F6-E6E6-451F-A150-25D0839BC510}"' in body
+        attrs = added.split(key[:-1] + '\\\\Attributes]', 1)[1].split('\n\n', 1)[0]
+        for line in ('"Age"="Adult"', '"Gender"="Female"', '"Language"="409"', '"Name"="Wine Default Voice"',
+                     '"Vendor"="The Wine Project"'):
+            assert line in attrs, 'attribute missing: ' + line
+    # every added line is a key line, a value line or blank: Wine's registry parser takes it
+    for line in added.splitlines():
+        assert not line or line.startswith('[Software\\\\') or re.match(r'^(@|"[A-Za-z]+")="[^"]*"$', line), line
+assert 'madeira_seed_default_voice( prefix_path );' in bridge, 'the voice token is not seeded at prefix start'
 print('check-sapi: ok')

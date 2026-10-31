@@ -680,6 +680,76 @@ static void madeira_unique_machine_guid( const char *prefix_path, int fresh_seed
         close( open( marker, O_WRONLY | O_CREAT, 0644 ) );
 }
 
+/* begin madeira_default_voice (host test cut) */
+/* SAPI's voice token for Wine's TTS engine. Wine's sapi.rgs creates
+ * HKLM\Software\Microsoft\Speech\Voices\Tokens\Wine Default Voice\Attributes with
+ * no values, so System.Speech's VoiceInfo for it has a null Name, Culture and
+ * Gender. Grounded's narration (SpeechSynthWrapper.SetPreferredVoice, on System.Speech
+ * in Wine Mono) then threw a NullReferenceException while the game loaded (build 51,
+ * 2026-10-31 01:33), which nothing caught, and the game froze on the loading screen.
+ * This gives the token what a Windows voice token has: a default value, the engine's
+ * CLSID (msttsengine, registered at Speech\Engines\TTS\msttsengine.dll) and the
+ * Name/Gender/Age/Language/Vendor attributes, in the 64-bit and the 32-bit view.
+ * Appended sections merge into the existing keys when wineserver loads the file.
+ * Returns 1 when the file was changed, 0 when it has the values already or there is
+ * no such token, -1 when the write failed. */
+static int madeira_add_default_voice( const char *path )
+{
+    static const char NAME_VALUE[] = "\"Name\"=\"Wine Default Voice\"";
+    static const char *const views[] = { "", "Wow6432Node\\\\" };
+    FILE *f = fopen( path, "rb" );
+    char *buf;
+    long n;
+    size_t got, i;
+    int ok;
+
+    if (!f) return 0;
+    fseek( f, 0, SEEK_END ); n = ftell( f ); fseek( f, 0, SEEK_SET );
+    if (n <= 0 || n > (64 << 20)) { fclose( f ); return 0; }
+    if (!(buf = malloc( (size_t)n + 1 ))) { fclose( f ); return -1; }
+    got = fread( buf, 1, (size_t)n, f );
+    fclose( f );
+    if (got != (size_t)n) { free( buf ); return -1; }
+    buf[n] = 0;
+    /* only a prefix that has Wine's token (sapi registered), and only once */
+    ok = strstr( buf, "Speech\\\\Voices\\\\Tokens\\\\Wine Default Voice\\\\Attributes]" ) && !strstr( buf, NAME_VALUE );
+    free( buf );
+    if (!ok) return 0;
+
+    if (!(f = fopen( path, "ab" ))) return -1;
+    ok = 1;
+    for (i = 0; i < sizeof(views) / sizeof(views[0]); i++)
+    {
+        if (fprintf( f, "\n[Software\\\\%sMicrosoft\\\\Speech\\\\Voices\\\\Tokens\\\\Wine Default Voice] 1776969660\n"
+                        "@=\"Wine Default Voice\"\n"
+                        "\"CLSID\"=\"{C64501F6-E6E6-451F-A150-25D0839BC510}\"\n"
+                        "\n[Software\\\\%sMicrosoft\\\\Speech\\\\Voices\\\\Tokens\\\\Wine Default Voice\\\\Attributes] 1776969660\n"
+                        "\"Age\"=\"Adult\"\n"
+                        "\"Gender\"=\"Female\"\n"
+                        "\"Language\"=\"409\"\n"
+                        "%s\n"
+                        "\"Vendor\"=\"The Wine Project\"\n",
+                     views[i], views[i], NAME_VALUE ) < 0) ok = 0;
+    }
+    if (fclose( f ) != 0) ok = 0;
+    return ok ? 1 : -1;
+}
+/* end madeira_default_voice (host test cut) */
+
+static void madeira_seed_default_voice( const char *prefix_path )
+{
+    char reg[PATH_MAX], marker[PATH_MAX];
+    int r;
+
+    if (snprintf( reg, sizeof(reg), "%s/system.reg", prefix_path ) >= (int)sizeof(reg) ||
+        snprintf( marker, sizeof(marker), "%s/.madeira-voice-token-1", prefix_path ) >= (int)sizeof(marker)) return;
+    if (access( marker, F_OK ) == 0) return;   /* skip the 3.7 MB read on every later start */
+    r = madeira_add_default_voice( reg );
+    if (r > 0) LOG( "speech: gave SAPI's Wine Default Voice a name, language, gender and engine" );
+    else if (r < 0) LOG( "speech: could not add the voice token's values to %{public}s", reg );
+    if (r >= 0) close( open( marker, O_WRONLY | O_CREAT, 0644 ) );
+}
+
 void madeira_seed_prefix_if_needed(const char *prefix_path) {
     @autoreleasepool {
         if (!prefix_path) return;
@@ -716,6 +786,7 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
          * the registry, then the (now scoped) ml581 legacy cleanup. */
         madeira_repair_profile( prefix );
         madeira_unique_machine_guid( prefix_path, fresh_seed );
+        madeira_seed_default_voice( prefix_path );
         extern void madeira_browser_register(const char *prefix);
         madeira_browser_register(prefix.UTF8String);
         /* ml581: see madeira_undo_appdata_skeleton() above. */
@@ -880,24 +951,33 @@ static void madeira_link_wbem(NSFileManager *fm, NSString *prefix, NSString *sys
 /* <system_dir>\Speech\Common\sapi.dll: the prefix registers every SAPI class
  * (SpVoice, SpObjectTokenCategory, SpDataKey, SpMMAudioOut ...) there, the way
  * Windows lays it out, but the farm is flat, so CoCreateInstance failed with
- * REGDB_E_CLASSNOTREG (0x80040154). Grounded's narration (SpeechSynthWrapper.dll
+ * REGDB_E_CLASSNOTREG (0x80040154); msttsengine.dll, the engine of the voice token
+ * (madeira_add_default_voice), the same at Speech\Engines\TTS. Grounded's narration (SpeechSynthWrapper.dll
  * on System.Speech in Wine Mono) creates SpDataKey while the game loads; the
  * COMException went unhandled, the game started tearing down, its RHIThread
  * hit a freed object and the game froze on the loading screen. */
 static void madeira_link_speech(NSFileManager *fm, NSString *prefix, NSString *system_dir, NSString *source)
 {
-    NSString *dir = [[[prefix stringByAppendingPathComponent:@"drive_c/windows"]
-                        stringByAppendingPathComponent:system_dir] stringByAppendingPathComponent:@"Speech/Common"];
-    NSString *src = [source stringByAppendingPathComponent:@"sapi.dll"];
-    NSString *dst = [dir stringByAppendingPathComponent:@"sapi.dll"];
-    BOOL linked = NO;
+    /* sapi.dll and the TTS engine its voice token names, where the prefix registers them */
+    static const char * const files[][2] = { { "Speech/Common", "sapi.dll" },
+                                             { "Speech/Engines/TTS", "msttsengine.dll" } };
+    NSString *speech = [[prefix stringByAppendingPathComponent:@"drive_c/windows"] stringByAppendingPathComponent:system_dir];
 
-    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    [fm removeItemAtPath:dst error:nil];
-    if ([fm fileExistsAtPath:src])
-        linked = [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil];
-    dprintf(STDERR_FILENO, "[WineProc] %s\\Speech\\Common\\sapi.dll: %s\n", system_dir.UTF8String,
-            linked ? "linked" : "not in this farm");
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+    {
+        NSString *dir = [speech stringByAppendingPathComponent:[NSString stringWithUTF8String:files[i][0]]];
+        NSString *name = [NSString stringWithUTF8String:files[i][1]];
+        NSString *src = [source stringByAppendingPathComponent:name];
+        NSString *dst = [dir stringByAppendingPathComponent:name];
+        BOOL linked = NO;
+
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm removeItemAtPath:dst error:nil];
+        if ([fm fileExistsAtPath:src])
+            linked = [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil];
+        dprintf(STDERR_FILENO, "[WineProc] %s\\%s\\%s: %s\n", system_dir.UTF8String, files[i][0], files[i][1],
+                linked ? "linked" : "not in this farm");
+    }
 }
 
 static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
