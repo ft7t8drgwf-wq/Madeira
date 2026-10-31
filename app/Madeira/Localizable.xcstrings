@@ -2101,6 +2101,34 @@
         }
       }
     },
+    "Check these before applying a setup from someone you don't know.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfe das, bevor du eine Einrichtung von jemandem anwendest, den du nicht kennst."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revisa esto antes de aplicar una configuración de alguien que no conoces."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confira isto antes de aplicar uma configuração de alguém que você não conhece."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Проверьте это, прежде чем применять настройку от незнакомого человека."
+          }
+        }
+      }
+    },
     "Checked the game's files, anti-cheat, memory and free space.": {
       "localizations": {
         "de": {
@@ -2853,6 +2881,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "Совместимость и производительность"
+          }
+        }
+      }
+    },
+    "Config lines": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Konfigurationszeilen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Líneas de configuración"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linhas de configuração"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Строки конфигурации"
           }
         }
       }
@@ -17805,6 +17861,34 @@
           "stringUnit": {
             "state": "translated",
             "value": "Добро пожаловать в Madeira"
+          }
+        }
+      }
+    },
+    "What it changes": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Was sich ändert"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Qué cambia"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O que muda"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Что изменится"
           }
         }
       }
