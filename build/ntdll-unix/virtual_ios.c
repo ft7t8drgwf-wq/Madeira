@@ -34883,6 +34883,33 @@ NTSTATUS WINAPI NtUnlockVirtualMemory( HANDLE process, PVOID *addr, SIZE_T *size
 }
 
 
+/* madeira-bcd: a failing NtCreateSection / NtMapViewOfSection(Ex) is logged
+ * with its status and the file's path, so a Chromium child's "Couldn't mmap
+ * icu data file" names the call that failed (Garry's Mod). Failures are rare;
+ * STATUS_CONFLICTING_ADDRESSES (a loader trying its preferred base) is skipped
+ * and the log stops after 200 lines. MADEIRA_MAP_FAIL_LOG=0 turns it off. */
+void ios_map_fail_note( const char *what, unsigned int status, HANDLE handle,
+                        const void *addr, ULONGLONG size, ULONG protect, ULONG flags )
+{
+    static int count;
+    const char *env;
+    char path[PATH_MAX] = "?";
+    int fd = -1, needs_close = 0;
+
+    if (NT_SUCCESS(status) || status == STATUS_CONFLICTING_ADDRESSES) return;
+    if ((env = getenv( "MADEIRA_MAP_FAIL_LOG" )) && env[0] == '0') return;
+    if (__atomic_add_fetch( &count, 1, __ATOMIC_RELAXED ) > 200) return;
+    if (handle && !server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL ))
+    {
+        if (fcntl( fd, F_GETPATH, path ) == -1) strcpy( path, "?" );
+        if (needs_close) close( fd );
+    }
+    dprintf( STDERR_FILENO, "[map-fail] %s status=%08x pid=%04x wow64=%d handle=%p addr=%p size=0x%llx prot=0x%x flags=0x%x path=%s\n",
+             what, status, (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ), is_wow64(),
+             handle, addr, (unsigned long long)size, (unsigned int)protect, (unsigned int)flags, path );
+}
+
+
 /***********************************************************************
  *             NtMapViewOfSection   (NTDLL.@)
  *             ZwMapViewOfSection   (NTDLL.@)
@@ -34956,8 +34983,10 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
         return result.map_view.status;
     }
 
-    return virtual_map_section( handle, addr_ptr, 0, get_zero_bits_limit( zero_bits ), commit_size,
-                                offset_ptr, size_ptr, alloc_type, protect, 0 );
+    res = virtual_map_section( handle, addr_ptr, 0, get_zero_bits_limit( zero_bits ), commit_size,
+                               offset_ptr, size_ptr, alloc_type, protect, 0 );
+    ios_map_fail_note( "NtMapViewOfSection", res, handle, *addr_ptr, *size_ptr, protect, alloc_type );
+    return res;
 }
 
 /***********************************************************************
@@ -35032,8 +35061,10 @@ NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr
         return result.map_view_ex.status;
     }
 
-    return virtual_map_section( handle, addr_ptr, limit_low, limit_high, 0,
-                                offset_ptr, size_ptr, alloc_type, protect, machine );
+    status = virtual_map_section( handle, addr_ptr, limit_low, limit_high, 0,
+                                  offset_ptr, size_ptr, alloc_type, protect, machine );
+    ios_map_fail_note( "NtMapViewOfSectionEx", status, handle, *addr_ptr, *size_ptr, protect, alloc_type );
+    return status;
 }
 
 

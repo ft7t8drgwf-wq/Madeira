@@ -277,6 +277,14 @@ for src in $WINE_SRC/dlls/ntdll/unix/*.c; do
             if [ "$(grep -c 'handle = ios_default_keyed_event()' "$OBJ_DIR/sync_ios.c")" != 2 ]; then
                 echo "  sync: keyed-event patch did not apply"; exit 1
             fi
+            # A failing NtCreateSection is logged by ios_map_fail_note (virtual_ios.c)
+            # with its status and file path; MADEIRA_MAP_FAIL_LOG=0 turns it off.
+            perl -0pi -e 's/(NTSTATUS WINAPI NtCreateSection\()/void ios_map_fail_note( const char *what, unsigned int status, HANDLE handle, const void *addr, ULONGLONG size, ULONG protect, ULONG flags );\n$1/;
+                          s/(NTSTATUS WINAPI NtCreateSection\(.*?free\( objattr \);\n)(    return ret;)/$1    ios_map_fail_note( "NtCreateSection", ret, file, NULL, size ? size->QuadPart : 0, protect, sec_flags );\n$2/s' \
+                "$OBJ_DIR/sync_ios.c"
+            if [ "$(grep -c 'ios_map_fail_note( "NtCreateSection"' "$OBJ_DIR/sync_ios.c")" != 1 ]; then
+                echo "  sync: map-fail patch did not apply"; exit 1
+            fi
             # MADEIRA_THREAD_QOS (thread_ios.c): ios_eco_apply_self sets a guest
             # thread's QoS through madeira_guest_qos_self, which picks the class
             # given for the thread's name; with the variable unset it passes through.
