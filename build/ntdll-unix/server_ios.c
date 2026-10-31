@@ -661,6 +661,7 @@ static BOOL read_reply_data( void *buffer, size_t size )
 extern void *ios_jit_rx_base_global, *ios_jit_rw_base_global;
 extern size_t ios_jit_pool_size_global;
 extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t addr );
+extern int ios_jit_pool_hole_va( uintptr_t va );
 extern void ios_jit_anon_alias_note_write( unsigned long long addr );
 
 #define IOS_REPLY_PAGE 0x1000   /* guest page: pool ranges and anonymous-RWX aliases are multiples of it */
@@ -671,7 +672,8 @@ static uintptr_t ios_reply_rw_alias( uintptr_t addr )
     uintptr_t rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
     size_t size = ios_jit_pool_size_global;
 
-    if (rx && rw && size && addr >= rx && addr - rx < size) return rw + (addr - rx);
+    /* a split pool's hole is inside the span but has no alias (host thread stacks live there) */
+    if (rx && rw && size && addr >= rx && addr - rx < size) return ios_jit_pool_hole_va( addr ) ? 0 : rw + (addr - rx);
     return ios_jit_anon_alias_lookup( addr );
 }
 

@@ -151,6 +151,7 @@ static pthread_mutex_t ios_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static int notes, mono_retired;
 static uint64_t last_mono_retired;
 void ios_jit_anon_alias_note_write( unsigned long long addr ) { (void)addr; notes++; }
+static int ios_jit_pool_hole_va( uintptr_t va ) { (void)va; return 0; }   /* no split pool here (check-reply-pool-hole.py) */
 static void ios_mono_alias_retire( uint64_t guest_rx ) { mono_retired++; last_mono_retired = guest_rx; }
 static int virtual_mutex, use_kernel_writewatch;
 static void server_enter_uninterrupted_section( int *m, sigset_t *s ) { (void)m; (void)s; }
