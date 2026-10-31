@@ -14428,9 +14428,12 @@ static void ios_vh_dump( const void *addr )
  *
  * Deletes a view. virtual_mutex must be held by caller.
  */
+static void ios_smc_view_gone( const void *base, size_t size );
+
 static void delete_view( struct file_view *view ) /* [in] View */
 {
     ios_vh_note( 'd', view );   /* madeira-bcd: view history */
+    if (view->ios_flags & IOS_VIEW_X64_PLAIN) ios_smc_view_gone( view->base, view->size );   /* [smc-emu] */
     /* ml989: entered BEFORE any field of `view` is read, so "call never
      * entered" is distinguishable from "died reading the view". */
     if (ios_retire_trace_armed) ios_retire_mark( "D0>\n" );
@@ -17198,17 +17201,283 @@ static void ios_x64_note_image( const void *base, const UNICODE_STRING *nt_name 
                                       : "still pool-aliased (MADEIRA_X64_RWX_PLAIN=0)" );
 }
 
+static void ios_smc_forget_peb( void *peb );
+
 static void ios_x64_rwx_plain_forget( void *peb )
 {
     int i;
 
     if (!peb) return;
+    ios_smc_forget_peb( peb );
     for (i = 0; i < IOS_X64_RWX_PLAIN_MAX; i++)
     {
         void *want = peb;
         __atomic_compare_exchange_n( &ios_x64_rwx_plain_pebs[i], &want, NULL, 0,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE );
     }
+}
+
+/* [smc-emu]: a write into a FEX write-trapped page of a plain [x64-rwx] view
+ * that touches no translated code is completed here, through a second mapping
+ * of the page, and the page stays trapped. Before, every such write sent FEX
+ * through the whole SMC path: invalidate every block of the 16 KB page, untrap
+ * it, translate it all again, trap it again. HotSpot writes new code and data
+ * next to code it runs all the time: Project Zomboid did 658,000 translations
+ * before its main menu (build 50).
+ *
+ * FEX registers its code map per process (fex-patches/0006, NtQueryVirtualMemory
+ * class 1007; layout = FEXCore/Utils/MadeiraSmcCodeMap.h). A slot names one
+ * 16 KB page, one bit per 64 bytes that the decoder has read as code, and an
+ * "armed" flag set while FEX itself write-protects the page. The handler checks
+ * the map, stores, fences and checks again: the decoder marks bytes, fences and
+ * only then reads them, so either it sees the new bytes or the handler sees the
+ * mark and sends the fault to FEX as before (FEX re-runs the store).
+ * MADEIRA_SMC_WRITE_EMULATE=0 (read by FEX) leaves the map unregistered. */
+struct ios_smc_code_slot { uint64_t page, flags, bits[4]; };
+struct ios_smc_code_map { uint32_t magic, slot_count; uint64_t reserved; struct ios_smc_code_slot slots[]; };
+#define IOS_SMC_MAGIC     0x31434d53u
+#define IOS_SMC_SLOTS     8192u
+#define IOS_SMC_PAGE      0x4000u
+#define IOS_SMC_ARMED     1u
+#define IOS_SMC_MAPS      16
+#define IOS_SMC_RANGES    64
+#define IOS_SMC_ALIASES   64
+#define IOS_SMC_BURST     64       /* stores into one page within IOS_SMC_BURST_TICKS, then FEX's path */
+#define IOS_SMC_BURST_TICKS 48000  /* 2 ms of the 24 MHz counter */
+
+static struct { void *peb; struct ios_smc_code_map *map; } ios_smc_maps[IOS_SMC_MAPS];
+static struct { uintptr_t base, end; void *peb; } ios_smc_ranges[IOS_SMC_RANGES];
+static struct { uintptr_t page, alias; uint64_t window; unsigned n; } ios_smc_alias_cache[IOS_SMC_ALIASES];
+static pthread_mutex_t ios_smc_alias_mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile unsigned long ios_smc_emulated, ios_smc_refused;
+
+static NTSTATUS ios_smc_register_map( void *map_ptr )
+{
+    struct ios_smc_code_map *map = map_ptr;
+    void *peb = ios_jit_current_peb(), *none;
+    int i;
+
+    if (!map || !peb || map->magic != IOS_SMC_MAGIC || map->slot_count != IOS_SMC_SLOTS)
+        return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < IOS_SMC_MAPS; i++)
+        if (__atomic_load_n( &ios_smc_maps[i].peb, __ATOMIC_ACQUIRE ) == peb)
+        {
+            __atomic_store_n( &ios_smc_maps[i].map, map, __ATOMIC_RELEASE );
+            return STATUS_SUCCESS;
+        }
+    for (i = 0; i < IOS_SMC_MAPS; i++)
+    {
+        none = NULL;
+        if (__atomic_compare_exchange_n( &ios_smc_maps[i].peb, &none, (void *)1, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+        {
+            __atomic_store_n( &ios_smc_maps[i].map, map, __ATOMIC_RELAXED );
+            __atomic_store_n( &ios_smc_maps[i].peb, peb, __ATOMIC_RELEASE );
+            dprintf( 2, "[smc-emu] code map %p registered for peb=%p\n", map_ptr, peb );
+            return STATUS_SUCCESS;
+        }
+    }
+    dprintf( 2, "[smc-emu] code map table full, peb=%p keeps FEX's path\n", peb );
+    return STATUS_NO_MEMORY;
+}
+
+/* Plain views, so the fault handler needs neither the view tree nor its lock. */
+static void ios_smc_plain_add( const void *base, size_t size, void *peb )
+{
+    int i;
+    uintptr_t none;
+
+    if (!peb) return;
+    for (i = 0; i < IOS_SMC_RANGES; i++)
+    {
+        none = 0;
+        if (__atomic_compare_exchange_n( &ios_smc_ranges[i].base, &none, (uintptr_t)base, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE ))
+        {
+            ios_smc_ranges[i].peb = peb;
+            __atomic_store_n( &ios_smc_ranges[i].end, (uintptr_t)base + size, __ATOMIC_RELEASE );
+            return;
+        }
+    }
+}
+
+static void ios_smc_plain_remove( const void *base, size_t size )
+{
+    uintptr_t b = (uintptr_t)base, e = b + size;
+    int i;
+
+    for (i = 0; i < IOS_SMC_RANGES; i++)
+    {
+        uintptr_t rb = __atomic_load_n( &ios_smc_ranges[i].base, __ATOMIC_ACQUIRE );
+        uintptr_t re = __atomic_load_n( &ios_smc_ranges[i].end, __ATOMIC_ACQUIRE );
+        if (!rb || !re || re <= b || rb >= e) continue;
+        __atomic_store_n( &ios_smc_ranges[i].end, 0, __ATOMIC_RELEASE );
+        __atomic_store_n( &ios_smc_ranges[i].base, 0, __ATOMIC_RELEASE );
+    }
+}
+
+static void ios_smc_forget_peb( void *peb )
+{
+    int i;
+
+    for (i = 0; i < IOS_SMC_MAPS; i++)
+        if (__atomic_load_n( &ios_smc_maps[i].peb, __ATOMIC_ACQUIRE ) == peb)
+        {
+            __atomic_store_n( &ios_smc_maps[i].map, NULL, __ATOMIC_RELEASE );
+            __atomic_store_n( &ios_smc_maps[i].peb, NULL, __ATOMIC_RELEASE );
+        }
+    for (i = 0; i < IOS_SMC_RANGES; i++)
+        if (__atomic_load_n( &ios_smc_ranges[i].peb, __ATOMIC_ACQUIRE ) == peb)
+        {
+            __atomic_store_n( &ios_smc_ranges[i].end, 0, __ATOMIC_RELEASE );
+            __atomic_store_n( &ios_smc_ranges[i].base, 0, __ATOMIC_RELEASE );
+        }
+}
+
+static struct ios_smc_code_map *ios_smc_map_for( uintptr_t addr )
+{
+    void *peb = NULL;
+    int i;
+
+    for (i = 0; i < IOS_SMC_RANGES && !peb; i++)
+    {
+        uintptr_t rb = __atomic_load_n( &ios_smc_ranges[i].base, __ATOMIC_ACQUIRE );
+        uintptr_t re = __atomic_load_n( &ios_smc_ranges[i].end, __ATOMIC_ACQUIRE );
+        if (rb && addr >= rb && addr < re) peb = ios_smc_ranges[i].peb;
+    }
+    if (!peb) return NULL;
+    for (i = 0; i < IOS_SMC_MAPS; i++)
+        if (__atomic_load_n( &ios_smc_maps[i].peb, __ATOMIC_ACQUIRE ) == peb)
+            return __atomic_load_n( &ios_smc_maps[i].map, __ATOMIC_ACQUIRE );
+    return NULL;
+}
+
+/* [addr, addr + len) lies in one 16 KB page that FEX trapped and holds no
+ * translated code. Called before and after the store. */
+int ios_smc_write_ok( uintptr_t addr, size_t len )
+{
+    struct ios_smc_code_map *map;
+    struct ios_smc_code_slot *slot;
+    uintptr_t page = addr & ~(uintptr_t)(IOS_SMC_PAGE - 1);
+    unsigned g, g_end;
+    uint64_t bits[4];
+
+    if (!len || len > IOS_SMC_PAGE || ((addr + len - 1) & ~(uintptr_t)(IOS_SMC_PAGE - 1)) != page) return 0;
+    if (!(map = ios_smc_map_for( addr ))) return 0;
+    slot = &map->slots[(page / IOS_SMC_PAGE) % IOS_SMC_SLOTS];
+    if (__atomic_load_n( &slot->page, __ATOMIC_ACQUIRE ) != page) return 0;
+    if (!(__atomic_load_n( &slot->flags, __ATOMIC_ACQUIRE ) & IOS_SMC_ARMED)) return 0;
+    for (g = 0; g < 4; g++) bits[g] = __atomic_load_n( &slot->bits[g], __ATOMIC_ACQUIRE );
+    if (__atomic_load_n( &slot->page, __ATOMIC_ACQUIRE ) != page) return 0;
+    g_end = (unsigned)((addr + len - 1 - page) / 64);
+    for (g = (unsigned)((addr - page) / 64); g <= g_end; g++)
+        if (bits[g / 64] & (1ull << (g % 64))) return 0;
+    return 1;
+}
+
+static uint64_t ios_smc_ticks( void )
+{
+    uint64_t t;
+    __asm__ volatile( "mrs %0, cntvct_el0" : "=r"(t) );
+    return t;
+}
+
+/* A writable second mapping of addr's 16 KB page (vm_remap, copy=FALSE: the
+ * same memory), cached per page; 0 when it cannot be made, or when the page took
+ * IOS_SMC_BURST stores within 2 ms (a bulk copy: one trip through FEX's path
+ * untraps the page and the copy runs natively). */
+uintptr_t ios_smc_alias( uintptr_t addr )
+{
+    uintptr_t page = addr & ~(uintptr_t)(IOS_SMC_PAGE - 1), result = 0;
+    unsigned idx = (unsigned)((page / IOS_SMC_PAGE) % IOS_SMC_ALIASES);
+    uint64_t now = ios_smc_ticks();
+
+    pthread_mutex_lock( &ios_smc_alias_mutex );
+    if (ios_smc_alias_cache[idx].page != page)
+    {
+        mach_vm_address_t target = 0;
+        vm_prot_t cur = 0, max = 0;
+        kern_return_t kr;
+
+        if (ios_smc_alias_cache[idx].alias)
+            mach_vm_deallocate( mach_task_self(), ios_smc_alias_cache[idx].alias, IOS_SMC_PAGE );
+        ios_smc_alias_cache[idx].page = ios_smc_alias_cache[idx].alias = 0;
+        kr = mach_vm_remap( mach_task_self(), &target, IOS_SMC_PAGE, 0, VM_FLAGS_ANYWHERE,
+                            mach_task_self(), page, FALSE, &cur, &max, VM_INHERIT_NONE );
+        if (kr == KERN_SUCCESS &&
+            mach_vm_protect( mach_task_self(), target, IOS_SMC_PAGE, FALSE,
+                             VM_PROT_READ | VM_PROT_WRITE ) != KERN_SUCCESS)
+        {
+            mach_vm_deallocate( mach_task_self(), target, IOS_SMC_PAGE );
+            kr = KERN_PROTECTION_FAILURE;
+        }
+        if (kr != KERN_SUCCESS)
+        {
+            static unsigned failed;
+            if (failed++ < 8)
+                dprintf( 2, "[smc-emu] no second mapping for %p: kr=%d max=%d\n", (void *)page, kr, max );
+            goto done;
+        }
+        ios_smc_alias_cache[idx].page = page;
+        ios_smc_alias_cache[idx].alias = (uintptr_t)target;
+        ios_smc_alias_cache[idx].window = now;
+        ios_smc_alias_cache[idx].n = 0;
+    }
+    if (now - ios_smc_alias_cache[idx].window > IOS_SMC_BURST_TICKS)
+    {
+        ios_smc_alias_cache[idx].window = now;
+        ios_smc_alias_cache[idx].n = 0;
+    }
+    if (++ios_smc_alias_cache[idx].n > IOS_SMC_BURST)
+    {
+        ios_smc_alias_cache[idx].n = 0;
+        ios_smc_alias_cache[idx].window = now;
+        goto done;
+    }
+    result = ios_smc_alias_cache[idx].alias + (addr - page);
+done:
+    pthread_mutex_unlock( &ios_smc_alias_mutex );
+    return result;
+}
+
+/* The page's memory was replaced under the cached mapping (a decommit or the
+ * swap tier): drop it, the next store makes a new one. */
+void ios_smc_alias_drop( uintptr_t addr )
+{
+    uintptr_t page = addr & ~(uintptr_t)(IOS_SMC_PAGE - 1);
+    unsigned idx = (unsigned)((page / IOS_SMC_PAGE) % IOS_SMC_ALIASES);
+
+    pthread_mutex_lock( &ios_smc_alias_mutex );
+    if (ios_smc_alias_cache[idx].page == page)
+    {
+        mach_vm_deallocate( mach_task_self(), ios_smc_alias_cache[idx].alias, IOS_SMC_PAGE );
+        ios_smc_alias_cache[idx].page = ios_smc_alias_cache[idx].alias = 0;
+    }
+    pthread_mutex_unlock( &ios_smc_alias_mutex );
+}
+
+static void ios_smc_view_gone( const void *base, size_t size )
+{
+    uintptr_t b = (uintptr_t)base, e = b + size;
+    unsigned i;
+
+    ios_smc_plain_remove( base, size );
+    pthread_mutex_lock( &ios_smc_alias_mutex );
+    for (i = 0; i < IOS_SMC_ALIASES; i++)
+        if (ios_smc_alias_cache[i].page >= b && ios_smc_alias_cache[i].page < e)
+        {
+            mach_vm_deallocate( mach_task_self(), ios_smc_alias_cache[i].alias, IOS_SMC_PAGE );
+            ios_smc_alias_cache[i].page = ios_smc_alias_cache[i].alias = 0;
+        }
+    pthread_mutex_unlock( &ios_smc_alias_mutex );
+}
+
+void ios_smc_note( int emulated )
+{
+    unsigned long n = __atomic_add_fetch( emulated ? &ios_smc_emulated : &ios_smc_refused, 1, __ATOMIC_RELAXED );
+    if (emulated && (n == 1 || n == 1000 || !(n % 100000)))
+        dprintf( 2, "[smc-emu] %lu stores completed without invalidating code, %lu sent to FEX after the store\n",
+                 n, (unsigned long)ios_smc_refused );
 }
 
 /* Every view the host-page rounded range touches is already plain, or none is
@@ -17239,6 +17508,7 @@ static int ios_x64_rwx_is_host_data( uintptr_t b, uintptr_t e )
         {
             static unsigned x64_views;
             view->ios_flags |= IOS_VIEW_X64_PLAIN;
+            ios_smc_plain_add( view->base, view->size, ios_jit_current_peb() );
             if (x64_views++ < 32 && !ios_in_mach_exc)
                 dprintf( 2, "[x64-rwx] view %p+0x%lx (allocated %c%c%c) is plain read/write from now on\n",
                          view->base, (unsigned long)view->size,
@@ -34596,6 +34866,7 @@ static unsigned int get_memory_image_info( HANDLE process, LPCVOID addr, MEMORY_
  * {low base, real base, size}. Used by PE-side RtlLookupFunctionTable
  * (wine/dlls/ntdll/unwind.c), which keeps the same value. */
 #define MemoryWineIosSubfloorWindow ((MEMORY_INFORMATION_CLASS)1006)
+#define MemoryWineIosSmcCodeMap ((MEMORY_INFORMATION_CLASS)1007)   /* fex-patches/0006 */
 
 /***********************************************************************
  *             NtQueryVirtualMemory   (NTDLL.@)
@@ -34608,6 +34879,12 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
     NTSTATUS status;
 
 #ifdef WINE_IOS
+    if (info_class == MemoryWineIosSmcCodeMap)   /* [smc-emu]: FEX hands over its code map */
+    {
+        if (process != NtCurrentProcess()) return STATUS_INVALID_INFO_CLASS;
+        if (res_len) *res_len = 0;
+        return ios_smc_register_map( (void *)addr );
+    }
     if (info_class == MemoryWineIosSubfloorWindow)
     {
         extern int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *real,

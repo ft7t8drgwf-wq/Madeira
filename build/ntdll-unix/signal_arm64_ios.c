@@ -1866,6 +1866,25 @@ static int ios_alias_write_is_trapped( uintptr_t addr )
     return prot >= 0 && !(prot & PROT_WRITE);
 }
 
+/* [smc-emu]: the stores a write into a trapped plain page may be completed for
+ * (ios_alias_write checks the map again after them): ordinary and
+ * store-release register and pair stores, GPR or SIMD. Atomics, exclusives and
+ * everything else take FEX's path; running one of those twice is not harmless. */
+static int ios_smc_store_insn( uint32_t insn )
+{
+    unsigned v = (insn >> 26) & 1, opc = (insn >> 22) & 3;
+    int store = v ? (opc == 0 || opc == 2) : opc == 0;
+
+    if ((insn & 0x3ffffc00u) == 0x089ffc00u) return 1;                  /* STLR, STLRB, STLRH */
+    if ((insn & 0x3fe00c00u) == 0x19000000u) return 1;                  /* STLUR* (LRCPC2) */
+    if ((insn & 0x3b000000u) == 0x39000000u) return store;              /* unsigned offset */
+    if ((insn & 0x3b200000u) == 0x38000000u) return store;              /* imm9: unscaled, pre, post */
+    if ((insn & 0x3b200c00u) == 0x38200800u) return store;              /* register offset */
+    if ((insn & 0x3a000000u) == 0x28000000u)                            /* pairs */
+        return !((insn >> 22) & 1) && ((insn >> 30) & 3) != 3;
+    return 0;
+}
+
 /* Adjacent guest pages need not occupy adjacent pool slots. Validate every
  * fragment before writing anything, then route each through its own alias.
  * Only ordinary stores use this; atomic RMW operations must remain atomic. */
@@ -1873,9 +1892,13 @@ static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uin
                             int honor_guest_prot )
 {
     enum { PAGE = 0x4000, MAX_STORE = 32 };
-    uintptr_t destinations[2];
+    extern int ios_smc_write_ok( uintptr_t addr, size_t len );   /* virtual_ios.c [smc-emu] */
+    extern uintptr_t ios_smc_alias( uintptr_t addr );
+    extern void ios_smc_alias_drop( uintptr_t addr );
+    extern void ios_smc_note( int emulated );
+    uintptr_t destinations[2], starts[2];
     size_t lengths[2], done = 0;
-    unsigned count = 0, i;
+    unsigned count = 0, i, smc = 0;
 
     *blocked = 0;
     if (!size || size > MAX_STORE || addr > UINTPTR_MAX - (size - 1)) return 0;
@@ -1884,6 +1907,17 @@ static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uin
         uintptr_t at = addr + done, rw = ios_write_alias( at );
         size_t length = PAGE - (at & (PAGE - 1));
         if (length > size - done) length = size - done;
+        /* [smc-emu]: a page FEX trapped whose written bytes hold no translated
+         * code takes the store through a second mapping; the trap stays. */
+        if (!rw && honor_guest_prot && ios_smc_write_ok( at, length ) && (rw = ios_smc_alias( at )))
+        {
+            smc |= 1u << count;
+            starts[count] = at;
+            destinations[count] = rw;
+            lengths[count++] = length;
+            done += length;
+            continue;
+        }
         /* A store can cross a 4KB Wine protection boundary within one
          * 16KB alias page. At most 32 bytes means the endpoints cover all
          * protection pages touched by this fragment. */
@@ -1899,6 +1933,7 @@ static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uin
         }
         if (!rw || rw > UINTPTR_MAX - (length - 1) ||
             ios_write_alias( at + length - 1 ) != rw + length - 1) return 0;
+        starts[count] = at;
         destinations[count] = rw;
         lengths[count++] = length;
         done += length;
@@ -1908,6 +1943,30 @@ static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uin
     {
         memcpy( (void *)destinations[i], (const unsigned char *)source + done, lengths[i] );
         done += lengths[i];
+    }
+    if (smc)
+    {
+        /* Pairs with FEX's decoder: it marks bytes as code, fences, then reads
+         * them. If the bytes are code now, or the second mapping no longer shows
+         * the page's memory, FEX takes the fault as before and runs the store
+         * again (the same bytes). */
+        __atomic_thread_fence( __ATOMIC_SEQ_CST );
+        done = 0;
+        for (i = 0; i < count; ++i)
+        {
+            if ((smc & (1u << i)) &&
+                (memcmp( (const void *)starts[i], (const unsigned char *)source + done, lengths[i] ) ||
+                 !ios_smc_write_ok( starts[i], lengths[i] )))
+            {
+                if (memcmp( (const void *)starts[i], (const unsigned char *)source + done, lengths[i] ))
+                    ios_smc_alias_drop( starts[i] );
+                ios_smc_note( 0 );
+                *blocked = starts[i];
+                return 0;
+            }
+            done += lengths[i];
+        }
+        ios_smc_note( 1 );
     }
     if (count > 1)
     {
@@ -4572,10 +4631,18 @@ static void *ios_mach_exception_thread( void *arg )
                 int watch_hit = 0, watch_prot = 0;   /* ml1201 */
                 int in_jit = (rx && rw && sz &&
                               fault_addr >= rx && fault_addr < rx + sz) || in_low;
+                int smc_candidate = 0;   /* [smc-emu]: see ios_smc_write_ok (virtual_ios.c) */
                 if (in_jit) {
                     rw_addr = rw + (fault_addr - rx);
                 } else {
                     rw_addr = ios_jit_anon_alias_lookup(fault_addr);
+                }
+                if (!rw_addr && !ios_jit_pool_pc_is_fex( (uintptr_t)fault_pc ))
+                {
+                    extern int ios_smc_write_ok( uintptr_t addr, size_t len );
+                    extern uintptr_t ios_smc_alias( uintptr_t addr );
+                    if (ios_smc_write_ok( (uintptr_t)fault_addr, 1 ) && (rw_addr = ios_smc_alias( (uintptr_t)fault_addr )))
+                        smc_candidate = 1;
                 }
                 /* ml1201: a store to the watched page has no alias; make the page writable for
                  * the emulator below and strip the write again once the store has landed. */
@@ -4651,7 +4718,7 @@ static void *ios_mach_exception_thread( void *arg )
                         dprintf( 2, "[alias-protection] completing FEX handler write pc=%llx addr=%llx\n",
                                  (unsigned long long)fault_pc, (unsigned long long)fault_addr );
                 }
-                if (rw_addr && honor_guest_prot && ios_alias_write_is_trapped( fault_addr ))
+                if (rw_addr && honor_guest_prot && !smc_candidate && ios_alias_write_is_trapped( fault_addr ))
                 {
                     static unsigned trapped_alias_logs;
                     if (trapped_alias_logs++ < 16)
@@ -4664,6 +4731,7 @@ static void *ios_mach_exception_thread( void *arg )
                     uint32_t insn; ios_fault_read_insn( (uint64_t)(uintptr_t)fault_pc, &insn );  /* ml982 */
                     int emulated = 0;
                     uintptr_t alias_fault = 0;
+                    if (smc_candidate && !ios_smc_store_insn( insn )) goto dispatch_guest_fault;   /* [smc-emu] */
                     /* STP (SIMD&FP, signed offset, 128-bit Q): 10 101 1 1 0 0 0 imm7 Rt2 Rn Rt
                      *   pattern bits 31-22: 10 1011 1000  → top10 = 0x2B8 (= bits 31..22)
                      *   So mask 0xFFC00000 = top10. Match 0x2B8 << 22 = 0xAE000000? Hmm.
@@ -4820,8 +4888,17 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xfffffc00) == 0xc89ffc00)
                     {
                         int rt = insn & 0x1f;
-                        __atomic_store_n((uint64_t *)rw_addr, IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
-                        emulated = 1;
+                        if (smc_candidate)   /* [smc-emu]: through the checked path */
+                        {
+                            uint64_t value = (uint64_t)IOS_STORE_SRC(rt);
+                            __atomic_thread_fence(__ATOMIC_RELEASE);
+                            emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
+                        }
+                        else
+                        {
+                            __atomic_store_n((uint64_t *)rw_addr, IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
+                            emulated = 1;
+                        }
                     }
                     /* STLR (Store-Release Register, 32-bit):
                      *   1000 1000 1001 1111 1111 11nn nnnt tttt   (mask 0xfffffc00, val 0x889ffc00)
@@ -4829,24 +4906,51 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xfffffc00) == 0x889ffc00)
                     {
                         int rt = insn & 0x1f;
-                        __atomic_store_n((uint32_t *)rw_addr, (uint32_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
-                        emulated = 1;
+                        if (smc_candidate)   /* [smc-emu]: through the checked path */
+                        {
+                            uint32_t value = (uint32_t)IOS_STORE_SRC(rt);
+                            __atomic_thread_fence(__ATOMIC_RELEASE);
+                            emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
+                        }
+                        else
+                        {
+                            __atomic_store_n((uint32_t *)rw_addr, (uint32_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
+                            emulated = 1;
+                        }
                     }
                     /* STLRH (Store-Release 16-bit):
                      *   0100 1000 1001 1111 1111 11nn nnnt tttt   (mask 0xfffffc00, val 0x489ffc00) */
                     else if ((insn & 0xfffffc00) == 0x489ffc00)
                     {
                         int rt = insn & 0x1f;
-                        __atomic_store_n((uint16_t *)rw_addr, (uint16_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
-                        emulated = 1;
+                        if (smc_candidate)   /* [smc-emu]: through the checked path */
+                        {
+                            uint16_t value = (uint16_t)IOS_STORE_SRC(rt);
+                            __atomic_thread_fence(__ATOMIC_RELEASE);
+                            emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
+                        }
+                        else
+                        {
+                            __atomic_store_n((uint16_t *)rw_addr, (uint16_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
+                            emulated = 1;
+                        }
                     }
                     /* STLRB (Store-Release 8-bit):
                      *   0000 1000 1001 1111 1111 11nn nnnt tttt   (mask 0xfffffc00, val 0x089ffc00) */
                     else if ((insn & 0xfffffc00) == 0x089ffc00)
                     {
                         int rt = insn & 0x1f;
-                        __atomic_store_n((uint8_t *)rw_addr, (uint8_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
-                        emulated = 1;
+                        if (smc_candidate)   /* [smc-emu]: through the checked path */
+                        {
+                            uint8_t value = (uint8_t)IOS_STORE_SRC(rt);
+                            __atomic_thread_fence(__ATOMIC_RELEASE);
+                            emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
+                        }
+                        else
+                        {
+                            __atomic_store_n((uint8_t *)rw_addr, (uint8_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
+                            emulated = 1;
+                        }
                     }
                     /* ml1231: STLURB/STLURH/STLUR (FEAT_LRCPC2, store-release with an
                      * unscaled 9-bit offset), what FEX emits for guest stores once the
@@ -5542,6 +5646,9 @@ static void *ios_mach_exception_thread( void *arg )
                         fault_addr = alias_fault;
                         goto dispatch_guest_fault;
                     }
+                    /* [smc-emu]: anything not completed above (atomics, encodings
+                     * this path does not decode) takes FEX's path, as before. */
+                    if (!emulated && smc_candidate) goto dispatch_guest_fault;
                     /* ml350 DISCRIMINATOR: alias EXISTS but the instruction is not
                      * in this decode list — every such miss previously cost a full
                      * run to name (ml349's STRB-reg took one). Print the insn so
@@ -5572,7 +5679,9 @@ static void *ios_mach_exception_thread( void *arg )
                         /* ml635: record that this alias page was written. FEX's cached
                          * translation is NOT invalidated here (the ARM64EC path would call
                          * HandleRWXAccessViolation); this counter is what proves whether a
-                         * page was filled AFTER its translation was compiled. */
+                         * page was filled AFTER its translation was compiled.
+                         * [smc-emu]: not for a plain page, whose trap must stay. */
+                        if (!smc_candidate)
                         {
                             extern void ios_jit_anon_alias_note_write( unsigned long long );
                             ios_jit_anon_alias_note_write( (unsigned long long)fault_addr );
