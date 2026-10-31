@@ -183,6 +183,10 @@
 		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1000991 /* GameDllOverrides.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000991 /* GameDllOverrides.swift */; };
+		A1009C01 /* GameSetupShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C01 /* GameSetupShare.swift */; };
+		A1009C02 /* GameMods.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C02 /* GameMods.swift */; };
+		A1009C04 /* SteamAchievements.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C04 /* SteamAchievements.swift */; };
+		A1009C03 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2009C03 /* Localizable.xcstrings */; };
 		A1000992 /* WineRegistryEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000992 /* WineRegistryEditor.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
@@ -446,6 +450,10 @@
 		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2000991 /* GameDllOverrides.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameDllOverrides.swift; sourceTree = "<group>"; };
+		A2009C01 /* GameSetupShare.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameSetupShare.swift; sourceTree = "<group>"; };
+		A2009C02 /* GameMods.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameMods.swift; sourceTree = "<group>"; };
+		A2009C04 /* SteamAchievements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamAchievements.swift; sourceTree = "<group>"; };
+		A2009C03 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		A2000992 /* WineRegistryEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WineRegistryEditor.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
@@ -659,6 +667,10 @@
 				A2000914 /* LibraryPrefs.swift */,
 				A2000990 /* GameIniFiles.swift */,
 				A2000991 /* GameDllOverrides.swift */,
+				A2009C01 /* GameSetupShare.swift */,
+				A2009C02 /* GameMods.swift */,
+				A2009C04 /* SteamAchievements.swift */,
+				A2009C03 /* Localizable.xcstrings */,
 				A2000992 /* WineRegistryEditor.swift */,
 				A2000208 /* GameProfiles.swift */,
 				A2000911 /* GameRecommendations.swift */,
@@ -875,6 +887,11 @@
 			knownRegions = (
 				en,
 				Base,
+				de,
+				es,
+				ko,
+				"pt-BR",
+				ru,
 			);
 			mainGroup = A4000001;
 			packageReferences = (
@@ -896,6 +913,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000022 /* nls in Resources */,
+				A1009C03 /* Localizable.xcstrings in Resources */,
 				A1000032 /* aarch64-windows in Resources */,
 				A10000F1 /* legal in Resources */,
 				A1000080 /* arm64ec-windows in Resources */,
@@ -1073,6 +1091,9 @@
 				A1000914 /* LibraryPrefs.swift in Sources */,
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1000991 /* GameDllOverrides.swift in Sources */,
+				A1009C01 /* GameSetupShare.swift in Sources */,
+				A1009C02 /* GameMods.swift in Sources */,
+				A1009C04 /* SteamAchievements.swift in Sources */,
 				A1000992 /* WineRegistryEditor.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
 				A1000911 /* GameRecommendations.swift in Sources */,
