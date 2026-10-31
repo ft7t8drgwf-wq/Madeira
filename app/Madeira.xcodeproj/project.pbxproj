@@ -889,6 +889,7 @@
 				Base,
 				de,
 				es,
+				ko,
 				"pt-BR",
 				ru,
 			);
