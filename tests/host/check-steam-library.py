@@ -407,6 +407,7 @@ class State:
         self.refuse_manifests = False       # every manifest request answers 401
         self.refuse_first_manifest = False  # the first manifest request of each depot answers 401
         self.refused_once = set()
+        self.reject_wrong_code = False      # a manifest asked for without the request code answers 401, as Steam's do
 
     def reset_counters(self):
         with self.lock:
@@ -440,6 +441,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if state.refuse_first_manifest and depot not in state.refused_once:
                         state.refused_once.add(depot)
                         return self.reply(401)
+                if state.reject_wrong_code and code != str(state.request_code):
+                    return self.reply(401)
                 if parts[4] != '5' or code != str(state.request_code) or (depot, gid) not in state.manifests:
                     return self.reply(404)
                 return self.reply(200, state.manifests[(depot, gid)])
@@ -595,6 +598,20 @@ func le(_ v: UInt32) -> [UInt8] { [UInt8(v & 0xff), UInt8(v >> 8 & 0xff), UInt8(
     var authToken = ""
     var keyRequests: [(depot: UInt32, app: UInt32)] = []
     var codeRequests: [(app: UInt32, depot: UInt32, gid: UInt64)] = []
+    /// "app|depot" pairs whose request code Steam refuses (AccessDenied).
+    var deniedCodes: Set<String> = []
+    func callServiceMethodWithResult(method: SteamServiceMethod, body: Data, timeout: TimeInterval) async throws -> (eresult: Int32, body: Data) {
+        if method == .getManifestRequestCode {
+            var d = ProtobufDecoder(body); var app: UInt32 = 0, depot: UInt32 = 0
+            while let tag = try d.readTag() {
+                if tag.fieldNumber == 1 { app = UInt32(truncatingIfNeeded: try d.readVarint()) }
+                else if tag.fieldNumber == 2 { depot = UInt32(truncatingIfNeeded: try d.readVarint()) }
+                else { try d.skip(wireType: tag.wireType) }
+            }
+            if deniedCodes.contains("\(app)|\(depot)") { codeRequests.append((app, depot, 0)); return (15, Data()) }
+        }
+        return (1, try await callServiceMethod(method: method, body: body, timeout: timeout))
+    }
     var authRequests: [(depot: UInt32, host: String, app: UInt32)] = []
     var picsAppRequests: [[UInt32]] = []
     var connects = 0
@@ -1109,6 +1126,9 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     downloader.manifestCacheFolder = tmp.appendingPathComponent("manifest-cache")
     var lastProgress = SteamDownloadProgress()
     let licensed: Set<UInt32> = phase == "refused-licensed" ? [9001, 9003, 9004] : [9001, 9003]
+    // The depot taken from 9100: its code is refused under 9100 (and, for borrowed-skip, under 9000 too).
+    if phase == "borrowed-own" { session.deniedCodes = ["9100|9003"] }
+    if phase == "borrowed-skip" { session.deniedCodes = ["9100|9003", "9000|9003"] }
     do {
         _ = try await downloader.install(app, steamApps: steamApps, ownedDepots: { licensed }) { lastProgress = $0 }
         print("RESULT install=ok")
@@ -1125,13 +1145,22 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
             require(!loggedEvents.contains { $0.contains("auth=") }, "no authorization token in the log")
         }
     }
+    if phase == "borrowed-own" {
+        require(session.codeRequests.contains { $0.app == 9000 && $0.depot == 9003 && $0.gid != 0 },
+                "a borrowed depot refused under its own app is asked for under the installed app")
+        require(session.codeRequests.filter { $0.app == 9100 && $0.depot == 9003 }.count == 1, "an AccessDenied code is not asked for again")
+    }
+    if phase == "borrowed-skip" {
+        require(loggedEvents.contains { $0.contains("[steam-depot] borrowed depot skipped app=9000 depot=9003 from=9100 status=401") },
+                "a borrowed depot Steam refuses under both apps is left out, and the log says so")
+    }
     if phase == "token-refresh" {
         // dead, flaky (refused, asked again with new authorization), good (for the chunks).
         require(session.authRequests.filter { $0.depot == 9001 }.count >= 4, "a server that refuses the file list is asked again with fresh authorization: \(session.authRequests.filter { $0.depot == 9001 }.count)")
     }
     let found = MadeiraDock.games(drive: drive)
     print("RESULT listed=\(found.filter { $0.id == 9000 && $0.installed }.count)")
-    if phase != "interrupt" && phase != "refused-licensed" && phase != "refused" {
+    if phase != "interrupt" && phase != "refused-licensed" && phase != "refused" && phase != "borrowed-skip" {
         require(lastProgress.phase == .finishing && lastProgress.doneBytes == lastProgress.totalBytes && lastProgress.totalBytes > 0, "progress ends complete: \(lastProgress.doneBytes)/\(lastProgress.totalBytes)")
         // Keys are asked for with the app being installed; manifest codes and tokens with the app that owns the content.
         require(session.keyRequests.contains { $0.depot == 9001 && $0.app == 9000 } && session.keyRequests.contains { $0.depot == 9003 && $0.app == 9000 }, "depot keys are requested for the installed app")
@@ -1408,6 +1437,18 @@ try:
     result = run('token-refresh', dict(fixture, tmp=str(work / 'root3')))
     state.refuse_first_manifest = False
     require(result.get('install') == 'ok' and result.get('listed') == '1', 'a file list refused once is fetched with fresh authorization and the install finishes')
+
+    # ---- a depot taken from another app whose code that app refuses: asked under the installed app; refused there too, left out
+    state.reset_counters()
+    state.reject_wrong_code = True
+    result = run('borrowed-own', dict(fixture, tmp=str(work / 'root5')))
+    require(result.get('install') == 'ok' and result.get('listed') == '1', 'a borrowed depot refused under its own app installs under the game')
+    state.reset_counters()
+    result = run('borrowed-skip', dict(fixture, tmp=str(work / 'root6')))
+    state.reject_wrong_code = False
+    require(result.get('install') == 'ok' and result.get('listed') == '1'
+            and not (work / 'root6/drive_c/Program Files (x86)/Steam/steamapps/common/Fixture Game/shared/lib.dat').exists(),
+            'a borrowed depot Steam refuses under both apps is left out and the game still installs')
 
     # ---- every content server refuses the file list: one more round with a fresh request code, then a clear failure
     state.reset_counters()

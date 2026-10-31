@@ -149,11 +149,31 @@ final class DepotDownloader {
                 throw SteamError.depotKeyNotFound(refused)
             }
             if session.steamID != 0 { accountID = session.steamID }
-            let contentAppID = !app.freeToDownload ? (depot.fromApp ?? app.appID) : app.appID
+            var contentAppID = !app.freeToDownload ? (depot.fromApp ?? app.appID) : app.appID
             // A beta's own manifest is requested under its branch name.
-            let manifest = try await fetchManifest(depotID: depot.depotID, appID: contentAppID,
+            let manifest: DepotManifest
+            do {
+                manifest = try await fetchManifest(depotID: depot.depotID, appID: contentAppID,
                                                    manifestGID: gid, key: key, hosts: hosts,
                                                    branch: depot.hasOwnManifest(app.branch) ? app.branch : nil)
+            } catch SteamError.contentRefused(let status) where contentAppID != app.appID {
+                // A depot taken from another app (depotfromapp) whose file list
+                // Steam refuses under that app (BioShock Infinite's 1523211 from
+                // 1523210: AccessDenied): asked for under the installed app, and
+                // when Steam refuses that too, left out like content the account
+                // does not own, instead of failing the whole install.
+                SteamLog.event("[steam-depot] borrowed depot refused app=\(app.appID) depot=\(depot.depotID) from=\(contentAppID) status=\(status) retry=own-app")
+                do {
+                    manifest = try await fetchManifest(depotID: depot.depotID, appID: app.appID,
+                                                       manifestGID: gid, key: key, hosts: hosts,
+                                                       branch: depot.hasOwnManifest(app.branch) ? app.branch : nil)
+                    contentAppID = app.appID
+                } catch SteamError.contentRefused(let status) {
+                    SteamLog.event("[steam-depot] borrowed depot skipped app=\(app.appID) depot=\(depot.depotID) from=\(contentAppID) status=\(status)")
+                    licenseSkipped.append(depot.depotID)
+                    continue
+                }
+            }
             let auth = await cdnAuthFragments(depotID: depot.depotID, appID: contentAppID, hosts: pool)
             plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
                                    hosts: pool, auth: auth,
@@ -687,7 +707,7 @@ final class DepotDownloader {
         if let fallback = hosts.last, !servers.contains(fallback) { servers.append(fallback) }
         // "host:status" for each refusal, for the log line when every server refuses.
         var refusals: [String] = []
-        var tokens = 0
+        var authorizedHosts = 0
         var refusedStatus = 0
         // A server that refuses (401/403) is asked again once with a fresh
         // authorization; when no server answers and some refused, the round is
@@ -695,10 +715,11 @@ final class DepotDownloader {
         // may have answered without one).
         for round in 0..<2 {
             if round == 1 {
-                guard !refusals.isEmpty else { break }
-                SteamLog.event("[steam-depot] manifest refused app=\(appID) depot=\(depotID) code=\(requestCode == 0 ? "none" : "yes") tokens=\(tokens)/\(servers.count) refusals=\(refusals.joined(separator: ",")) retry=fresh-code")
+                // A refused code (AccessDenied) is not asked for again.
+                guard !refusals.isEmpty, !codeDenied.contains("\(depotID)|\(appID)") else { break }
+                SteamLog.event("[steam-depot] manifest refused app=\(appID) depot=\(depotID) code=\(requestCode == 0 ? "none" : "yes") authorized=\(authorizedHosts)/\(servers.count) refusals=\(refusals.joined(separator: ",")) retry=fresh-code")
                 requestCode = try await manifestRequestCode(depotID: depotID, appID: appID, manifestGID: manifestGID, branch: branch)
-                refusals = []; tokens = 0
+                refusals = []; authorizedHosts = 0
             }
             for host in servers {
                 try Task.checkCancellation()
@@ -740,14 +761,14 @@ final class DepotDownloader {
                     if case SteamError.contentHTTP(let status) = error, status == 401 || status == 403 {
                         refusals.append("\(URL(string: host)?.host ?? host):\(status)")
                         refusedStatus = status
-                        if !auth.isEmpty { tokens += 1 }
+                        if !auth.isEmpty { authorizedHosts += 1 }
                     }
                     SteamLog.trace("manifest from a content server failed: \(error.localizedDescription)")
                 }
             }
         }
         if !refusals.isEmpty {
-            SteamLog.event("[steam-depot] manifest refused app=\(appID) depot=\(depotID) code=\(requestCode == 0 ? "none" : "yes") tokens=\(tokens)/\(servers.count) refusals=\(refusals.joined(separator: ",")) retry=none")
+            SteamLog.event("[steam-depot] manifest refused app=\(appID) depot=\(depotID) code=\(requestCode == 0 ? "none" : "yes") authorized=\(authorizedHosts)/\(servers.count) refusals=\(refusals.joined(separator: ",")) retry=none")
             // Most servers refusing is a refusal, not a server outage.
             if refusals.count * 2 >= servers.count { throw SteamError.contentRefused(refusedStatus) }
         }
@@ -862,6 +883,10 @@ final class DepotDownloader {
 
     // MARK: - Manifest Request Code
 
+    /// "depot|app" pairs whose request code Steam answered AccessDenied (15):
+    /// asking again does not change that answer.
+    private var codeDenied: Set<String> = []
+
     private func manifestRequestCode(depotID: UInt32, appID: UInt32, manifestGID: UInt64, branch: String? = nil) async throws -> UInt64 {
         try await session.ensureConnected()
         var encoder = ProtobufEncoder()
@@ -874,7 +899,9 @@ final class DepotDownloader {
         // Steam can refuse for a moment (busy, rate limit): asked up to three
         // times. Without a code the content servers refuse the manifest (401).
         var eresult: Int32 = 0
+        var tries = 0
         for attempt in 0..<3 {
+            tries = attempt + 1
             if attempt > 0 { try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) }
             let answer = try await session.callServiceMethodWithResult(
                 method: .getManifestRequestCode,
@@ -893,9 +920,11 @@ final class DepotDownloader {
                 try decoder.skip(wireType: tag.wireType)
             }
             if eresult == 1 { break }  // No request code needed (older depots)
+            if eresult == 15 { break } // AccessDenied: this account may not have it under this app
         }
         if eresult != 1 {
-            SteamLog.event("[steam-depot] manifest-code refused app=\(appID) depot=\(depotID) eresult=\(eresult) tries=3")
+            if eresult == 15 { codeDenied.insert("\(depotID)|\(appID)") }
+            SteamLog.event("[steam-depot] manifest-code refused app=\(appID) depot=\(depotID) eresult=\(eresult) tries=\(tries)")
         }
         return 0
     }
