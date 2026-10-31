@@ -26,6 +26,7 @@
 #include <limits.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/sysctl.h>
@@ -535,6 +536,150 @@ static void madeira_ensure_locallow(NSString *prefix)
  * ActivatableClassId (Thumper aborts on RoGetActivationFactory for
  * Windows.Gaming.Input.Gamepad), and no Fonts keys (the #61/#70 dwrite fix).
  */
+/* madeira-bcd: a Windows MachineGuid of this device's own (MADEIRA_UNIQUE_MACHINE).
+ *
+ * HKLM\Software\Microsoft\Cryptography\MachineGuid is the value Windows programs
+ * take for "this PC". Steam hashes it as "BB3" of its machine id, next to the
+ * adapters' MAC addresses ("FF2", build/ntdll-unix/nsi_ndis_ios.c) and the disk
+ * serial ("3B3", .madeira-volume-serial). prefix-template.tar.gz carries the
+ * value of the Mac the template was made on, so every Madeira install reported
+ * the same machine, and to Valve all Madeira users were one PC. Found while
+ * chasing Black Ops's CEG step (2026-10-30), which Valve's server refused for
+ * every Madeira user alike.
+ *
+ * Give a prefix its own value: a fresh seed always, an existing prefix once,
+ * when it still holds a template value (madeira_template_machine_guids). The
+ * value is rewritten in system.reg on disk before the wineserver starts (like
+ * madeira_repair_profile), via temp + rename, in Windows's form: lowercase hex,
+ * 8-4-4-4-12, a version 4 UUID. Steam then sees a new machine once: a Steam
+ * Guard confirmation may come up at the next sign-in, nothing else changes.
+ * env.MADEIRA_UNIQUE_MACHINE = 0 in madeira.cfg leaves the value alone.
+ * Pure C, host-tested by tests/host/check-machine-guid.py. */
+/* begin madeira_machine_guid (host test cut) */
+static const char *const madeira_template_machine_guids[] = {
+    "2de3d850-4f7b-4098-92b5-ffbd212a9815",   /* prefix-template.tar.gz up to 2026-10-30 */
+};
+
+static int madeira_guid_is_template( const char *guid )
+{
+    size_t i;
+    for (i = 0; i < sizeof(madeira_template_machine_guids) / sizeof(madeira_template_machine_guids[0]); i++)
+        if (!strncasecmp( guid, madeira_template_machine_guids[i], 36 )) return 1;
+    return 0;
+}
+
+/* A version 4 UUID in Windows's lowercase 8-4-4-4-12 form into out[37]. */
+static void madeira_new_machine_guid( char out[37] )
+{
+    unsigned char b[16];
+    int fd, got = 0, i;
+    static const char hex[] = "0123456789abcdef";
+
+    if ((fd = open( "/dev/urandom", O_RDONLY )) >= 0)
+    {
+        got = read( fd, b, sizeof(b) ) == (int)sizeof(b);
+        close( fd );
+    }
+    if (!got)
+    {
+        unsigned int seed = (unsigned int)getpid() ^ (unsigned int)time( NULL );
+        for (i = 0; i < 16; i++) { seed = seed * 1103515245u + 12345u; b[i] = (unsigned char)(seed >> 16); }
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;   /* version 4 */
+    b[8] = (b[8] & 0x3f) | 0x80;   /* variant 1 */
+    for (i = 0; i < 16; i++)
+    {
+        int o = 2 * i + (i >= 4) + (i >= 6) + (i >= 8) + (i >= 10);
+        out[o] = hex[b[i] >> 4];
+        out[o + 1] = hex[b[i] & 15];
+    }
+    out[8] = out[13] = out[18] = out[23] = '-';
+    out[36] = 0;
+}
+
+/* Rewrites the MachineGuid value in the registry file at path. fresh_seed: any
+ * value is replaced; otherwise only a template value is. new_guid is the 36-char
+ * value to write. Returns 1 when the file was rewritten, 0 when left alone (no
+ * such value, or one of this device's own already), -1 when the rewrite failed.
+ * old_guid[37], when given, receives the value found. */
+static int madeira_personalize_machine_guid( const char *path, int fresh_seed, const char *new_guid, char *old_guid )
+{
+    static const char KEY[] = "\"MachineGuid\"=\"";
+    const size_t kl = sizeof(KEY) - 1;
+    FILE *f = fopen( path, "rb" );
+    char *buf, *q, tmp[PATH_MAX];
+    long n;
+    size_t got;
+    int ok = 0;
+
+    if (old_guid) old_guid[0] = 0;
+    if (!f) return 0;
+    fseek( f, 0, SEEK_END ); n = ftell( f ); fseek( f, 0, SEEK_SET );
+    if (n <= 0 || n > (64 << 20)) { fclose( f ); return 0; }
+    if (!(buf = malloc( (size_t)n + 1 ))) { fclose( f ); return -1; }
+    got = fread( buf, 1, (size_t)n, f );
+    fclose( f );
+    if (got != (size_t)n) { free( buf ); return -1; }
+    buf[n] = 0;
+
+    /* the value line is "MachineGuid"="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" (36 chars) */
+    for (q = buf; (q = strstr( q, KEY )); q += kl)
+    {
+        size_t i;
+        for (i = 0; i < 36 && q[kl + i] && q[kl + i] != '"'; i++) ;
+        if (i == 36 && q[kl + 36] == '"') break;
+    }
+    if (!q) { free( buf ); return 0; }
+    if (old_guid) { memcpy( old_guid, q + kl, 36 ); old_guid[36] = 0; }
+    if (!fresh_seed && !madeira_guid_is_template( q + kl )) { free( buf ); return 0; }
+    if (strlen( new_guid ) != 36) { free( buf ); return -1; }
+    memcpy( q + kl, new_guid, 36 );   /* same length: the rest of the file is untouched */
+
+    /* write via temp + rename so a kill mid-write cannot truncate the registry */
+    if (snprintf( tmp, sizeof(tmp), "%s.machine-guid", path ) < (int)sizeof(tmp))
+    {
+        FILE *o = fopen( tmp, "wb" );
+        if (o)
+        {
+            ok = fwrite( buf, 1, (size_t)n, o ) == (size_t)n;
+            if (fclose( o ) != 0) ok = 0;
+            if (ok && rename( tmp, path ) != 0) ok = 0;
+            if (!ok) unlink( tmp );
+        }
+    }
+    free( buf );
+    return ok ? 1 : -1;
+}
+/* end madeira_machine_guid (host test cut) */
+
+/* system.reg of the prefix: its own MachineGuid, unless env.MADEIRA_UNIQUE_MACHINE = 0. */
+static void madeira_unique_machine_guid( const char *prefix_path, int fresh_seed )
+{
+    char reg[PATH_MAX], marker[PATH_MAX], guid[37], old[37], cfg_off[16];
+    const char *off = getenv( "MADEIRA_UNIQUE_MACHINE" );
+    int r;
+
+    /* read before Wine starts, like MADEIRA_PROFILE_LOCALLOW: the cfg's env.* lines are not exported yet */
+    if (!off && madeira_cfg_get( "env.MADEIRA_UNIQUE_MACHINE", cfg_off, sizeof(cfg_off) )) off = cfg_off;
+    if (off && off[0] == '0') { LOG( "machine-guid: left as is (env.MADEIRA_UNIQUE_MACHINE=0)" ); return; }
+    if (snprintf( reg, sizeof(reg), "%s/system.reg", prefix_path ) >= (int)sizeof(reg) ||
+        snprintf( marker, sizeof(marker), "%s/.madeira-machine-guid-own", prefix_path ) >= (int)sizeof(marker)) return;
+    /* once the prefix has a value of its own, skip the 3.7 MB read on every later start */
+    if (!fresh_seed && access( marker, F_OK ) == 0) return;
+    madeira_new_machine_guid( guid );
+    r = madeira_personalize_machine_guid( reg, fresh_seed, guid, old );
+    if (r > 0)
+        LOG( "machine-guid: this device now has its own MachineGuid %{public}s (was the template's %{public}s; "
+             "Steam may ask for a Steam Guard confirmation once; env.MADEIRA_UNIQUE_MACHINE=0 keeps the old one)",
+             guid, old );
+    else if (r < 0)
+        LOG( "machine-guid: could not rewrite %{public}s", reg );
+    else if (old[0])
+        LOG( "machine-guid: %{public}s is this device's own already", old );
+    if (r > 0 || (r == 0 && old[0] && !madeira_guid_is_template( old )))
+        close( open( marker, O_WRONLY | O_CREAT, 0644 ) );
+}
+
 void madeira_seed_prefix_if_needed(const char *prefix_path) {
     @autoreleasepool {
         if (!prefix_path) return;
@@ -544,7 +689,8 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
 
         [fm createDirectoryAtPath:prefix withIntermediateDirectories:YES attributes:nil error:nil];
 
-        if (![fm fileExistsAtPath:stamp]) {
+        BOOL fresh_seed = ![fm fileExistsAtPath:stamp];   /* the template is extracted below: personalize all of it */
+        if (fresh_seed) {
             NSString *tgz = [[NSBundle mainBundle] pathForResource:@"prefix-template" ofType:@"tar.gz"];
             if (!tgz) {
                 LOG("prefix-template.tar.gz missing from bundle!");
@@ -569,6 +715,7 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
         /* ml666: repair the usersmadeira escaping damage BEFORE anything reads
          * the registry, then the (now scoped) ml581 legacy cleanup. */
         madeira_repair_profile( prefix );
+        madeira_unique_machine_guid( prefix_path, fresh_seed );
         extern void madeira_browser_register(const char *prefix);
         madeira_browser_register(prefix.UTF8String);
         /* ml581: see madeira_undo_appdata_skeleton() above. */
@@ -728,6 +875,29 @@ static void madeira_link_wbem(NSFileManager *fm, NSString *prefix, NSString *sys
     }
     dprintf(STDERR_FILENO, "[WineProc] %s\\wbem: %d/%zu links\n", system_dir.UTF8String,
             linked, sizeof(wbem) / sizeof(wbem[0]));
+}
+
+/* <system_dir>\Speech\Common\sapi.dll: the prefix registers every SAPI class
+ * (SpVoice, SpObjectTokenCategory, SpDataKey, SpMMAudioOut ...) there, the way
+ * Windows lays it out, but the farm is flat, so CoCreateInstance failed with
+ * REGDB_E_CLASSNOTREG (0x80040154). Grounded's narration (SpeechSynthWrapper.dll
+ * on System.Speech in Wine Mono) creates SpDataKey while the game loads; the
+ * COMException went unhandled, the game started tearing down, its RHIThread
+ * hit a freed object and the game froze on the loading screen. */
+static void madeira_link_speech(NSFileManager *fm, NSString *prefix, NSString *system_dir, NSString *source)
+{
+    NSString *dir = [[[prefix stringByAppendingPathComponent:@"drive_c/windows"]
+                        stringByAppendingPathComponent:system_dir] stringByAppendingPathComponent:@"Speech/Common"];
+    NSString *src = [source stringByAppendingPathComponent:@"sapi.dll"];
+    NSString *dst = [dir stringByAppendingPathComponent:@"sapi.dll"];
+    BOOL linked = NO;
+
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm removeItemAtPath:dst error:nil];
+    if ([fm fileExistsAtPath:src])
+        linked = [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil];
+    dprintf(STDERR_FILENO, "[WineProc] %s\\Speech\\Common\\sapi.dll: %s\n", system_dir.UTF8String,
+            linked ? "linked" : "not in this farm");
 }
 
 static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
@@ -1638,6 +1808,16 @@ static void *wine_process_thread(void *arg) {
             LOG("Wine log file: %{public}s", logPath.UTF8String);
             /* Expose the app Documents dir to Wine code (e.g. for fex-jit-dump.bin) */
             setenv("MADEIRA_DOCS_DIR", docs.UTF8String, 1);
+            /* madeira-p81jbs: the JIT-pool dump is up to the pool's size (592MB on
+             * build 50) and is only read by hand; one left over 3 days is removed. */
+            {
+                NSString *dumpPath = [docs stringByAppendingPathComponent:@"fex-jit-dump.bin"];
+                NSDate *dumpDate = [[[NSFileManager defaultManager] attributesOfItemAtPath:dumpPath error:nil] fileModificationDate];
+                if (dumpDate && -[dumpDate timeIntervalSinceNow] > 3 * 24 * 3600 &&
+                    [[NSFileManager defaultManager] removeItemAtPath:dumpPath error:nil])
+                    dprintf(STDERR_FILENO, "[jit-dump] removed fex-jit-dump.bin from %s (over 3 days old)\n",
+                            dumpDate.description.UTF8String);
+            }
             dprintf(STDERR_FILENO, "[config-dir] early MADEIRA_DOCS_DIR=%s; native madeira.cfg readers that run "
                     "before this point (wineserver start: madsync inproc-sync) use it (MADEIRA_CFG_EARLY_DOCS=0 disables)\n",
                     g_madeira_docs_early);
@@ -2014,6 +2194,7 @@ static void *wine_process_thread(void *arg) {
             LOG("Symlinked %d DLLs from %{public}s to %{public}s", linked, bundle_subdir, sys32Dir.UTF8String);
             dprintf(STDERR_FILENO, "[WineProc] Symlinked %d DLLs from %s -> sys32\n", linked, bundle_subdir);
             madeira_link_wbem(fm, prefix, @"system32", dllSource);
+            madeira_link_speech(fm, prefix, @"system32", dllSource);
 
             // X3 mixed-mode: also link NON-COLLIDING files from the other
             // bundle arch so cross-arch child exes resolve by Win32 path
@@ -2091,6 +2272,7 @@ static void *wine_process_thread(void *arg) {
             if (has_i386_set) {
                 madeira_link_syswow64(fm, prefix, bundlePath);
                 madeira_link_syswow64_wbem(fm, prefix, bundlePath);
+                madeira_link_speech(fm, prefix, @"syswow64", [bundlePath stringByAppendingPathComponent:@"i386-windows"]);
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
             }
             madeira_link_wine_mono(fm, prefix, bundlePath);

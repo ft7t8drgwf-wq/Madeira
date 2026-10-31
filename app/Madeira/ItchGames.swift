@@ -4,8 +4,8 @@
 
 import SwiftUI
 
-// The library's itch.io section, a game's download sheet, its Game details section
-// and Settings › itch.io (docs/ITCH.md). The same shapes as the GOG views (GOGGames.swift).
+// The library's itch.io section, Find a game, a game's download sheet, its Game details
+// section and Settings › itch.io (docs/ITCH.md). The same shapes as the GOG views (GOGGames.swift).
 
 /// One game in the section: owned, installed by Madeira, or both.
 struct ItchItem: Identifiable {
@@ -58,6 +58,7 @@ struct ItchGamesSection: View {
     @AppStorage("madeiraItchShowUninstalled") private var showUninstalled = true
     @State private var selected: ItchSelection?
     @State private var showSignIn = false
+    @State private var showFind = false
 
     private struct ItchSelection: Identifiable { let id: Int }
 
@@ -90,7 +91,23 @@ struct ItchGamesSection: View {
                     LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 } else if itch.signedIn && !itch.refreshing && others.isEmpty && search.isEmpty {
                     Text(itch.libraryUpdated == nil ? "Pull down to load your itch.io library."
-                         : "No Windows games were found in this itch.io library.").foregroundStyle(.secondary)
+                         : "No Windows games yet. Games you buy or claim on itch.io show here, and so do the games in your itch.io collections. For a free game, use Find a game.")
+                        .foregroundStyle(.secondary)
+                }
+                if itch.signedIn {
+                    Button { showFind = true } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: "magnifyingglass.circle.fill").font(.system(size: 30)).foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Find a game on itch.io").font(.headline)
+                                Text("Search itch.io or paste a game's link, add free games to this library and install them here.")
+                                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                        }.padding(14)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                    }.buttonStyle(.plain)
                 }
                 if itch.signedIn && !others.isEmpty {
                     Button {
@@ -119,6 +136,12 @@ struct ItchGamesSection: View {
             }
         }
         .sheet(isPresented: $showSignIn) { ItchSignInView() }
+        .sheet(isPresented: $showFind) {
+            ItchFindView { id in
+                showFind = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { selected = ItchSelection(id: id) }
+            }
+        }
         .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
             Button("OK", role: .cancel) { itch.error = nil }
         } message: { Text(itch.error ?? "") }
@@ -207,7 +230,8 @@ struct ItchGameCell: View {
         if let download {
             badge(ItchDownloadStatus.state(download))
         } else if item.installed != nil, let entry {
-            LibraryBadges(entry: entry, note: itch.updateAvailable(item.id) ? "Update" : nil).foregroundStyle(.secondary)
+            LibraryBadges(entry: entry, note: itch.updateAvailable(item.id) ? "Update" : item.installed?.setup != nil ? "Installer" : nil)
+                .foregroundStyle(.secondary)
         } else if item.installed == nil {
             badge("Not installed")
         }
@@ -306,6 +330,12 @@ struct ItchGameSheet: View {
                             }
                         }.padding(.vertical, 24)
                     }
+                    if let record = item.installed, record.setup != nil, itch.downloads[gameID] == nil {
+                        Section("Installer") {
+                            Text("This game comes with an installer. Run installer starts it in the Wine desktop, where it installs into the game's folder on its own (some installers ask a question or two). When it closes, leave the session: Madeira finds the game it installed, and from then on Play starts the game.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
                     if let download = itch.downloads[gameID] {
                         Section("Download") {
                             ItchDownloadStatus(download: download)
@@ -319,14 +349,26 @@ struct ItchGameSheet: View {
                                 LabeledContent("File", value: upload.displayName.isEmpty ? upload.filename : upload.displayName)
                                 if upload.size > 0 { LabeledContent("Download size", value: ByteCountFormatter.string(fromByteCount: upload.size, countStyle: .file)) }
                                 if upload.demo { Text("itch.io only offers a demo of this game for Windows.").font(.caption).foregroundStyle(.secondary) }
+                                if [".exe", ".msi"].contains(where: { upload.filename.lowercased().hasSuffix($0) }) {
+                                    Text("If this file is an installer, Play runs it once in the Wine desktop, into C:\\itch; after that, Play starts the game.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                             case .unavailable(let reason):
-                                Text(reason).font(.caption).foregroundStyle(.secondary)
+                                if let owned = item.owned, !owned.owned, (owned.minPrice ?? 0) > 0 {
+                                    Text("This game is not free and this itch.io account has not bought it. Buy it on its store page, then refresh the library.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                                }
                             case nil:
                                 if itch.signedIn { LabeledContent("Download size") { ProgressView() } }
                             }
                         }
                         if let freeSpace { LabeledContent("Free space on this device", value: ByteCountFormatter.string(fromByteCount: freeSpace, countStyle: .file)) }
                         if let url = item.owned?.url { Link(destination: url) { Label("Store page", systemImage: "safari") } }
+                        if item.installed == nil, itch.downloads[gameID] == nil, itch.added.contains(where: { $0.id == gameID }) {
+                            Button("Remove from this library", role: .destructive) { itch.removeAdded(gameID); dismiss() }
+                        }
                         Text("Games download directly from itch.io with your account into C:\\itch. Keep Madeira open while it downloads: in the background iOS allows only a short time, then the download pauses and continues when you return. A download also pauses while a game is running.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
@@ -361,7 +403,10 @@ struct ItchGameSheet: View {
                 let entry = LibraryModel.shared.itchEntry(installed)
                 dismiss(); open(entry)
             } label: {
-                HStack(spacing: 10) { Image(systemName: "play.fill"); Text("Open").fontWeight(.semibold) }.frame(minWidth: 100, minHeight: 30)
+                HStack(spacing: 10) {
+                    Image(systemName: installed.setup != nil ? "shippingbox.fill" : "play.fill")
+                    Text(installed.setup != nil ? "Run installer" : "Open").fontWeight(.semibold)
+                }.frame(minWidth: 100, minHeight: 30)
             }.buttonStyle(.borderedProminent)
         } else if item.owned != nil {
             Button { itch.install(gameID) } label: {
@@ -401,7 +446,7 @@ struct ItchEntrySection: View {
             }
             if let record {
                 if !record.version.isEmpty { LabeledContent("Version", value: record.version) }
-                LabeledContent("Program", value: record.launchExe)
+                LabeledContent(record.setup != nil ? "Installer" : "Program", value: record.launchExe)
             }
             LabeledContent("itch.io game ID", value: "\(id)")
             if record != nil, download == nil {
@@ -410,7 +455,9 @@ struct ItchEntrySection: View {
         } header: {
             Text("itch.io")
         } footer: {
-            Text("The game starts its own program in Wine. If Madeira picked the wrong program, change it in Launch.")
+            Text(record?.setup != nil
+                 ? "Play runs this game's installer in the Wine desktop. Once it has installed the game, Madeira switches Play to the game's own program."
+                 : "The game starts its own program in Wine. If Madeira picked the wrong program, change it in Launch.")
         }
         .task(id: id) { await itch.loadChoice(id, force: true) }
         .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from this device. Saves stored elsewhere are kept.",
@@ -419,6 +466,90 @@ struct ItchEntrySection: View {
                 itch.uninstall(id)
                 uninstalled()
             }
+        }
+    }
+}
+
+// MARK: - Find a game
+
+/// Search itch.io, or paste a game's link, and add a game to the itch.io library.
+struct ItchFindView: View {
+    /// A game was added (or was already there): its download sheet opens.
+    var chosen: (Int) -> Void
+    @ObservedObject private var itch = ItchLibrary.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var results: [ItchOwnedGame] = []
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var searched = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    TextField("Game name, or its itch.io link", text: $text)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .submitLabel(.search).onSubmit(run)
+                    Button { run() } label: {
+                        HStack { Label(ItchLibrary.isLink(text) ? "Open this link" : "Search itch.io", systemImage: "magnifyingglass"); if busy { Spacer(); ProgressView() } }
+                    }.disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } footer: {
+                    Text("Free games (and pay-what-you-want ones) install without buying. A paid game needs buying on itch.io first; it then shows in the library by itself, as do the games in your itch.io collections.")
+                }
+                if let failure { Section { Text(failure).foregroundStyle(.red) } }
+                if searched && results.isEmpty && failure == nil && !busy {
+                    Section { Text("No Windows games found.").foregroundStyle(.secondary) }
+                }
+                if !results.isEmpty {
+                    Section("Results") {
+                        ForEach(results) { game in row(game) }
+                    }
+                }
+            }
+            .navigationTitle("Find a game").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    private func row(_ game: ItchOwnedGame) -> some View {
+        let inLibrary = itch.owned.first { $0.id == game.id }
+        let free = (game.minPrice ?? 0) == 0
+        return HStack(spacing: 12) {
+            AsyncImage(url: game.cover) { image in image.resizable().aspectRatio(contentMode: .fill) } placeholder: {
+                Color.secondary.opacity(0.15)
+            }.frame(width: 63, height: 50).clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(game.title).font(.headline).lineLimit(2)
+                Text([game.author, inLibrary != nil ? "In your library" : free ? "Free" : "Paid"]
+                        .compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 6)
+            if inLibrary != nil {
+                Button("Open") { chosen(game.id) }.buttonStyle(.bordered)
+            } else if free {
+                Button("Add") { itch.add(game); chosen(game.id) }.buttonStyle(.borderedProminent)
+            } else if let url = game.url {
+                Link("Buy", destination: url).buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func run() {
+        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, !busy else { return }
+        busy = true; failure = nil
+        Task {
+            do {
+                if ItchLibrary.isLink(query) { results = [try await itch.lookUp(link: query)] }
+                else { results = try await itch.search(query) }
+            } catch {
+                results = []
+                failure = error.localizedDescription
+            }
+            searched = true
+            busy = false
         }
     }
 }

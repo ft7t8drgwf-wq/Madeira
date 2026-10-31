@@ -611,6 +611,9 @@ struct ExternalDrivesSection: View {
 /// drop from Files gets the folder through (builds 47 to 50), so here the Shortcuts
 /// app picks it in its own process and passes it in. Only the folder itself is
 /// added; a copy Shortcuts made inside Madeira's own storage is refused.
+/// iOS 18 and newer: the folder parameter's supportedContentTypes form of @Parameter is
+/// iOS 18 API, and the app still installs on iOS 17 (deployment target 17.0).
+@available(iOS 18.0, *)
 struct AddDriveFolderIntent: AppIntent {
     static var title: LocalizedStringResource = "Add Drive Folder to Madeira"
     static var description = IntentDescription("Adds a folder, usually on a USB drive, to Madeira's External drives.")
@@ -646,6 +649,7 @@ struct AddDriveFolderIntent: AppIntent {
     }
 }
 
+@available(iOS 18.0, *)
 struct MadeiraShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: AddDriveFolderIntent(), phrases: ["Add a drive folder to \(.applicationName)"],

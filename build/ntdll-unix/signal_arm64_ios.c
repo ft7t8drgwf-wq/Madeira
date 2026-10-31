@@ -2380,6 +2380,10 @@ static int ios_x18_derived_base( uint64_t fault_pc, int rn )
 }
 
 /* ml1242: the JIT-pool dump is sparse, and MADEIRA_JIT_DUMP=0 turns it off.
+ * madeira-p81jbs: opt-in now (MADEIRA_JIT_DUMP=1), as madeira-bcd has it. Build 50
+ * wrote all 620756992 bytes of the pool (no page was left a hole) to Documents, where
+ * the Files app shows it and backups copy it, on a stray StikDebug BRK in
+ * jit26_detach that the SIGTRAP handler then skipped: no game had crashed.
  *
  * Both one-shot dumps used to write the whole 896MB RW alias. The production
  * pool is not NO_FOOTPRINT (see jit_make_region_no_footprint), and a read fault
@@ -2399,9 +2403,11 @@ static void ios_dump_jit_pool( const char *why )
     int fd;
 
     const char *jd = getenv( "MADEIRA_JIT_DUMP" );
-    /* 0: no Documents/fex-jit-dump.bin; by default the JIT pool is written (sparse) on the
-     * first mach UNHANDLED / SIGILL, and pulled with the log (ml1242) */
-    if ((jd && jd[0] == '0') || !ios_jit_rw_base_global || !total) return;
+    size_t no_vec = 0;
+    int vec_errno = 0;
+    /* 1: write the JIT pool (sparse) to Documents/fex-jit-dump.bin on the first mach
+     * UNHANDLED / SIGILL (ml1242); unset or 0: no dump (madeira-p81jbs) */
+    if (!jd || jd[0] != '1' || !ios_jit_rw_base_global || !total) return;
     docs = getenv( "MADEIRA_DOCS_DIR" );
     snprintf( path, sizeof(path), "%s/fex-jit-dump.bin", docs ? docs : "/tmp" );
     if ((fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0644 )) < 0)
@@ -2415,6 +2421,8 @@ static void ios_dump_jit_pool( const char *why )
         char *base = (char *)ios_jit_rw_base_global + off;
         int have_vec = len / ps <= sizeof(vec) && !mincore( base, len, vec );
 
+        if (!have_vec) { no_vec++; vec_errno = errno; }   /* the whole chunk is read, untouched pages too */
+
         for (i = 0; i < len; i += ps)
         {
             size_t n = len - i < ps ? len - i : ps;
@@ -2426,8 +2434,9 @@ static void ios_dump_jit_pool( const char *why )
 done:
     ftruncate( fd, total );
     close( fd );
-    dprintf( 2, "[jit-dump] ml1242 %s: wrote %zu of %zu pool bytes to %s (untouched pages left as holes)\n",
-             why, written, total, path );
+    dprintf( 2, "[jit-dump] ml1242 %s: wrote %zu of %zu pool bytes to %s (untouched pages left as holes; "
+             "mincore failed for %zu of %zu MB chunks, errno=%d)\n",
+             why, written, total, path, no_vec, (total + chunk - 1) / chunk, vec_errno );
 }
 
 /* The [fault-stuck] loop breaker in ios_mach_exception_thread keeps its state per thread, in
@@ -7375,7 +7384,11 @@ dispatch_guest_fault:
                      * slots to a file. Lets us disassemble FEX-emitted ARM64 offline
                      * to verify codegen correctness independently. */
                     static volatile int dumped = 0;
-                    if (cnt == 1 && __sync_bool_compare_and_swap(&dumped, 0, 1))
+                    uint32_t dump_insn = 0;
+                    /* madeira-p81jbs: not for StikDebug's BRK #0xf00d (jit26_detach), which
+                     * trap_handler skips: build 50 dumped 592MB on it with nothing crashed */
+                    if (cnt == 1 && !(ios_fault_read_insn( fault_pc, &dump_insn ) && dump_insn == 0xd43e01a0)
+                        && __sync_bool_compare_and_swap(&dumped, 0, 1))
                         ios_dump_jit_pool( "mach UNHANDLED" );
                     /* Diagnostic: query the kernel for what VM region the fault PC lives in.
                      * Helps identify mystery regions (e.g. JIT pool guard zone, wineserver heap). */

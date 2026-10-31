@@ -69,10 +69,17 @@ require('ItchLibrary.shared.sessionChanged(active: true)' in content, 'downloads
 require('ItchLibrary.shared.refreshLibrary' in (app / 'SteamGames.swift').read_text(), 'pull to refresh reloads the itch.io library')
 require('key: "env.MADEIRA_ITCH"' in (app / 'ConfigCatalog.generated.swift').read_text(), 'settings catalog: env.MADEIRA_ITCH')
 require((root / 'docs/ITCH.md').exists(), 'docs/ITCH.md')
+itch_lib = (app / 'ItchLibrary.swift').read_text()
+require('func upsertItch(_ game: ItchInstalledGame, cover: URL?, setupFinished: Bool = false)' in library
+        and 'entry.launchMode = "desktop"; entry.startServices = true' in library, 'an installer runs in the Wine desktop with services first')
+require(itch_lib.count('finishSetups()') >= 3, 'installers are finished after a session and at start')
+require('owned = Self.merge(bought, collected, added)' in itch_lib, 'the library: owned keys, collections, then games added in Madeira')
+require('ItchFindView' in (app / 'ItchGames.swift').read_text(), 'Find a game')
+require('downloadKey == 0 ? []' in api, 'a free game is asked for without a key')
 
 # ------------------------------------------------------------------ compiled Swift
 lib = (app / 'ItchLibrary.swift').read_text()
-program = lib[lib.index('/// Which program starts an unpacked game.'):lib.index('/// One file download with pause')]
+program = lib[lib.index('/// Installer downloads, the kinds'):lib.index('/// One file download with pause')]
 api_core = api.replace('import Security\n', '#if canImport(FoundationNetworking)\nimport FoundationNetworking\n#endif\n')
 api_core = api_core[:api_core.index('/// The Keychain item')] + r'''
 enum ItchKeyStore {
@@ -161,6 +168,65 @@ struct Checks {
             FileManager.default.createFile(atPath: folder.appendingPathComponent(name).path, contents: Data("MZ".utf8))
         }
         require(ItchProgram.find(in: folder, title: "Whatever") == "Game/Game.exe", "find: the game's program, helpers aside")
+
+        // Free games: collections, search and pasted links; no key.
+        let free = ItchFormat.game(json(#"{"id":7,"title":"Free Thing","classification":"game","min_price":0,"platforms":{"windows":"all"},"user":{"username":"dev","display_name":"Dev"}}"#))
+        require(free?.downloadKeyID == 0 && free?.owned == false && free?.minPrice == 0 && free?.author == "Dev", "a game object: no key, its price and author")
+        require(ItchFormat.collections(json(#"{"collections":[{"id":5,"title":"A"},{"id":6}]}"#)) == [5, 6], "the account's collections")
+        let collected = ItchFormat.collectionGames(json(#"{"page":1,"per_page":30,"collection_games":[{"game_id":8,"game":{"id":8,"title":"In a collection","platforms":{"windows":"all"}}},{"gameId":9,"game":{"id":9,"title":"Mac","platforms":{"osx":"all"}}}]}"#))
+        require(collected.games.map(\.id) == [8] && collected.count == 2, "a collection's Windows games (snake_case and camelCase)")
+        require(ItchFormat.searchGames(json(#"{"games":[{"id":10,"title":"Found","minPrice":500,"platforms":{"windows":"all"}},{"id":11,"title":"Book","classification":"book"}]}"#)).map(\.minPrice) == [500],
+                "search: Windows games with their price")
+        require(ItchFormat.dataURL("https://dev.itch.io/free-thing?x=1#y")?.absoluteString == "https://dev.itch.io/free-thing/data.json"
+                && ItchFormat.dataURL("dev.itch.io/free-thing")?.absoluteString == "https://dev.itch.io/free-thing/data.json",
+                "a pasted game link: its data.json")
+        require(ItchFormat.dataURL("https://itch.io/games/free") == nil && ItchFormat.dataURL("https://api.itch.io/x") == nil
+                && ItchFormat.dataURL("https://evil.com/dev.itch.io/x") == nil && ItchFormat.dataURL("https://dev.itch.io.evil.com/x") == nil
+                && ItchFormat.dataURL("https://dev.itch.io/") == nil, "only an author's itch.io game page")
+        require(ItchFormat.pageGameID(#"<meta name="itch:path" content="games/123456"/>"#) == 123456 && ItchFormat.pageGameID("<html>") == nil,
+                "a game page's id from its itch:path tag")
+
+        // Installers: sniffed like the itch app's, run unattended into the game's folder.
+        func exe(_ marker: String) -> Data { Data("MZ".utf8) + Data(count: 4000) + Data(marker.utf8) + Data(count: 100) }
+        require(ItchSetup.kind(fileName: "game_setup.exe", head: exe("Inno Setup Setup Data (6.2.0)")) == .inno, "Inno Setup")
+        require(ItchSetup.kind(fileName: "x.exe", head: exe("NullsoftInst")) == .nsis, "NSIS")
+        require(ItchSetup.kind(fileName: "Game.msi", head: Data()) == .msi
+                && ItchSetup.kind(fileName: "x", head: Data([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])) == .msi, "MSI")
+        require(ItchSetup.kind(fileName: "MyGame-Installer.exe", head: exe("nothing")) == .other, "another installer by its name")
+        require(ItchSetup.kind(fileName: "MyGame.exe", head: exe("nothing")) == nil && ItchSetup.kind(fileName: "unins000.exe", head: exe("x")) == nil
+                && ItchSetup.kind(fileName: "setup.txt", head: Data("hello".utf8)) == nil, "the game itself, an uninstaller and a text file are not installers")
+        let inno = ItchSetup.script(kind: .inno, installer: "C:\\itch\\G\\.madeira-setup\\setup.exe", target: "C:\\itch\\G", title: "G")
+        require(inno.contains("start \"\" /wait \"C:\\itch\\G\\.madeira-setup\\setup.exe\" /SP- /SILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /DIR=\"C:\\itch\\G\"")
+                && inno.hasPrefix("@echo off\r\n") && inno.hasSuffix("echo ran>\"%~dp0ran\"\r\n"), "Inno: silent into the game's folder, CRLF, a mark once it ended")
+        let nsis = ItchSetup.script(kind: .nsis, installer: "C:\\itch\\A & B\\s.exe", target: "C:\\itch\\A & B 100%", title: "A & B")
+        require(nsis.contains("/S /D=C:\\itch\\A ^& B 100%%") && nsis.contains("\"C:\\itch\\A & B\\s.exe\""), "NSIS: /D= last, unquoted, specials escaped")
+        let msi = ItchSetup.script(kind: .msi, installer: "C:\\itch\\G\\g.msi", target: "C:\\itch\\G", title: "G")
+        require(msi.contains("msiexec /i \"C:\\itch\\G\\g.msi\" /qb /norestart TARGETDIR=\"C:\\itch\\G\""), "MSI: msiexec with a progress bar")
+        require(!ItchSetup.script(kind: .other, installer: "C:\\s.exe", target: "C:\\t", title: "x").contains("/S"), "another installer runs as it is")
+        require(ItchSetup.windowsPath("itch/My Game") == "C:\\itch\\My Game", "drive_c paths as Windows paths")
+
+        let setupGame = work.appendingPathComponent("setup-game", isDirectory: true)
+        let hidden = setupGame.appendingPathComponent(ItchSetup.folderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: true)
+        try exe("Inno Setup Setup Data").write(to: hidden.appendingPathComponent("game-setup.exe"))
+        require(ItchProgram.find(in: setupGame, title: "Game") == nil, "the hidden setup folder is never the game")
+        require(ItchSetup.installer(in: setupGame).map { "\($0.0.rawValue) \($0.1)" } == "inno .madeira-setup/game-setup.exe", "the downloaded installer")
+        let zipped = work.appendingPathComponent("zipped-setup", isDirectory: true)
+        try FileManager.default.createDirectory(at: zipped.appendingPathComponent("redist"), withIntermediateDirectories: true)
+        try exe("NullsoftInst").write(to: zipped.appendingPathComponent("Setup.exe"))
+        try exe("x").write(to: zipped.appendingPathComponent("readme.txt"))
+        require(ItchProgram.find(in: zipped, title: "Game") == nil && ItchSetup.installer(in: zipped)?.1 == "Setup.exe", "an archive with one installer")
+
+        let drive = work.appendingPathComponent("drive_c", isDirectory: true)
+        let before = Date()
+        for dir in ["Program Files (x86)/Cool Game", "Program Files/Common Files/Thing", "users/mobile/AppData/Local/Programs"] {
+            try FileManager.default.createDirectory(at: drive.appendingPathComponent(dir), withIntermediateDirectories: true)
+        }
+        require(ItchSetup.installedElsewhere(drive: drive, title: "Cool Game", since: before) == "Program Files (x86)/Cool Game",
+                "the folder an installer chose, named like the game")
+        require(ItchSetup.installedElsewhere(drive: drive, title: "Other", since: before) == "Program Files (x86)/Cool Game",
+                "the only new folder")
+        require(ItchSetup.installedElsewhere(drive: drive, title: "Other", since: Date().addingTimeInterval(3600)) == nil, "nothing new: none")
 
         // The unpacker.
         func unpack(_ name: String) -> (Result<UInt64, Error>, URL) {

@@ -48,8 +48,8 @@ one-time password, the password and the session never go into a log.
 
 | Program | List |
 |---|---|
-| `boot\ffxivboot.exe` | `ffxiv-launcher`: the Wine desktop, standard line |
-| `ffxivsetup.exe` | `ffxiv-setup`: the Wine desktop, standard line |
+| `boot\ffxivboot.exe` | `ffxiv-launcher`: the Wine desktop, services first, standard line |
+| `ffxivsetup.exe` | `ffxiv-setup`: the Wine desktop, services first, standard line (build 48: black started directly) |
 
 The game has no list of its own yet. None of this is device-tested yet.
 

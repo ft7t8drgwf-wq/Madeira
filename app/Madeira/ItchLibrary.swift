@@ -10,11 +10,14 @@ import UIKit
 // the GOG store (GOGLibrary.swift).
 //
 // itch.io decides ownership: the list is the account's owned keys (bought and claimed
-// games), and a game's files are only served for its download key. A game is one
+// games), the games in its collections and the free games added in Madeira (Find a
+// game), and a paid game's files are only served for its download key. A game is one
 // upload, its Windows file: a .zip unpacks into C:\itch\<folder>, a lone .exe goes
 // there as it is, and the game starts as its own program in Wine (the folder's
-// .itch.toml action, else its one program). itch.io games are DRM-free and need no
-// sign-in to start. `env.MADEIRA_ITCH = 0` turns the whole thing off.
+// .itch.toml action, else its one program). An installer (ItchSetup) runs once in the
+// Wine desktop, into that folder; then Play starts the game it installed. itch.io
+// games are DRM-free and need no sign-in to start. `env.MADEIRA_ITCH = 0` turns the
+// whole thing off.
 // Log tags: [itch-library], [itch-download] (game ids, counts and short reason codes;
 // never the key or account data).
 
@@ -31,6 +34,11 @@ struct ItchInstalledGame: Codable, Sendable {
     var launchExe: String
     var arguments: String
     var installBytes: Int64
+    /// Set while the download is an installer that has not installed the game yet:
+    /// `launchExe` is then ItchSetup's batch file, and Play runs the installer.
+    var setup: ItchSetup.Kind? = nil
+    /// When the installer was downloaded: a folder it made elsewhere is newer.
+    var setupSince: Date? = nil
     var programPath: String { folder + "/" + launchExe }
 }
 
@@ -53,7 +61,7 @@ enum ItchInstallError: LocalizedError {
         case .diskSpace(let needed):
             return "Not enough free space on this device: this download needs about \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)) more. Free some space, then try again."
         case .unsupportedFile(let name):
-            return "This game comes as \(name), which Madeira cannot unpack yet. Only .zip archives and .exe files install from itch.io for now."
+            return "This game comes as \(name), which Madeira cannot unpack yet. Only .zip archives, .exe files and .msi installers install from itch.io for now."
         case .noProgram:
             return "Madeira could not tell which program starts this game. Open its folder in drive_c\\itch and add the game's .exe with + in the library."
         }
@@ -65,6 +73,120 @@ enum ItchInstallError: LocalizedError {
         case .unsupportedFile: return "unsupported-file"
         case .noProgram: return "no-program"
         }
+    }
+}
+
+/// Installer downloads, the kinds the itch app's installers handle (hush: Inno Setup,
+/// NSIS, MSI), found the way it finds them, by the file's own markers. Each runs once,
+/// through a batch file in the game's hidden `.madeira-setup` folder, in the Wine
+/// desktop with Windows services first, with its unattended switches and the game's
+/// own folder as the destination; another installer runs as it is, so the player
+/// answers its questions. After the session (or the next start of Madeira), the
+/// folder's program, or a new folder of the installer's own, becomes the game.
+enum ItchSetup {
+    enum Kind: String, Codable, Sendable { case inno, nsis, msi, other }
+    static let folderName = ".madeira-setup"
+    static let scriptName = "install.bat"
+    /// Written by the batch file once the installer has ended.
+    static let ranName = "ran"
+
+    /// nil: not an installer (the game itself, or a file Madeira does not know).
+    static func kind(fileName: String, head: Data) -> Kind? {
+        let name = fileName.lowercased()
+        if name.hasSuffix(".msi") || head.starts(with: [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) { return .msi }
+        guard head.starts(with: [0x4D, 0x5A]) else { return nil }
+        func has(_ marker: String) -> Bool { head.range(of: Data(marker.utf8)) != nil }
+        if has("Inno Setup Setup Data") || has("JR.Inno.Setup") || has("InnoSetupLdrWindow") { return .inno }
+        if has("NullsoftInst") || has("Nullsoft.NSIS") { return .nsis }
+        let key = name.filter { $0.isLetter || $0.isNumber }
+        if (key.contains("setup") || key.contains("install")) && !key.contains("uninst") { return .other }
+        return nil
+    }
+
+    /// The file's first 8 MB, where installers keep their markers.
+    static func kind(of url: URL, fileName: String) -> Kind? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        return kind(fileName: fileName, head: (try? handle.read(upToCount: 8 << 20)) ?? Data())
+    }
+
+    /// C:\-style path of a folder or file relative to drive_c.
+    static func windowsPath(_ relative: String) -> String { "C:\\" + relative.replacingOccurrences(of: "/", with: "\\") }
+
+    /// The batch file: the installer, into `target`, waiting until it ends.
+    static func script(kind: Kind, installer rawInstaller: String, target rawTarget: String, title: String) -> String {
+        // A batch file doubles %; NSIS's unquoted /D= also needs cmd's other specials escaped.
+        let installer = rawInstaller.replacingOccurrences(of: "%", with: "%%")
+        let target = rawTarget.replacingOccurrences(of: "%", with: "%%")
+        let bare = ["^", "&", "|", "<", ">", "(", ")"].reduce(target) { $0.replacingOccurrences(of: $1, with: "^" + $1) }
+        let command: String
+        switch kind {
+        case .inno:
+            command = "start \"\" /wait \"\(installer)\" /SP- /SILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /DIR=\"\(target)\""
+        case .nsis:
+            // NSIS takes /D= last and unquoted, spaces and all.
+            command = "start \"\" /wait \"\(installer)\" /S /D=\(bare)"
+        case .msi:
+            command = "start \"\" /wait msiexec /i \"\(installer)\" /qb /norestart TARGETDIR=\"\(target)\" INSTALLDIR=\"\(target)\" INSTALLFOLDER=\"\(target)\""
+        case .other:
+            command = "start \"\" /wait \"\(installer)\""
+        }
+        let safeTitle = title.filter { $0 != "%" && $0 != "\r" && $0 != "\n" && $0 != "^" && $0 != "&" && $0 != "|" && $0 != "<" && $0 != ">" }
+        return ["@echo off", "rem Madeira: the itch.io installer of \(safeTitle), into its own folder (ItchLibrary.swift).", command,
+                "echo ran>\"%~dp0\(ranName)\"", ""]
+            .joined(separator: "\r\n")
+    }
+
+    /// The folder's one installer, relative to it: the hidden setup folder's, else the
+    /// only program within two levels that is an installer.
+    static func installer(in folder: URL) -> (ItchSetup.Kind, String)? {
+        let fm = FileManager.default
+        let hidden = folder.appendingPathComponent(ItchSetup.folderName, isDirectory: true)
+        var found: [(ItchSetup.Kind, String)] = []
+        for name in (try? fm.contentsOfDirectory(atPath: hidden.path)) ?? [] where name.lowercased() != scriptName && name != ranName {
+            if let kind = ItchSetup.kind(of: hidden.appendingPathComponent(name), fileName: name) { found.append((kind, ItchSetup.folderName + "/" + name)) }
+        }
+        if found.isEmpty, let walker = fm.enumerator(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            let base = folder.resolvingSymlinksInPath().standardizedFileURL.path
+            for case let url as URL in walker {
+                let relative = String(url.resolvingSymlinksInPath().standardizedFileURL.path.dropFirst(base.count + 1))
+                if relative.split(separator: "/").count > 2 { walker.skipDescendants(); continue }
+                let ext = url.pathExtension.lowercased()
+                guard ext == "exe" || ext == "msi" else { continue }
+                if let kind = ItchSetup.kind(of: url, fileName: url.lastPathComponent) { found.append((kind, relative)) }
+            }
+        }
+        return found.count == 1 ? found[0] : nil
+    }
+
+    /// A folder the installer made somewhere else (its own choice of Program Files,
+    /// AppData\Local\Programs or C:\): the one named like the game, else the only new
+    /// one. Relative to drive_c.
+    static func installedElsewhere(drive: URL, title: String, since: Date) -> String? {
+        let fm = FileManager.default
+        func key(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let skip: Set<String> = ["windows", "users", "programdata", "program files", "program files (x86)", "itch", "madeira downloads",
+                                 "madeira-games", "common files", "windows nt", "internet explorer", "windows media player",
+                                 "windowspowershell", "microsoft", "steam", "gog games", "epic games"]
+        var roots = ["Program Files", "Program Files (x86)", ""]
+        for user in (try? fm.contentsOfDirectory(atPath: drive.appendingPathComponent("users").path)) ?? [] where !user.hasPrefix(".") {
+            roots.append("users/\(user)/AppData/Local/Programs")
+        }
+        var fresh: [String] = []
+        for root in roots {
+            let url = root.isEmpty ? drive : drive.appendingPathComponent(root, isDirectory: true)
+            guard let names = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey, .creationDateKey]) else { continue }
+            for child in names where !child.lastPathComponent.hasPrefix(".") && !skip.contains(child.lastPathComponent.lowercased())
+                && !child.lastPathComponent.lowercased().hasPrefix("madeira") {
+                let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .creationDateKey])
+                guard values?.isDirectory == true, let made = values?.creationDate, made >= since.addingTimeInterval(-60) else { continue }
+                fresh.append(root.isEmpty ? child.lastPathComponent : root + "/" + child.lastPathComponent)
+            }
+        }
+        let wanted = key(title)
+        let named = fresh.filter { let k = key(($0 as NSString).lastPathComponent); return !wanted.isEmpty && (k == wanted || k.contains(wanted) || wanted.contains(k)) && !k.isEmpty }
+        if named.count == 1 { return named[0] }
+        return fresh.count == 1 ? fresh[0] : nil
     }
 }
 
@@ -207,7 +329,11 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
 
     @Published private(set) var signedIn = false
     @Published private(set) var accountName: String?
+    /// The library: owned keys, then the account's collections, then the games added
+    /// in Madeira; a game appears once, with its key when the account has one.
     @Published private(set) var owned: [ItchOwnedGame] = []
+    /// The free games added in Madeira (Find a game).
+    @Published private(set) var added: [ItchOwnedGame] = []
     @Published private(set) var installed: [Int: ItchInstalledGame] = [:]
     @Published private(set) var refreshing = false
     @Published private(set) var libraryUpdated: Date?
@@ -249,6 +375,9 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
     }
     private static var cacheURL: URL { support.appendingPathComponent("itch-library.json") }
     private static var installedURL: URL { support.appendingPathComponent("itch-installed.json") }
+    /// The free games added in Madeira (Find a game), per account.
+    private static var addedURL: URL { support.appendingPathComponent("itch-added.json") }
+    private struct Added: Codable { var account: String; var games: [ItchOwnedGame] }
     /// Downloads in progress: the file, and what a pause kept for resuming it.
     private static var downloadsFolder: URL { support.appendingPathComponent("itch-downloads", isDirectory: true) }
     private static func archiveURL(_ id: Int, upload: ItchUpload) -> URL {
@@ -267,6 +396,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
     func start() {
         guard Self.enabled, !started else { return }
         started = true
+        finishSetups()
         NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.beginGrace() }
         }
@@ -282,7 +412,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             let name = await api.accountName()
             signedIn = await api.signedIn
             accountName = name
-            if let name { loadCache(account: name) }
+            if let name { loadCache(account: name); loadAdded(account: name) }
             ItchLog.event("[itch-library] start signed-in=\(signedIn ? 1 : 0) cached=\(owned.count) installed=\(installed.count)")
             if signedIn, Date().timeIntervalSince(libraryUpdated ?? .distantPast) > 6 * 3600 {
                 await refreshLibrary(interactive: false)
@@ -302,6 +432,26 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
         try? FileManager.default.createDirectory(at: Self.support, withIntermediateDirectories: true)
         try? JSONEncoder().encode(Cache(version: 1, updated: updated, account: Self.accountKey(accountName), games: owned))
             .write(to: Self.cacheURL, options: .atomic)
+    }
+
+    private func loadAdded(account: String) {
+        guard let data = try? Data(contentsOf: Self.addedURL), data.count <= 8 << 20,
+              let list = try? JSONDecoder().decode(Added.self, from: data), list.account == Self.accountKey(account) else { added = []; return }
+        added = list.games
+        owned = Self.merge(owned, added)
+    }
+
+    private func writeAdded() {
+        guard let accountName else { return }
+        try? FileManager.default.createDirectory(at: Self.support, withIntermediateDirectories: true)
+        try? JSONEncoder().encode(Added(account: Self.accountKey(accountName), games: added)).write(to: Self.addedURL, options: .atomic)
+    }
+
+    /// Lists in order of precedence; a game keeps its first appearance (an owned key first).
+    static func merge(_ lists: [ItchOwnedGame]...) -> [ItchOwnedGame] {
+        var seen = Set<Int>()
+        return lists.joined().filter { seen.insert($0.id).inserted }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 
     private func loadInstalled() {
@@ -325,6 +475,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
         signedIn = true
         accountName = name
         owned = []; libraryUpdated = nil; choices = [:]
+        loadAdded(account: name)
         ItchLog.event("[itch-library] signed in")
         await refreshLibrary(interactive: true)
     }
@@ -335,7 +486,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
         for id in Array(downloads.keys) { pause(id) }
         Task { await api.signOut() }
         try? FileManager.default.removeItem(at: Self.cacheURL)
-        signedIn = false; accountName = nil; owned = []; libraryUpdated = nil; choices = [:]
+        signedIn = false; accountName = nil; owned = []; added = []; libraryUpdated = nil; choices = [:]
         ItchLog.event("[itch-library] signed out")
     }
 
@@ -354,13 +505,49 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
         refreshing = true
         defer { refreshing = false }
         do {
-            owned = try await api.ownedGames().sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            let bought = try await api.ownedGames()
+            // Collections are extra: one that fails leaves the owned games.
+            var collected: [ItchOwnedGame] = []
+            do { collected = try await api.collectionGames() } catch {
+                handle(error, context: "collections", report: false)
+            }
+            owned = Self.merge(bought, collected, added)
             libraryUpdated = Date()
             writeCache()
-            ItchLog.event("[itch-library] owned games=\(owned.count)")
+            ItchLog.event("[itch-library] owned games=\(bought.count) collections=\(collected.count) added=\(added.count) shown=\(owned.count)")
         } catch {
             handle(error, context: "library", report: interactive)
         }
+    }
+
+    // MARK: Finding games
+
+    /// itch.io's search, for Find a game.
+    func search(_ query: String) async throws -> [ItchOwnedGame] { try await api.search(query) }
+
+    /// The game a pasted itch.io link names.
+    func lookUp(link: String) async throws -> ItchOwnedGame { try await api.game(link: link) }
+
+    /// Whether a pasted text is an itch.io game link.
+    nonisolated static func isLink(_ text: String) -> Bool { ItchFormat.dataURL(text) != nil && text.contains(".itch.io") }
+
+    /// Adds a game found in Madeira to the library (this device's list for the account).
+    func add(_ game: ItchOwnedGame) {
+        guard !owned.contains(where: { $0.id == game.id }) else { return }
+        added.append(game)
+        writeAdded()
+        owned = Self.merge(owned, [game])
+        writeCache()
+        ItchLog.event("[itch-library] added id=\(game.id) free=\((game.minPrice ?? 0) == 0 ? 1 : 0)")
+    }
+
+    /// Takes an added game off the list (one that is not installed).
+    func removeAdded(_ id: Int) {
+        guard installed[id] == nil, added.contains(where: { $0.id == id }) else { return }
+        added.removeAll { $0.id == id }
+        writeAdded()
+        owned.removeAll { $0.id == id && $0.downloadKeyID == 0 }
+        writeCache()
     }
 
     /// Looks up the upload Madeira would install (the download sheet, the update check).
@@ -458,7 +645,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             await loadChoice(id, force: true)
             guard case .upload(let upload)? = choices[id] else { throw ItchAPIError.noWindowsUpload }
             let name = upload.filename.lowercased()
-            let isZip = name.hasSuffix(".zip"), isExe = name.hasSuffix(".exe")
+            let isZip = name.hasSuffix(".zip"), isExe = name.hasSuffix(".exe") || name.hasSuffix(".msi")
             // A butler build's download is a .zip of the build whatever the upload's name.
             guard isZip || isExe || upload.buildID != 0 else {
                 throw ItchInstallError.unsupportedFile("." + ((upload.filename as NSString).pathExtension.isEmpty ? "unknown" : (upload.filename as NSString).pathExtension))
@@ -494,6 +681,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             try Task.checkCancellation()
             downloads[id]?.progress = ItchDownloadProgress(phase: .unpacking)
             let title = game.title
+            let wasSetup = record?.setup != nil
             let installBytes: Int64 = try await Task.detached(priority: .userInitiated) {
                 let fm = FileManager.default
                 try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -506,17 +694,45 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
                     try? fm.removeItem(at: archive)
                     return Int64(bytes)
                 }
-                // A lone program: the game itself (or its installer, which then runs from the library).
+                // A lone program: the game itself, or its installer (ItchSetup), kept in the
+                // hidden setup folder so that the game it installs is the folder's program.
                 guard isExe else { throw ItchArchiveError.notZip }
-                if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
-                try fm.createDirectory(at: target, withIntermediateDirectories: true)
-                let program = target.appendingPathComponent(GOGLibrary.safeName(upload.filename))
+                let file = GOGLibrary.safeName(upload.filename)
+                let setup = ItchSetup.kind(of: archive, fileName: file) != nil
+                // An update of a game that was installed by its installer replaces only the
+                // installer: the installer updates the folder itself.
+                let keepGame = setup && record != nil && !wasSetup
+                if fm.fileExists(atPath: target.path) && !keepGame { try fm.removeItem(at: target) }
+                let place = setup ? target.appendingPathComponent(ItchSetup.folderName, isDirectory: true) : target
+                if setup, fm.fileExists(atPath: place.path) { try fm.removeItem(at: place) }
+                try fm.createDirectory(at: place, withIntermediateDirectories: true)
+                let program = place.appendingPathComponent(file)
                 try fm.moveItem(at: archive, to: program)
                 return (try? fm.attributesOfItem(atPath: program.path)[.size] as? Int64) ?? upload.size
             }.value
-            guard let program = ItchProgram.find(in: target, title: title) else { throw ItchInstallError.noProgram }
-            let finished = ItchInstalledGame(gameID: id, title: title, folder: folder, uploadID: upload.id, buildID: upload.buildID,
-                                             version: upload.version, launchExe: program, arguments: "", installBytes: installBytes)
+            var finished = ItchInstalledGame(gameID: id, title: title, folder: folder, uploadID: upload.id, buildID: upload.buildID,
+                                             version: upload.version, launchExe: "", arguments: "", installBytes: installBytes)
+            // A downloaded installer waits in the hidden setup folder (it runs even when an
+            // update finds the game it installed before); else the folder's program; else
+            // the archive's one installer.
+            let downloadedSetup = FileManager.default.fileExists(atPath: target.appendingPathComponent(ItchSetup.folderName).path)
+            let program = downloadedSetup ? nil : ItchProgram.find(in: target, title: title)
+            if let program {
+                finished.launchExe = program
+            } else if let found = ItchSetup.installer(in: target) {
+                let (kind, installer) = found
+                // An installer (alone, or the only one in the archive): Play runs it once.
+                let script = target.appendingPathComponent(ItchSetup.folderName + "/" + ItchSetup.scriptName)
+                try FileManager.default.createDirectory(at: script.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data(ItchSetup.script(kind: kind, installer: ItchSetup.windowsPath(folder + "/" + installer),
+                                          target: ItchSetup.windowsPath(folder), title: title).utf8).write(to: script, options: .atomic)
+                finished.launchExe = ItchSetup.folderName + "/" + ItchSetup.scriptName
+                finished.setup = kind
+                finished.setupSince = Date()
+                ItchLog.event("[itch-setup] ready id=\(id) kind=\(kind.rawValue)")
+            } else {
+                throw ItchInstallError.noProgram
+            }
             installed[id] = finished
             writeInstalled()
             downloads[id] = nil
@@ -535,6 +751,46 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
         pump()
     }
 
+    // MARK: Installers
+
+    /// Installers that ran: the game they installed becomes the program (its own folder,
+    /// or the one the installer chose), and the installer goes. One that has not run yet,
+    /// or found nothing, stays for Play to run again. After every session and at start.
+    func finishSetups() {
+        guard !inSession else { return }
+        for (id, record) in installed where record.setup != nil {
+            let target = Self.drive.appendingPathComponent(record.folder, isDirectory: true)
+            // Only once the installer has run (an update's installer finds the old game there).
+            guard FileManager.default.fileExists(atPath: target.appendingPathComponent(ItchSetup.folderName + "/" + ItchSetup.ranName).path) else { continue }
+            var folder = record.folder
+            var program = ItchProgram.find(in: target, title: record.title)
+            if program == nil, let since = record.setupSince,
+               let other = ItchSetup.installedElsewhere(drive: Self.drive, title: record.title, since: since) {
+                program = ItchProgram.find(in: Self.drive.appendingPathComponent(other, isDirectory: true), title: record.title)
+                if program != nil { folder = other }
+            }
+            guard let program else {
+                // It ran and installed nothing Madeira can find: Play runs it again.
+                try? FileManager.default.removeItem(at: target.appendingPathComponent(ItchSetup.folderName + "/" + ItchSetup.ranName))
+                ItchLog.event("[itch-setup] nothing installed id=\(id)")
+                continue
+            }
+            let fm = FileManager.default
+            try? fm.removeItem(at: target.appendingPathComponent(ItchSetup.folderName, isDirectory: true))
+            if folder != record.folder, ((try? fm.contentsOfDirectory(atPath: target.path)) ?? []).isEmpty { try? fm.removeItem(at: target) }
+            var done = record
+            done.folder = folder
+            done.launchExe = program
+            done.setup = nil
+            done.setupSince = nil
+            installed[id] = done
+            writeInstalled()
+            let cover = game(id)?.cover, finished = done
+            Task { await LibraryModel.shared.upsertItch(finished, cover: cover, setupFinished: true) }
+            ItchLog.event("[itch-setup] installed id=\(id) kind=\(record.setup?.rawValue ?? "") own-folder=\(folder == record.folder ? 1 : 0)")
+        }
+    }
+
     // MARK: Sessions and the background
 
     /// A game session is starting or ended: downloads pause for it and continue afterwards. Idempotent.
@@ -546,6 +802,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             for id in queue { resumeAfterSession.insert(id); downloads[id]?.state = .paused }
             queue.removeAll()
         } else {
+            finishSetups()
             let resume = resumeAfterSession.sorted()
             resumeAfterSession.removeAll()
             for id in resume { enqueue(id, kind: downloads[id]?.kind ?? .install) }
