@@ -900,10 +900,10 @@ OVERLAY = {
                         "`bl`, so the CPU's return predictor follows guest calls. 0: the stack as before. Read when a "
                         "program starts."},
     "env.MADEIRA_SMC_WRITE_EMULATE": {"category": "x86 emulation (FEX)", "title": "Finish JIT code-cache writes without re-translating",
-                "kind": "bool", "default": "1",
-                "note": "Default on. A store into a write-trapped page of plain x64 memory (a Java JIT's code cache, "
+                "kind": "bool", "default": "0",
+                "note": "Default off (it made Project Zomboid slower on build 60). 1 turns it on: a store into a write-trapped page of plain x64 memory (a Java JIT's code cache, "
                         "Project Zomboid) that touches no translated code is completed through a second mapping "
-                        "instead of throwing away every translation of the 16 KB page; [smc-emu] log lines. 0: every "
+                        "instead of throwing away every translation of the 16 KB page; [smc-emu] log lines. Off: every "
                         "such write invalidates the page as before. Read when a program starts."},
     "env.MADEIRA_FEX_EC_RET_DIRECT": {"category": "x86 emulation (FEX)", "title": "Returns from native code straight into the JIT",
                 "kind": "bool", "default": "1",
