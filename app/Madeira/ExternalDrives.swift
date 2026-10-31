@@ -615,19 +615,53 @@ struct ExternalDrivesSection: View {
             failed("That is not a folder. Drag the folder itself, not a file inside it.")
             return
         }
+        let inPlaceOffered = provider.hasRepresentationConforming(toTypeIdentifier: type, fileOptions: .openInPlace)
+        LogStore.shared.log("[external] dropped \(type): open-in-place offered=\(inPlaceOffered ? 1 : 0)"
+            + " name=\(provider.suggestedName == nil ? 0 : 1)")
         _ = provider.loadInPlaceFileRepresentation(forTypeIdentifier: type) { url, inPlace, error in
             // Held across the hop to the main thread; add() takes its own access and keeps it.
             let scoped = url?.startAccessingSecurityScopedResource() ?? false
             Task { @MainActor in
                 defer { if scoped { url?.stopAccessingSecurityScopedResource() } }
                 LogStore.shared.log("[external] dropped folder: url=\(url == nil ? 0 : 1) in-place=\(inPlace ? 1 : 0)"
-                    + " scoped=\(scoped ? 1 : 0)" + (error.map { " error=\($0.localizedDescription)" } ?? ""))
-                guard let url else { failed(error?.localizedDescription ?? "Madeira could not open that folder."); return }
-                // A copy would fill this device and is not the drive: only the folder itself will do.
-                guard inPlace else { failed("Files handed over a copy instead of the folder itself."); return }
-                done(url)
+                    + " scoped=\(scoped ? 1 : 0)" + (error.map { " error=\(Self.describe($0))" } ?? ""))
+                if let url, inPlace { done(url); return }
+                // Build 58: Files gave neither a URL nor an error here, for a drive and for
+                // a Downloads folder alike. The older item API hands file-provider items
+                // over as a URL of their own, so it is tried next.
+                self.loadItem(provider, type: type, done: done, failed: failed)
             }
         }
+    }
+
+    private func loadItem(_ provider: NSItemProvider, type: String, done: @escaping @MainActor (URL) -> Void,
+                          failed: @escaping @MainActor (String) -> Void) {
+        provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
+            let url = item as? URL
+            let scoped = url?.startAccessingSecurityScopedResource() ?? false
+            let kind = item.map { String(describing: Swift.type(of: $0)) } ?? "nil"
+            Task { @MainActor in
+                defer { if scoped { url?.stopAccessingSecurityScopedResource() } }
+                LogStore.shared.log("[external] dropped folder by item: item=\(kind) url=\(url == nil ? 0 : 1)"
+                    + " scoped=\(scoped ? 1 : 0)" + (url.map { " copy=\(Self.isOurCopy($0) ? 1 : 0)" } ?? "")
+                    + (error.map { " error=\(Self.describe($0))" } ?? ""))
+                // A copy would fill this device and is not the drive: only the folder itself will do.
+                if let url, !Self.isOurCopy(url) { done(url); return }
+                if url != nil { failed("Files handed over a copy instead of the folder itself."); return }
+                failed(error.map { Self.describe($0) } ?? "Files did not hand Madeira the folder.")
+            }
+        }
+    }
+
+    /// A path inside Madeira's own storage: a copy iOS made for us, not the folder.
+    private static func isOurCopy(_ url: URL) -> Bool {
+        let home = URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path
+        return url.resolvingSymlinksInPath().path.hasPrefix(home + "/")
+    }
+
+    private static func describe(_ error: Error) -> String {
+        let ns = error as NSError
+        return "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
     }
 }
 
