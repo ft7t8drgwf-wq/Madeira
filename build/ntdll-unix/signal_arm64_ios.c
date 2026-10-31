@@ -3789,6 +3789,26 @@ static void *ios_mach_exception_thread( void *arg )
                         case 0x79400000: /* LDRH Wt */
                             if (rt != 31) state.__x[rt] = *(uint16_t *)ea;
                             emulated = 1; break;
+                        /* unsigned-offset immediate signed loads, base x18.
+                         * wow64.dll's `ldrsw x28,[x18,#0x180c]` (TEB64
+                         * WowTebOffset, insn b9980e5c) on a thread whose x18 was
+                         * 0 ended Battle.net.exe on build 58 (2026-10-31,
+                         * "[x18-emul3] UNRECOGNIZED insn=b9980e5c"). */
+                        case 0xb9800000: /* LDRSW Xt */
+                            if (rt != 31) state.__x[rt] = (uint64_t)(int64_t)*(int32_t *)ea;
+                            emulated = 1; break;
+                        case 0x39800000: /* LDRSB Xt */
+                            if (rt != 31) state.__x[rt] = (uint64_t)(int64_t)*(int8_t *)ea;
+                            emulated = 1; break;
+                        case 0x39c00000: /* LDRSB Wt */
+                            if (rt != 31) state.__x[rt] = (uint32_t)(int32_t)*(int8_t *)ea;
+                            emulated = 1; break;
+                        case 0x79800000: /* LDRSH Xt */
+                            if (rt != 31) state.__x[rt] = (uint64_t)(int64_t)*(int16_t *)ea;
+                            emulated = 1; break;
+                        case 0x79c00000: /* LDRSH Wt */
+                            if (rt != 31) state.__x[rt] = (uint32_t)(int32_t)*(int16_t *)ea;
+                            emulated = 1; break;
                         /* unsigned-offset immediate stores, base x18 */
                         case 0xf9000000: /* STR Xt */
                             *(uint64_t *)ea = (rt == 31) ? 0 : state.__x[rt];
