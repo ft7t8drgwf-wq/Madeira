@@ -330,6 +330,8 @@ for ident in ('rockstar-launcher-setup', 'ubisoft-connect-setup', 'battle-net-se
 for ident in ('ubisoft-connect', 'battle-net'):
     assert not any(line.startswith('env.MADEIRA_FREE_DELAY_MS') for line in presets[ident]['lines']), ident
 assert 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist' in presets['rockstar-launcher']['lines']
+assert presets['ubisoft-connect']['version'] >= 3 and 'local-write-target = upc.exe;UbisoftConnect.exe;UplayWebCore.exe' in presets['ubisoft-connect']['lines'], \
+    'Ubisoft Connect: upc.exe may write into its own code (its API hooks)'
 assert 'env.WINEDLLOVERRIDES = locationapi=d' in presets['battle-net']['lines'], 'Battle.net without Windows\' location service'
 # Final Fantasy XIV's launcher is Internet Explorer's engine, not Chromium: the standard line, in the Wine
 # desktop with services first (v2: its InstallShield installer only ran that way on build 48).

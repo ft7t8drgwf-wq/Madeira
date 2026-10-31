@@ -26,7 +26,7 @@ folder, and each installer by the name it downloads with:
 
 | Program | List |
 |---|---|
-| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v2) |
+| `Ubisoft Game Launcher\UbisoftConnect.exe`, `upc.exe`, `Uplay.exe` | `ubisoft-connect` (v3) |
 | `UbisoftConnectInstaller.exe` | `ubisoft-connect-setup` |
 | `Battle.net\Battle.net Launcher.exe`, `Battle.net.exe` | `battle-net` (v2) |
 | `Battle.net-Setup.exe` | `battle-net-setup` |
@@ -53,12 +53,16 @@ layout would take.
 
 When a program raises a Windows error box (NtRaiseHardError), Wine never shows
 it; wine patch 0016 logs its text as `[hard-error]` lines. On build 48, upc.exe
-raised one (status 50000018) and closed with 0xdeadc0de.
+raised one (status 50000018) and closed with 0xdeadc0de; build 58's log
+gave its text, `Error at hooking API "LdrFindResource_U"`. upc.exe hooks ntdll by
+writing into its own code, and Madeira's wineserver denies a write into a
+pseudo-process unless its program is a `local-write-target`, so Ubisoft Connect's
+list version 3 names upc.exe, UbisoftConnect.exe and UplayWebCore.exe.
 
 Battle.net's list also turns off Windows' location service
 (`env.WINEDLLOVERRIDES = locationapi=d`), which the client stops on under Wine.
 
-The Ubisoft Connect and Battle.net version 2 lists are not device-tested yet.
+Battle.net's version 2 list works on build 58 (Cameron, 2026-10-31; slow, its window is 32-bit Chromium). Ubisoft Connect's version 3 is not device-tested yet.
 
 ## Library sections
 
