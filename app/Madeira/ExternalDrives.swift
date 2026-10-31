@@ -1,7 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import BackgroundTasks
-import AppIntents
 
 /// Folders the user picked outside the app, usually on a USB or SSD drive.
 ///
@@ -443,7 +442,7 @@ struct ExternalDrivesSection: View {
                     Button("Find games on \(folder.name)") { scanning = folder }
                 }
             }
-            Button("Add drive or folder") { ExternalFolderPicker.shared.present(added) }
+            Button("Add drive or folder") { ExternalFolderPicker.shared.start(added) }
                 // Anything is let in so the log shows every drop; dropped() picks the folder out.
                 .onDrop(of: [.folder, .directory, .item], isTargeted: $dropTarget) { providers in
                     guard let provider = providers.first else { return false }
@@ -460,7 +459,7 @@ struct ExternalDrivesSection: View {
             }
             if let error { Text(error).foregroundStyle(.red) }
         } header: { Text("External drives") } footer: {
-            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive. If Open does nothing in the picker, drag the folder from the Files app onto Add drive or folder, or use the Shortcuts app's Add Drive Folder to Madeira action.")
+            Text("Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive. If Madeira is signed with an App ID other than its bundle ID, iOS does not let the picker hand it a folder, so Add drive or folder opens a drop screen instead: drag the folder there from the Files app.")
         }
         .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible, presenting: removing) { folder in
@@ -492,6 +491,27 @@ struct ExternalDrivesSection: View {
                                           UIDropInteractionDelegate {
     static let shared = ExternalFolderPicker()
     private var done: (@MainActor (URL) -> Void)?
+
+    /// Add drive or folder. A copy signed with an App ID other than its bundle ID
+    /// cannot take a folder from the picker on iOS 27.2 (builds 47 to 58), so it
+    /// gets the drop screen, which can still open the picker.
+    func start(_ done: @escaping @MainActor (URL) -> Void) {
+        guard FolderPickerSigning.signedAppID != nil else { present(done); return }
+        guard let top = Self.topController() else {
+            LogStore.shared.log("[external] drop screen: no window to show it from")
+            return
+        }
+        let screen = FolderDropController(done: done, pick: { [weak self] in self?.present(done) })
+        LogStore.shared.log("[external] drop screen shown (signed App ID differs from the bundle ID)")
+        top.present(UINavigationController(rootViewController: screen), animated: true)
+    }
+
+    static func topController() -> UIViewController? {
+        guard var top = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController else { return nil }
+        while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
+        return top
+    }
 
     func present(_ done: @escaping @MainActor (URL) -> Void) {
         guard var top = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
@@ -557,7 +577,12 @@ struct ExternalDrivesSection: View {
         UIDropProposal(operation: session.hasItemsConforming(toTypeIdentifiers: Self.folderTypes) ? .copy : .forbidden)
     }
 
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidEnd session: UIDropSession) {
+        LogStore.shared.log("[external] drag over the window ended")
+    }
+
     func dropInteraction(_ interaction: UIDropInteraction, performDrop session: UIDropSession) {
+        LogStore.shared.log("[external] folder dropped on the window")
         guard let provider = session.items.first?.itemProvider else { return }
         dropped(provider, done: { url in
             do {
@@ -606,54 +631,127 @@ struct ExternalDrivesSection: View {
     }
 }
 
-/// Shortcuts › Add Drive Folder to Madeira: a third way to hand Madeira a folder.
-/// On a copy signed with a different App ID neither the picker's Open button nor a
-/// drop from Files gets the folder through (builds 47 to 50), so here the Shortcuts
-/// app picks it in its own process and passes it in. Only the folder itself is
-/// added; a copy Shortcuts made inside Madeira's own storage is refused.
-/// iOS 18 and newer: the folder parameter's supportedContentTypes form of @Parameter is
-/// iOS 18 API, and the app still installs on iOS 17 (deployment target 17.0).
-@available(iOS 18.0, *)
-struct AddDriveFolderIntent: AppIntent {
-    static var title: LocalizedStringResource = "Add Drive Folder to Madeira"
-    static var description = IntentDescription("Adds a folder, usually on a USB drive, to Madeira's External drives.")
-    static var openAppWhenRun = true
+/// The drop screen: one plain UIKit view and one drop target, so no SwiftUI row
+/// takes the drag first. On build 58 a folder dragged over Settings reached the
+/// window (canHandle ran 20 times as it crossed the rows) but the drop never
+/// happened, and Files threw the folder away.
+@MainActor final class FolderDropController: UIViewController, UIDropInteractionDelegate {
+    private let done: @MainActor (URL) -> Void
+    private let pick: @MainActor () -> Void
+    private let box = UIView()
+    private let label = UILabel()
+    private let hint = "Open the Files app, press and hold the drive or folder, and drag it here.\n\n"
+        + "On iPhone: keep holding it, swipe up with another finger to go home, open Madeira, and let go anywhere on this screen."
+    private var proposed: UIDropOperation?
 
-    @Parameter(title: "Folder", supportedContentTypes: [.folder])
-    var folder: IntentFile
+    init(done: @escaping @MainActor (URL) -> Void, pick: @escaping @MainActor () -> Void) {
+        self.done = done
+        self.pick = pick
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    struct Failure: Error, CustomLocalizedStringResourceConvertible {
-        let message: String
-        var localizedStringResource: LocalizedStringResource { "\(message)" }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Add drive or folder"
+        view.backgroundColor = .systemBackground
+        navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .cancel, primaryAction: UIAction { [weak self] _ in
+            LogStore.shared.log("[external] drop screen cancelled")
+            self?.dismiss(animated: true)
+        })
+        box.layer.cornerRadius = 20
+        box.layer.borderWidth = 2
+        box.layer.borderColor = UIColor.systemBlue.cgColor
+        box.backgroundColor = .secondarySystemBackground
+        let icon = UIImageView(image: UIImage(systemName: "externaldrive.badge.plus"))
+        icon.tintColor = .systemBlue
+        icon.contentMode = .scaleAspectFit
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 56)
+        label.text = hint
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.font = .preferredFont(forTextStyle: .body)
+        let picker = UIButton(configuration: .plain(), primaryAction: UIAction(title: "Use the folder picker instead") { [weak self] _ in
+            guard let self else { return }
+            let pick = self.pick
+            self.dismiss(animated: true) { pick() }
+        })
+        let stack = UIStackView(arrangedSubviews: [icon, label])
+        stack.axis = .vertical
+        stack.spacing = 20
+        stack.alignment = .center
+        for subview in [box, stack, picker] as [UIView] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(subview)
+        }
+        let guide = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            box.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 20),
+            box.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -20),
+            box.topAnchor.constraint(equalTo: guide.topAnchor, constant: 20),
+            box.bottomAnchor.constraint(equalTo: picker.topAnchor, constant: -12),
+            stack.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -24),
+            stack.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+            picker.centerXAnchor.constraint(equalTo: guide.centerXAnchor),
+            picker.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -12),
+        ])
+        // On the whole screen, so a drop anywhere on it counts.
+        view.addInteraction(UIDropInteraction(delegate: self))
     }
 
-    @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        guard let url = folder.fileURL else {
-            LogStore.shared.log("[external] shortcut gave no folder URL (name \(folder.filename))")
-            throw Failure(message: "Shortcuts did not pass Madeira the folder itself.")
-        }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let home = URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path
-        let copied = url.resolvingSymlinksInPath().path.hasPrefix(home + "/")
-        LogStore.shared.log("[external] shortcut gave a folder: scoped=\(scoped ? 1 : 0) copy=\(copied ? 1 : 0)")
-        // A copy would fill this device and is not the drive: only the folder itself will do.
-        guard !copied else { throw Failure(message: "Shortcuts passed a copy of the folder, not the folder on the drive.") }
-        do { try ExternalDrives.shared.add(url) } catch {
-            LogStore.shared.log("[external] shortcut folder not added: \(error.localizedDescription)")
-            throw Failure(message: error.localizedDescription)
-        }
-        SteamGamesModel.shared.refresh()
-        return .result(dialog: "Added \(url.lastPathComponent) to Madeira's External drives.")
+    private func show(_ text: String, error: Bool) {
+        label.text = text
+        label.textColor = error ? .systemRed : .label
     }
-}
 
-@available(iOS 18.0, *)
-struct MadeiraShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        AppShortcut(intent: AddDriveFolderIntent(), phrases: ["Add a drive folder to \(.applicationName)"],
-                    shortTitle: "Add Drive Folder", systemImageName: "externaldrive")
+    private func highlight(_ on: Bool) {
+        box.backgroundColor = on ? UIColor.systemBlue.withAlphaComponent(0.15) : .secondarySystemBackground
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, canHandle session: UIDropSession) -> Bool {
+        let types = session.items.flatMap { $0.itemProvider.registeredTypeIdentifiers }
+        LogStore.shared.log("[external] drop screen: drag entered, items=\(session.items.count) types: \(types.joined(separator: ","))")
+        // Anything is let in, so a drag that is not a folder is told why instead of flying back.
+        return true
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidEnter session: UIDropSession) { highlight(true) }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
+        let operation: UIDropOperation = session.items.count == 1 ? .copy : .forbidden
+        if operation != proposed {
+            proposed = operation
+            LogStore.shared.log("[external] drop screen: proposing \(operation == .copy ? "copy" : "forbidden")"
+                + " local=\(session.localDragSession == nil ? 0 : 1)")
+        }
+        return UIDropProposal(operation: operation)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidExit session: UIDropSession) {
+        highlight(false)
+        LogStore.shared.log("[external] drop screen: drag left the screen")
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidEnd session: UIDropSession) {
+        highlight(false)
+        proposed = nil
+        LogStore.shared.log("[external] drop screen: drag ended")
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, performDrop session: UIDropSession) {
+        LogStore.shared.log("[external] drop screen: dropped")
+        guard let provider = session.items.first?.itemProvider else { return }
+        show("Opening the folder…", error: false)
+        ExternalFolderPicker.shared.dropped(provider, done: { [weak self] url in
+            guard let self else { return }
+            let done = self.done
+            self.dismiss(animated: true) { done(url) }
+        }, failed: { [weak self] message in
+            guard let self else { return }
+            LogStore.shared.log("[external] drop screen: \(message)")
+            self.show(message + "\n\n" + self.hint, error: true)
+        })
     }
 }
 
